@@ -1241,7 +1241,13 @@
       .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
       .then(function (res) {
         if (!res.ok) { UI.toast(res.d.error || '认领失败', 'error'); return; }
-        UI.toast(isAlias ? ('已归入 ' + body.parent_id + '，热重载已生效') : ('已创建 Agent ' + body.id + '，热重载已生效'), 'ok');
+        // 后端已在响应前完成 reclassify（handler._handle_post_agents），
+        // 这里立即 _agentCache=null 刷新读到的是重分类后的新数据，
+        // 不会被 _AGENT_TTL(5min) 锁住旧面板。toast 带回重分类行数作反馈。
+        var re = res.d.reclassified;
+        var extra = (typeof re === 'number' && re > 0) ? ('，重分类 ' + re + ' 行') : '';
+        UI.toast(isAlias ? ('已归入 ' + body.parent_id + '，热重载已生效' + extra)
+                        : ('已创建 Agent ' + body.id + '，热重载已生效' + extra), 'ok');
         closeClaimModal();
         _agentCache = null; getAgentStats();
       });

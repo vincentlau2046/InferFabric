@@ -22,9 +22,14 @@ def test_agent_stats_invalid_gran_400():
 def _mk_pm(tmp_path):
     from inferfabric.agent_registry import AgentRegistry
     reg = AgentRegistry(tmp_path / "builtin", tmp_path / "user")
+    events = []
     pm = SimpleNamespace(agent_registry=reg,
-                         telemetry=SimpleNamespace(query_request_log=lambda since, limit=1: []),
-                         metrics=SimpleNamespace(price_config={}))
+                         telemetry=SimpleNamespace(
+                             query_request_log=lambda since, limit=1: [],
+                             reclassify_request_log=lambda classify_fn, known_ids=None: (
+                                 events.append(("reclassify", tuple(sorted(known_ids or ())))), 2)[1]),
+                         metrics=SimpleNamespace(price_config={}),
+                         _events=events)
     return pm
 
 
@@ -45,7 +50,10 @@ def test_agents_post_creates(tmp_path):
     h._handle_post_agents(pm)
     code, data = h._sent[-1]
     assert code == 200 and data["agent"]["id"] == "curl-cli"
-    assert h._sent[-1][0] == 200
+    # reclassify 在响应前完成（前端拿到 200 即刷新，须读到重分类后的新数据），
+    # 且行数回传供前端 toast 反馈。builtin 目录不存在 → known_ids 仅含新建 user def。
+    assert pm._events == [("reclassify", ("curl-cli",))]
+    assert data["reclassified"] == 2
     # 已落盘并热重载 → classify 命中
     assert pm.agent_registry.classify("openai", {"User-Agent": "curl/8"}).agent == "curl-cli"
 

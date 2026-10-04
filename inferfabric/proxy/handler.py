@@ -1192,16 +1192,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     str(data.get("pattern") or ""),
                     str(data.get("color") or "#94a3b8"),
                 )
-            self._send_json({"agent": {
-                "id": d.id, "name": d.name, "color": d.color, "source": d.source,
-            }}, 200)
             # 认领后自动 reclassify：映射层变了，用新规则重新分类无 def 的历史行
             # （unknown + observed 残留；事实层 ua/x_app 不变）。
+            # 必须在响应前完成——前端拿到 200 即刷新 agent-stats，若 reclassify
+            # 在响应后异步进行，首次刷新会读到重分类前的旧状态，且被 5min TTL
+            # 锁住，「识别」看起来不生效（2026-10-04 线上排查根因）。
+            reclassified = 0
             try:
-                known = {d.id for d in pm.agent_registry.all()}
-                pm.telemetry.reclassify_request_log(pm.agent_registry.classify, known)
+                known = {x.id for x in pm.agent_registry.all()}
+                reclassified = pm.telemetry.reclassify_request_log(
+                    pm.agent_registry.classify, known)
             except Exception as e:
                 log.warning("post-claim reclassify failed (non-fatal): %s", e)
+            self._send_json({"agent": {
+                "id": d.id, "name": d.name, "color": d.color, "source": d.source,
+            }, "reclassified": reclassified}, 200)
         except KeyError:
             self._send_json({"error": "agent id already exists"}, 409)
         except ValueError as e:
