@@ -3,15 +3,20 @@ inferfabric/proxy/response_cache.py — 精确匹配响应缓存 (R5)
 
 使用 cachetools.LRUCache（内存 LRU，线程安全）。
 仅缓存 non-streaming / temperature=0 的 200 响应。
+空内容排除：content 非空或 tool_calls 在场才写缓存；HIT 到空内容
+旧条目时按 MISS 处理（replayed-empty）。
 """
 
 import hashlib
 import json
+import logging
 import threading
 import time
 from typing import Any, Optional
 
 from cachetools import LRUCache
+
+log = logging.getLogger("inferfabric.proxy.response_cache")
 
 
 class ResponseCache:
@@ -59,21 +64,80 @@ class ResponseCache:
             return False
         return True
 
+    # ── 空内容判定（PUT 侧排除判据）──
+
+    @staticmethod
+    def _has_content(body: Any) -> bool:
+        """空内容检测：content 非空或 tool_calls 在场才认为有实质内容。
+
+        空内容（content 为空 / 纯 thinking）多为模型的非确定性空输出，
+        回放没有价值且会误导 agent → 不缓存。
+        - OpenAI 形（choices[0].message）：content 为非空白字符串/非空
+          列表，或 tool_calls 非空 → True；纯 thinking（content 空而
+          reasoning/thinking 字段有内容）→ False
+        - Anthropic 形（content block 列表）：text（非空白）或 tool_use
+          block 在场 → True；仅 thinking block → False
+        - 无法识别的形状 → False（保守：宁可不缓存）
+        """
+        if not isinstance(body, dict):
+            return False
+        choices = body.get("choices")
+        if isinstance(choices, (list, tuple)) and choices:
+            msg = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if not isinstance(msg, dict):
+                return False
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                return True
+            if isinstance(content, (list, tuple)) and len(content) > 0:
+                return True
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, (list, tuple)) and len(tool_calls) > 0:
+                return True
+            return False
+        content = body.get("content")
+        if isinstance(content, (list, tuple)):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    return True
+                if btype == "text" and isinstance(block.get("text"), str) \
+                        and block["text"].strip():
+                    return True
+            return False
+        if isinstance(content, str) and content.strip():
+            return True
+        return False
+
     # ── 读写 ──
 
     def get(self, model: str, body: dict) -> Optional[dict]:
-        """查缓存。命中时返回完整响应体，未命中返回 None。"""
+        """查缓存。命中时返回完整响应体，未命中返回 None。
+
+        加固：HIT 但条目内容为空（旧版本写入的陈旧条目）→ 按 MISS 处理，
+        移除陈旧条目并记 replayed-empty 日志。"""
         key = self._make_key(model, body)
         with self._lock:
             try:
                 entry = self._cache[key]  # LRUCache.__getitem__ → 自动 move_to_end
-                self._hits += 1
-                return entry
             except KeyError:
                 return None
+            if not self._has_content(entry.get("body")):
+                del self._cache[key]
+                log.warning("R5 replayed-empty: stale empty entry for %s evicted "
+                            "(treating as MISS)", model)
+                return None
+            self._hits += 1
+            return entry
 
     def put(self, model: str, body: dict, response_body: dict, usage: dict) -> None:
-        """写入缓存。超过单条体积上限不缓存。"""
+        """写入缓存。超过单条体积上限不缓存；空内容（content 空 / 纯
+        thinking 且无 tool_calls）不缓存。"""
+        if not self._has_content(response_body):
+            log.debug("R5 skip empty-content response (model=%s)", model)
+            return
         key = self._make_key(model, body)
         entry = {
             "body": response_body,

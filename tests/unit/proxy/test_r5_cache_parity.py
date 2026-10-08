@@ -45,16 +45,18 @@ class TestAliasKeyParity:
         msgs = [{"role": "user", "content": "hi"}]
         body_put = {"model": "qwen-served", "messages": msgs, "temperature": 0}
         body_get = {"model": "qwen-alias", "messages": msgs, "temperature": 0}
-        cache.put("qwen-alias", body_put, {"response": "x"}, {"prompt_tokens": 1, "completion_tokens": 1})
+        resp = {"choices": [{"message": {"role": "assistant", "content": "x"}}]}
+        cache.put("qwen-alias", body_put, resp, {"prompt_tokens": 1, "completion_tokens": 1})
         hit = cache.get("qwen-alias", body_get)
         assert hit is not None, "alias GET must hit entry written with rewritten model field"
-        assert hit["body"]["response"] == "x"
+        assert hit["body"]["choices"][0]["message"]["content"] == "x"
 
     def test_model_param_still_scopes_key(self):
         """model 参数（客户端原名）仍参与键隔离 → 不同模型不串键。"""
         cache = ResponseCache()
         body = {"messages": [{"role": "user", "content": "hi"}], "temperature": 0}
-        cache.put("qwen-alias", body, {"r": 1}, {})
+        resp = {"choices": [{"message": {"role": "assistant", "content": "1"}}]}
+        cache.put("qwen-alias", body, resp, {})
         assert cache.get("other-model", body) is None
 
     def test_body_diff_still_misses(self):
@@ -62,7 +64,8 @@ class TestAliasKeyParity:
         cache = ResponseCache()
         b1 = {"messages": [{"role": "user", "content": "a"}], "temperature": 0}
         b2 = {"messages": [{"role": "user", "content": "b"}], "temperature": 0}
-        cache.put("m", b1, {"r": 1}, {})
+        resp = {"choices": [{"message": {"role": "assistant", "content": "1"}}]}
+        cache.put("m", b1, resp, {})
         assert cache.get("m", b2) is None
 
     def test_stream_still_excluded_from_key(self):
