@@ -343,16 +343,16 @@ models.d/scenarios.yaml            ← 第 2 层：场景定义侧车（单一�
 - **draft>1 自动冒烟**：`draft_tokens > 1` 的场景应用后自动跑一条短请求冒烟，失败自动还原上一次配置。
 - **场景变更事件日志**：每次生效的 apply（写应用层/重启/回滚，含失败路径）发一行 JSON 结构化事件 `[tune-event]`（from→to 场景、关键参数、池顶/超卖、MTP 冒烟、状态）——CLI 跑走 stdout、Dashboard 走 systemd journal；可按时间戳与 `/api/request_log`、指标日志 join，做「场景参数 × 指标」关联分析，持续优化部署参数。
 
-### 当前场景定义（NInfer 双模型，2026-09-26 统一调整）
+### 当前场景定义（NInfer 双模型；TXT 2026-10-09 重校准，VL 维持 2026-09-26 值）
 
 | 场景（使用档位） | Qwen38-27B-TXT（kv 池 632K） | Qwen38-27B-VL（kv 池 410K） |
 |------|------|------|
-| **short-ctx** 低延迟 | C6 · 131072 · MTP draft=2 · 超卖 19.6% | C5 · 131072 · MTP draft=2 · 超卖 37.4% |
-| **small-batch** 顶窗批处理 | C3 · 262144 · MTP draft=3 · 超卖 19.6% | C2 · 262144 · MTP draft=3 · 超卖 21.8% |
-| **big-batch** 长窗批处理 | C5 · 204800 · MTP draft=2 · 超卖 38.3% | C3 · 204800 · MTP draft=2 · 超卖 33.3% |
+| **short-ctx** 低延迟 | C6 · 131072 · MTP draft=2 · 超卖 25.0% | C5 · 131072 · MTP draft=2 · 超卖 40.5% |
+| **small-batch** 顶窗批处理 | C3 · 262144 · MTP draft=3 · 超卖 18.0% | C2 · 262144 · MTP draft=3 · 超卖 16.1% |
+| **big-batch** 长窗批处理 | C5 · 168000 · MTP draft=1 · 超卖 27.1% | C3 · 204800 · MTP draft=2 · 超卖 31.6% |
 
 > 场景名 = 使用档位（并发/用途），**不代表窗口大小**（small-batch 反而是顶窗长档）。
-> default = 模型 YAML 当前值：TXT C5 · 204800 · draft=1（池顶 1024000，超卖 38.3%）；VL C4 · 204800 · draft=1。
+> default = 模型 YAML 当前值：TXT C4 · 155000 · draft=1（池顶 620032，满载余量 1.9%，零抢占）；VL C4 · 204800 · draft=1（池顶 819200，超卖 50.0%）。
 > 场景字段白名单：`max_concurrency / max_context / default_max_tokens / prefill_chunk / enable_mtp / draft_tokens`（越界自动钳制）。
 
 ### 用法

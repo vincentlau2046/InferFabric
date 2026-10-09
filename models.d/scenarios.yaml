@@ -17,11 +17,11 @@ Qwen38-27B-TXT:
     kv_capacity: 645000
   big-batch:
     max_concurrency: 5
-    max_context: 204800
-    default_max_tokens: 32768
+    max_context: 168000
+    default_max_tokens: 24576
     prefill_chunk: 2048
     enable_mtp: true
-    draft_tokens: 2
+    draft_tokens: 1
     kv_capacity: 612000
 Qwen38-27B-VL:
   short-ctx:
