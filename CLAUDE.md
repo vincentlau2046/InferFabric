@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Identity
 
-InferFabric is a **personal AI inference OS for a single-GPU workstation** — not an API gateway, not a vLLM wrapper. It turns a GPU from scattered inference environments into a programmable unified inference service. See [项目定位](README.md#定位) for the full positioning.
+InferFabric is a **local-AI-workstation inference platform + unified gateway for NVIDIA Blackwell GPUs (RTX 5090/5090D and the RTX 50 series)**. "Gateway" here means a *stateful* gateway — it manages engine process lifecycles (start/stop/switch/sleep/wake), unlike a stateless forwarding proxy; it is not a vLLM wrapper. It turns a GPU from scattered inference environments into a programmable unified inference service. Blackwell-specific: the NInfer engine's NVFP4 weights + NVFP4 KV cache (SM 12.x) is the dedicated acceleration path; non-Blackwell cards fall back to vLLM/SGLang/Ollama routes. See [项目定位](README.md#定位) for the full positioning.
 
 ## Model Usage Constraints
 
