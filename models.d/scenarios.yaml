@@ -1,103 +1,50 @@
-# ─────────────────────────────────────────────────────────────────────────
-# models.d/scenarios.yaml — 场景预设侧车（手动配置单一真相源，供 `iff tune`）
-#
-# 结构：
-#   顶层键   = 模型名（对应 models.d/<name>.yaml 的 name: 字段）
-#   二级键   = 场景名（任意多个，自行增删改）
-#   三级键   = 引擎字段目标值
-#
-# 规则：
-#   • 本文件只定义场景；应用状态由 tune 写入 ~/.inferfabric/active_scenarios.yaml
-#     （机器本地，不进 git）。模型 YAML 对 tune 工具链只读，永不被工具链改写。
-#   • 场景字段只能是该引擎的白名单，白名单外字段自动忽略（不会污染配置）。
-#     NInfer 白名单: max_concurrency / max_context / default_max_tokens /
-#     prefill_chunk / enable_mtp / draft_tokens / kv_capacity
-#   • 同名场景：本侧车覆盖模型 YAML 内联 `presets:`（侧车优先）。
-#   • 场景名 = 使用档位（并发/用途），不代表窗口大小（如 small-batch 反而
-#     是 262144 顶窗长档）——勿按名字推 max_context。
-#   • kv_capacity 是**可选场景字段**：每个场景可独立覆盖模型的物理 KV 池
-#     （default/不写 = 模型 YAML 值：Qwen38-27B-TXT = 632000 / Qwen38-27B-VL = 410000）。
-#     为什么按场景动：KV 与并发共享同一分页显存（C 越高 state 池/graph 开销越大），
-#     高并发档降 KV 防 OOM、低并发档可提 KV 多吃额度（2026-09-28 校准：~19.65 KiB/token）。
-#     引擎硬校验兜底：kv ∈ [max_context, C×⌈W/64⌉×64]（越界启动即失败，见 ❌ 校验）。
-#     场景按 C×W 配出的窗口池顶（C×⌈W/64⌉×64）超出 kv 即为「超卖」，
-#     满载时超出部分由引擎 preempt 兜底——超卖是刻意设计，iff tune 仅 ⚠ 提示。
-#   • 引擎硬限（越界自动钳制并在预览里注明）:
-#       max_concurrency [1,8]、draft_tokens [1,5]、
-#       prefill_chunk 须 128 倍数、max_context ≤ 262144
-#   • draft_tokens > 1 未经实测（此模型仅 1 层 MTP；vLLM 下曾崩 6 次）。
-#     2026-09-26 起场景按档位启用 draft 2/3（短序列 MTP 收益高）：应用后
-#     自动 MTP 冒烟（一条短请求断言 200），失败自动还原上一次配置。
-#
-# 用法：
-#   iff tune                        列出所有模型及其场景
-#   iff tune Qwen38-27B-TXT         该模型场景清单 + 当前 live 值
-#   iff tune Qwen38-27B-TXT short-ctx  预览 diff → 确认 → 自动重启（~3-6s，
-#                                       在途请求短暂 503 + Retry-After）
-#   iff tune Qwen38-27B-TXT default 回滚到应用预设前的基线
-# ─────────────────────────────────────────────────────────────────────────
-
 Qwen38-27B-TXT:
-  # default 基线 kv_capacity = 632000（模型 YAML ninfer: 块；各场景可覆盖，不写=沿用默认）。
-  # 2026-09-26 统一调整：default 窗口 262144→204800、并发 6→5（模型 YAML 同步）；
-  # 2026-09-27 用户手动调 kv_capacity 600000→632000（+32000，已重启生效）；
-  # 2026-09-28 场景化 kv：C6 降 610000（防 OOM）、C3 提 665000、C5 维持 632000（实测终点）。
-  # 场景改名（使用档位命名）；draft_tokens 按档位启用 2/3（应用后自动冒烟）。
-  # 超卖% = (池顶 − kv) / 池顶：default 38.3% / short-ctx 22.4% / small-batch 15.4% / big-batch 38.3%
-  short-ctx:      # 低延迟档：聊天/agent 主力（C 高 + 短窗 + MTP draft=2，池顶 786432）
+  short-ctx:
     max_concurrency: 6
     max_context: 131072
     default_max_tokens: 16384
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 2
-    kv_capacity: 610000      # C6 显存最紧（state 池 12 slot + 6×graph），降 22K 留启动余量
-  small-batch:    # 顶窗长文档/多轮批处理（C 低 + 262144 顶窗 + MTP draft=3，池顶 786432）
+    kv_capacity: 590000
+  small-batch:
     max_concurrency: 3
     max_context: 262144
     default_max_tokens: 32768
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 3
-    kv_capacity: 665000      # C3 低并发显存宽裕，多吃 33K KV 额度
-  big-batch:      # 长窗口批处理（C 中高 + MTP draft=2，池顶 1024000，超卖 38.3%）
+    kv_capacity: 645000
+  big-batch:
     max_concurrency: 5
     max_context: 204800
     default_max_tokens: 32768
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 2
-    kv_capacity: 632000      # C5 实测终点（08:23 free 676MiB），保持
-
+    kv_capacity: 612000
 Qwen38-27B-VL:
-  # default 基线 kv_capacity = 410000（模型 YAML ninfer: 块；各场景可覆盖，不写=沿用默认）。
-  # 2026-09-26 统一调整:default 窗口 262144→204800（模型 YAML 同步）；
-  # 2026-09-28 场景化 kv：以 default(C4·410K) 为安全基线，C5 降 390000（防 OOM）、
-  #   C2 提 440000、C3 提 420000（VL 无实测锚点，按 TXT 校准常数相对推算，用 VL 时再实测微调）。
-  # 场景改名（使用档位命名）；draft_tokens 按档位启用 2/3（应用后自动冒烟）。
-  # 超卖% = (池顶 − kv) / 池顶：default 50.0% / short-ctx 40.5% / small-batch 16.1% / big-batch 31.6%
-  # 注意（见 CLAUDE.md）：不要主动切到/使用 VL 模型，需要时先申请、由用户切换。
-  short-ctx:      # 视觉低延迟档：短对话（C 中高 + MTP draft=2，池顶 655360）
+  short-ctx:
     max_concurrency: 5
     max_context: 131072
     default_max_tokens: 16384
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 2
-    kv_capacity: 390000      # C5 视觉高并发档，降 20K 换启动余量
-  small-batch:    # 视觉长文档/多轮批处理（C 低 + 262144 顶窗 + MTP draft=3，池顶 524288）
+    kv_capacity: 390000
+  small-batch:
     max_concurrency: 2
     max_context: 262144
     default_max_tokens: 32768
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 3
-    kv_capacity: 440000      # C2 低并发显存宽裕，吃 30K 额外 KV
-  big-batch:      # 视觉批处理（C 中 + MTP draft=2，池顶 614400，超卖 31.6%）
+    kv_capacity: 440000
+  big-batch:
     max_concurrency: 3
     max_context: 204800
     default_max_tokens: 32768
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 2
-    kv_capacity: 420000      # C3 略低于 default，提 10K
+    kv_capacity: 420000

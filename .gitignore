@@ -13,3 +13,15 @@ state.db
 # Cloud provider config (contains env var refs, real keys in ~/.inferfabric/)
 cloud_provider.yaml
 sandbox/
+
+# Vendored runtime deps (untracked locally, required for sandbox/import)
+_deps/
+
+# Playwright MCP scratch artifacts
+.playwright-mcp/
+
+# Local key vault (never committed)
+vault/
+
+# Dashboard screenshot exports (root-level PNGs)
+/*.png
