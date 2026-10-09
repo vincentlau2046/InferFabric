@@ -449,7 +449,15 @@ class ProxyManager:
                 return False
             log.info("Auto-switch → %s", target)
             self.mgr.state.set("switching_target", target)
-            result = self.mgr.switch(target)
+            try:
+                result = self.mgr.switch(target)
+            except Exception:
+                # M3: mgr.switch raised → clear switching_target so other
+                # auto-switches aren't 503-blocked until a reconcile. Re-raise
+                # to preserve the original exception-propagation semantics.
+                log.warning("Auto-switch to %s raised; clearing switching_target", target)
+                self.mgr.state.set("switching_target", "")
+                raise
             ok = result["status"] == "switched"
             if ok:
                 self._last_switch = time.time()

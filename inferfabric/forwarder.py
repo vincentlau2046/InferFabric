@@ -98,20 +98,26 @@ def pipe_stream_response(handler, resp, sse_buf=None):
     喂入 buffer 提取 usage；finally 里 flush。不传 sse_buf 时行为与原来完全一致
     （本地 Anthropic 路径不受影响）。
     """
-    handler.send_response(resp.status)
-    for h in ("content-type", "cache-control", "x-request-id"):
-        val = resp.getheader(h)
-        if val:
-            handler.send_header(h, val)
-    # CORS — required for browser-based clients
-    handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
-    # HTTP/1.1 keep-alive 下，响应体必须自带结束信号：发送
-    # Transfer-Encoding: chunked 并按 chunked 分帧写出，否则客户端
-    # (Claude/reqwest) 会一直等待 body 结束 → "wait api" 卡住
-    handler.send_header("Transfer-Encoding", "chunked")
-    handler.end_headers()
+    try:
+        handler.send_response(resp.status)
+        for h in ("content-type", "cache-control", "x-request-id"):
+            val = resp.getheader(h)
+            if val:
+                handler.send_header(h, val)
+        # CORS — required for browser-based clients
+        handler.send_header("Access-Control-Allow-Origin", "*")
+        handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, x-api-key, anthropic-version")
+        # HTTP/1.1 keep-alive 下，响应体必须自带结束信号：发送
+        # Transfer-Encoding: chunked 并按 chunked 分帧写出，否则客户端
+        # (Claude/reqwest) 会一直等待 body 结束 → "wait api" 卡住
+        handler.send_header("Transfer-Encoding", "chunked")
+        handler.end_headers()
+    except (BrokenPipeError, ConnectionResetError, OSError):
+        # 客户端在 header 阶段就断开 — 关闭上游 resp 避免 socket 泄漏，直接返回
+        log.info("Client disconnected before stream headers; closing upstream response")
+        resp.close()
+        return
     # PR-B: TTFT — 仅在 handler 携带 _req_start 时记录（本地路径）
     # v6.1: sse_buf 挂有首 token 回调时，ttft 以回调为准（首个内容 delta 时刻，
     # 精确到 token）；首 chunk 记录仅作无回调时的兜底（避免在 role / message_start
@@ -397,12 +403,15 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
 
         except Exception as e:
             log.error("Local %s unexpected error: %s", model_obj.name, e)
+            break
+        finally:
+            # M1: 统一在此关闭 conn — 成功返回、可重试状态分支、异常路径都经过
+            # 此 finally（此前成功/重试分支不关 socket，近似每请求泄漏一个连接）
             if conn:
                 try:
                     conn.close()
                 except Exception:
                     pass
-            break
 
     log.error("Local model failed after all retries: %s", last_error)
     send_json(handler, {"error": f"Local model unreachable: {last_error}"}, 503)

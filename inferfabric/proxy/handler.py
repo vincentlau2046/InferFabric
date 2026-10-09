@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from http.client import HTTPConnection
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import dataclasses
 
 from inferfabric.state import GPUMode
 from inferfabric.agent_registry import request_protocol
@@ -670,14 +671,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
-        # R7: 多副本端口选择
+        # R7: 多副本端口选择 — 用 dataclasses.replace 生成请求局部副本，
+        # 不再改写共享 model_obj.port（并发请求交错覆盖会串端口，且 finally
+        # 恢复救不了已在途的请求）。model_obj 是 ModelConfig dataclass。
         _selected_port = None
         _replicas = getattr(model_obj, 'replicas', None)
         if isinstance(_replicas, (list, tuple)) and _replicas:
             _selected_port = pm.get_target_port(model_name)
             if _selected_port:
-                _orig_port = model_obj.port
-                model_obj.port = _selected_port
+                model_obj = dataclasses.replace(model_obj, port=_selected_port)
 
         status = forwarder.forward_anthropic_local(
             self, pm, data, auth_header, model_obj, original_model
@@ -703,8 +705,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         finally:
             gate.release()
             if _selected_port:
+                # 副本并发计数仍需释放；model_obj 现在是请求局部副本，
+                # 无需恢复共享对象的 port（H2：不再改写共享状态）
                 pm.release_port(model_obj.name, _selected_port)
-                model_obj.port = _orig_port
 
     # ─── v1 Models ────────────────────────────────────────────────
 

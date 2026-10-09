@@ -114,7 +114,7 @@ class TestGpuStateMachineDetectOrphanPids:
     """孤儿 PID 检测
 
     _detect_orphan_pids 遍历所有 engine adapter，
-    从 self._proc 读取 PID state key，用 os.killpg 检测进程存活。
+    从 self._proc 读取 PID state key，用 os.kill(pid, 0) 检测进程存活。
     """
 
     def test_dead_process_cleared(self):
@@ -126,7 +126,7 @@ class TestGpuStateMachineDetectOrphanPids:
         proc.vllm_pid = 99999  # 不存在的 PID
 
         gs = _make_gs(state=state, proc=proc, models={})
-        with patch("inferfabric.gpu_state.os.killpg",
+        with patch("inferfabric.gpu_state.os.kill",
                    side_effect=ProcessLookupError):
             with patch.object(gs, "_port_pid", return_value=None):
                 gs._detect_orphan_pids(actual_services=[], actions=actions)
@@ -145,7 +145,7 @@ class TestGpuStateMachineDetectOrphanPids:
         proc.vllm_pid = 1  # PID 1 (init) 始终存在
 
         gs = _make_gs(state=state, proc=proc, models={})
-        with patch("inferfabric.gpu_state.os.killpg"):  # 不抛异常 = 进程存在
+        with patch("inferfabric.gpu_state.os.kill"):  # 不抛异常 = 进程存在
             gs._detect_orphan_pids(actual_services=[], actions=actions)
 
         # 进程存活，不应清除（但可能有 stale 检测路径）

@@ -456,9 +456,9 @@ class TestOrphanPidDetection:
         state.set("gpu_mode", "idle")
         state.set_active_services([])
 
-        # Process alive (killpg succeeds) but no active services
+        # Process alive (os.kill(pid,0) succeeds) but no active services
         # Port 8880 still occupied
-        with patch("os.killpg", return_value=None), \
+        with patch("os.kill", return_value=None), \
              patch.object(gpu, "_port_pid", return_value=99999), \
              patch.object(gpu._health, "check_model", return_value="❌"):
             result = gpu.reconcile()

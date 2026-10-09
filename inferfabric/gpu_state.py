@@ -127,10 +127,17 @@ class GpuStateMachine:
 
             # Check if process is still alive
             try:
-                os.killpg(pid, 0)
+                # M7: os.kill(pid, 0) probes whether THIS pid is alive.
+                # os.killpg(pid, 0) only succeeds when pid is a process-group
+                # leader; a live non-leader pid recovered via fuser would be
+                # misjudged as dead.
+                os.kill(pid, 0)
                 is_alive = True
-            except (ProcessLookupError, PermissionError):
+            except ProcessLookupError:
                 is_alive = False
+            except PermissionError:
+                # EPERM → the process exists but is owned by another uid → alive
+                is_alive = True
 
             if not is_alive:
                 has_live_service = False
