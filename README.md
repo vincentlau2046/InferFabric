@@ -1,16 +1,18 @@
-# InferFabric — 单卡 AI 推理操作系统
+# InferFabric — Blackwell 本地 AI 工作站的推理平台与统一 Gateway
 
-> **把你的 GPU 工作站变成一台统一推理服务器。模型即插件，本地+云端统一，一个 API 管所有。**
+> **为 NVIDIA RTX 5090 等 Blackwell 系列显卡的本地 AI 工作站设计——把单卡 GPU 变成一台统一推理服务器：推理平台 + 统一 Gateway，模型即插件，本地+云端统一，一个 API 管所有。**
 >
-> 单卡 GPU 推理操作系统 · 模型即插件 · 三态 GPU 状态机 · 8 引擎适配器 · macOS Dashboard · 9 云端预设 · 双协议路由
+> NVIDIA Blackwell（RTX 5090 / 5090D · NVFP4）· 推理平台 + 统一 Gateway · 模型即插件 · 三态 GPU 状态机 · 8 引擎适配器 · macOS Dashboard · 9 云端预设 · 双协议路由
 
 ---
 
 ## 定位
 
-**InferFabric 是面向单卡 GPU 工作站的个人 AI 推理操作系统。**
+**InferFabric 是专为 NVIDIA RTX 5090 等 Blackwell 系列显卡的本地 AI 工作站设计的推理平台与统一 Gateway 平台。**
 
-它不是 API 网关（有状态——管理进程生命周期），不是 vLLM 包装器（多引擎适配器抽象），不是本地推理工具（统一管理本地+云端+多模态）。它把你的 GPU 从零散的推理环境变成一个**可编程的统一推理服务**。
+这里的 Gateway 是有状态网关——不同于无状态转发代理，它管理模型进程生命周期（启动/停止/切换/睡眠/唤醒），不是 vLLM 包装器（多引擎适配器抽象），也不只是本地推理工具（统一管理本地+云端+多模态）。它把你的 GPU 从零散的推理环境变成一个**可编程的统一推理服务**，OpenAI + Anthropic 双协议统一入口 `:8999`。
+
+**Blackwell 针对性**：NInfer 引擎的 NVFP4 权重 + NVFP4 KV cache 是 Blackwell 专属加速路径（SM 12.x）——RTX 5090 32GB 可跑 27B NVFP4 大模型（峰值显存 ~30.5GB）+ 600K+ token 级 KV 池 + MTP 投机解码；非 Blackwell 显卡可走 vLLM / SGLang / Ollama 路径（INT8/FP8 KV）。
 
 核心差异化：
 
@@ -440,7 +442,7 @@ pip install -r requirements.txt
 
 - **Python 3.10+**
 - **vLLM 0.24**（不要升级——适配器针对此版本调优）
-- NVIDIA GPU + CUDA（推理引擎自身依赖，非 InferFabric 直接依赖）
+- NVIDIA GPU + CUDA（推理引擎自身依赖，非 InferFabric 直接依赖；Blackwell RTX 50 系列可获得 NVFP4 专属加速，其他代显卡可用 vLLM/SGLang/Ollama 路径）
 - 各引擎按需安装：vLLM / NInfer / SGLang / Ollama / ComfyUI 等
 
 ### 启动
@@ -639,7 +641,8 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 
 ## Hardware
 
-- **GPU**: NVIDIA GeForce RTX 5090D, 32 GB GDDR7, 512-bit, 1792 GB/s, Blackwell (SM 12.0)
+- **目标硬件**: NVIDIA Blackwell RTX 50 系列（RTX 5090 / 5090D / 5080 / 5070 Ti）——NVFP4 加速路径（NInfer 引擎）为 Blackwell 专属
+- **验证环境**: NVIDIA GeForce RTX 5090D, 32 GB GDDR7, 512-bit, 1792 GB/s, Blackwell (SM 12.0)
 - **RAM**: 64 GB DDR5
 - **OS**: Ubuntu 25.04, Python 3.12+
 
