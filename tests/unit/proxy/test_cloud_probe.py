@@ -218,6 +218,38 @@ class TestProviderTestHandler:
         assert data["results"][0]["status"] == "ok"
 
 
+class TestCloudDiscoverHandler:
+    """_handle_cloud_discover 计数去重：双键注册表（短名 + provider/ 前缀）
+    不得让 toast 把 4 个模型报成 8。models 数组同样去重（无重复条目）。"""
+
+    def test_discover_count_is_unique_models(self, tmp_path, monkeypatch):
+        cd = CloudDiscovery(config_path=None)
+        cd._config_path = tmp_path / "cloud_provider.yaml"
+        cd._secrets_mgr = SecretsManager(path=tmp_path / "secrets.env")
+        cd._inject_secrets_env = lambda: None
+        # 2 个 config 声明模型（千帆场景：无 /models 端点 → _discover_provider 返回 []）
+        cd._providers["Qianfan-Token"] = ProviderConfig(
+            name="Qianfan-Token", api_key="sk-x",
+            openai_base="http://127.0.0.1:1/v1", anthropic_base="http://127.0.0.1:1/anthropic/v1",
+            enabled=True, discovery_enabled=True,
+            model_specs={"glm-5.3": {}, "glm-5.3-flash": {}},
+        )
+        monkeypatch.setattr(cd, "_discover_provider", lambda cfg: [])
+        pm = SimpleNamespace(cloud=cd, _cloud_discovered=False)
+
+        h = ProxyHandler.__new__(ProxyHandler)
+        h._sent = []
+        h._send_json = lambda data, status=200, extra_headers=None: h._sent.append((data, status))
+        h._handle_cloud_discover(pm)
+        data, status = h._sent[-1]
+        assert status == 200
+        # 2 个唯一模型，不是双键膨胀后的 4
+        assert data["cloud_models"] == 2, data["cloud_models"]
+        ids = [m["id"] for m in data["models"]]
+        assert len(ids) == len(set(ids)) == 2, ids
+        assert set(ids) == {"glm-5.3", "glm-5.3-flash"}
+
+
 class TestCloudTestHandler:
     """_handle_cloud_test（重做：不再要求 URL 已注册）。"""
 

@@ -411,7 +411,8 @@
     if (!p.discovery_enabled) {
       candHtml = '<div class="if-empty">该 Provider 发现已关闭 — 在上方「发现」手动拉取候选，或直接用右栏手填模型名</div>';
     } else if (!cands.length) {
-      candHtml = '<div class="if-empty">暂无候选 — 点上方「发现」从上游 /models 拉取候选</div>';
+      // 千帆类厂商无 /models 列表端点（404）→ 发现永远拉不到候选，不再让用户重复点「发现」
+      candHtml = '<div class="if-empty">该厂商未提供 /models 列表（或上游未返回模型）— 在下方「已声明」添加模型名（恒可路由）</div>';
     } else {
       candHtml = cands.map(function (mid) {
         var checked = !!enableSet[mid];

@@ -1589,19 +1589,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pm._cloud_discovered = True
         # Restart polling after reload (reload stops the old polling thread)
         pm.cloud.start_polling()
+        # 双键注册表只数短名键（与 discover 一致，避免计数膨胀）
+        unique = sum(1 for k in models if "/" not in k)
         self._send_json({
             "status": "reloaded",
             "providers": len(pm.cloud.providers),
-            "cloud_models": len(models),
+            "cloud_models": unique,
         })
 
     def _handle_cloud_discover(self, pm):
         """POST /admin/cloud/discover — 手动触发模型发现。"""
         models = pm.cloud.discover_all()
         pm._cloud_discovered = True
+        # 注册表是双键（短名 + provider/ 前缀）——只数短名键，避免把 4 个模型报成 8
+        unique = {k: m for k, m in models.items() if "/" not in k}
         self._send_json({
             "status": "discovered",
-            "cloud_models": len(models),
+            "cloud_models": len(unique),
             "models": [
                 {
                     "id": m.model_id,
@@ -1610,7 +1614,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "anthropic": m.anthropic_available,
                     "discovered_at": m.discovered_at,
                 }
-                for m in models.values()
+                for m in unique.values()
             ],
         })
 
