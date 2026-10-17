@@ -101,47 +101,58 @@ def test_pkill_vllm_fallback_uses_pid_file():
 
 # ─── D-3: SSRF Protection ────────────────────────────────
 
-def test_validate_cloud_test_url_blocks_private():
-    """SSRF: private IP URLs are rejected."""
+def test_validate_cloud_test_url_allows_private():
+    """v6.6 放宽策略：私有 / 局域网 IP 字面量放行（内网中转站场景）。"""
     from inferfabric.proxy.handler import ProxyHandler
 
     handler = ProxyHandler.__new__(ProxyHandler)
     mock_pm = Mock()
     mock_pm.cloud._providers = {}
 
-    ok, msg, ips = handler._validate_cloud_test_url("https://127.0.0.1/test", mock_pm)
-    assert not ok
-    assert "not in allowed" in msg.lower() or "127" in msg
+    ok, msg, ips = handler._validate_cloud_test_url("http://127.0.0.1/test", mock_pm)
+    assert ok, msg
 
-    ok, msg, ips = handler._validate_cloud_test_url("https://10.0.0.1/api", mock_pm)
-    assert not ok
+    ok, msg, ips = handler._validate_cloud_test_url("http://10.0.0.1/api", mock_pm)
+    assert ok, msg
 
-    ok, msg, ips = handler._validate_cloud_test_url("https://192.168.1.1/", mock_pm)
-    assert not ok
+    ok, msg, ips = handler._validate_cloud_test_url("http://192.168.1.1/", mock_pm)
+    assert ok, msg
 
 
-def test_validate_cloud_test_url_blocks_http():
-    """SSRF: http scheme is rejected."""
+def test_validate_cloud_test_url_allows_http():
+    """v6.6 放宽策略：http scheme 放行（内网中转站常用 http）。"""
     from inferfabric.proxy.handler import ProxyHandler
 
     handler = ProxyHandler.__new__(ProxyHandler)
     mock_pm = Mock()
     mock_pm.cloud._providers = {}
 
-    ok, msg, ips = handler._validate_cloud_test_url("http://qianfan.baidubce.com/api", mock_pm)
-    assert not ok
-    assert "https" in msg.lower() or "scheme" in msg.lower()
+    ok, msg, ips = handler._validate_cloud_test_url("http://1.2.3.4/v1", mock_pm)
+    assert ok, msg
 
 
-def test_validate_cloud_test_url_requires_whitelist():
-    """SSRF: unknown host is rejected."""
+def test_validate_cloud_test_url_allows_unregistered_host():
+    """v6.6 放宽策略：已删"必须是已注册 provider"白名单——未注册公网主机放行。"""
     from inferfabric.proxy.handler import ProxyHandler
 
     handler = ProxyHandler.__new__(ProxyHandler)
     mock_pm = Mock()
     mock_pm.cloud._providers = {}
 
-    ok, msg, ips = handler._validate_cloud_test_url("https://evil.example.com/", mock_pm)
+    ok, msg, ips = handler._validate_cloud_test_url("http://8.8.8.8/v1", mock_pm)
+    assert ok, msg
+
+
+def test_validate_cloud_test_url_blocks_metadata():
+    """v6.6 硬拦不变：云元数据地址 169.254.169.254 仍拒绝（防读实例凭据）。"""
+    from inferfabric.proxy.handler import ProxyHandler
+
+    handler = ProxyHandler.__new__(ProxyHandler)
+    mock_pm = Mock()
+
+    ok, msg, ips = handler._validate_cloud_test_url("http://169.254.169.254/latest/meta-data/", mock_pm)
+    assert not ok
+    assert "metadata" in msg.lower()
 def test_validate_cloud_test_url_allows_registered_provider():
     """SSRF: registered provider host is accepted (or DNS fails safely)."""
     from inferfabric.proxy.handler import ProxyHandler

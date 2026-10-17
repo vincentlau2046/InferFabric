@@ -22,9 +22,11 @@
                  placeholder="填入后保存" autocomplete="off" spellcheck="false">
           <p class="if-field-hint" id="presetEnvHint"></p>
         </div>
+        <div class="cp-test-result stale" id="cpPresetTestResult">先点「测试」验证 Key 与连接，通过后方可添加</div>
         <div class="cp-form-actions">
           <button type="button" class="btn btn-sec btn-sm" data-action="preset-cancel">取消</button>
-          <button type="button" class="btn btn-pri btn-sm" data-action="preset-add">添加 Provider</button>
+          <button type="button" class="btn btn-sec btn-sm" data-action="preset-test">测试</button>
+          <button type="button" class="btn btn-pri btn-sm" data-action="preset-add" disabled title="请先测试并通过">添加 Provider</button>
         </div>
       </div>
     </div>
@@ -50,11 +52,12 @@
               <th>协议</th>
               <th class="num">可路由</th>
               <th>Key 状态</th>
+              <th>测试</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody id="provTbody">
-            <tr class="cp-skel"><td colspan="6"><div class="skeleton"><div class="skeleton-row"></div></div></td></tr>
+            <tr class="cp-skel"><td colspan="7"><div class="skeleton"><div class="skeleton-row"></div></div></td></tr>
           </tbody>
         </table>
       </div>
@@ -91,10 +94,17 @@
             <input class="if-field-input mono" id="cpAnthropicBase" type="text"
                    placeholder="https://…/v1" autocomplete="off" spellcheck="false">
           </div>
+          <div class="if-form-row">
+            <label class="if-field-label" for="cpProbeModel">探测模型</label>
+            <input class="if-field-input mono" id="cpProbeModel" type="text"
+                   placeholder="可选，如 glm-5.3-flash" autocomplete="off" spellcheck="false">
+            <p class="if-field-hint">留空仅校验连接；填写后发 1-token 真实生成，验证该模型确实可用。</p>
+          </div>
+          <div class="cp-test-result stale" id="cpManualTestResult">先点「测试连接」，通过后方可添加</div>
         </div>
         <div class="if-card-actions">
           <button type="button" class="btn btn-sec btn-sm" data-action="manual-test">测试连接</button>
-          <button type="button" class="btn btn-pri btn-sm" data-action="manual-add">添加 Provider</button>
+          <button type="button" class="btn btn-pri btn-sm" data-action="manual-add" disabled title="请先测试连接并通过">添加 Provider</button>
         </div>
       </div>
     </div>
