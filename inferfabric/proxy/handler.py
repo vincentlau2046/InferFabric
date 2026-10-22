@@ -260,6 +260,8 @@ _POST_ROUTES = {
     "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_put_model_pools(h, pm)),
     "/admin/model-pools/validate": _admin(lambda h, pm: mp_admin.handle_validate_model_pools(h, pm)),
     "/admin/model-pools/dry-run": _admin(lambda h, pm: mp_admin.handle_post_model_pools_dry_run(h, pm)),
+    # 单池 enabled 原子开关（服务端字段级修改，CAS；非客户端读-改-写）
+    "/admin/model-pools/toggle": _admin(lambda h, pm: mp_admin.handle_post_model_pools_toggle(h, pm)),
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
 }

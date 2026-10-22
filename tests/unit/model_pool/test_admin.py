@@ -230,3 +230,81 @@ class TestDryRun:
         assert pm.pool_registry.snapshot() is before
         assert pm.dual_gate.acquired == []   # 不占限流
         assert pm.ensure_service_calls == []  # 不启动模型
+
+
+class TestToggleEndpoint:
+    """POST /admin/model-pools/toggle — 服务端原子翻转单池 enabled。
+
+    dashboard 开关走此端点而非客户端读-改-写：GET 视图有损（悬空候选被
+    剔除、declared_protocols 不回传），经视图重建配置会丢数据。
+    """
+
+    def test_toggle_success_flips_and_increments(self, pm, tmp_path):
+        h = AdminHandler(body={"pool": "fast", "enabled": False,
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_toggle(h, pm)
+
+        status, body = h.sent[-1]
+        assert status == 200
+        assert body == {"status": "updated", "revision": 2,
+                        "pool": "fast", "enabled": False}
+        assert pm.pool_registry.snapshot().pools["fast"].pool.enabled is False
+        # 落盘同步（含悬空候选不丢失的原始结构）
+        yaml_text = (tmp_path / "model_pools.yaml").read_text(encoding="utf-8")
+        assert "enabled: false" in yaml_text
+
+    def test_toggle_back_on_preserves_other_fields(self, pm):
+        h = AdminHandler(body={"pool": "fast", "enabled": True,
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_toggle(h, pm)
+        assert h.sent[-1][0] == 200
+        pool = pm.pool_registry.snapshot().pools["fast"].pool
+        assert pool.enabled is True
+        assert pool.max_attempts == 2                   # 其余配置原样
+        assert [c.candidate.id for c in pm.pool_registry.snapshot()
+                .pools["fast"].candidates] == ["loc", "cld"]
+
+    def test_toggle_stale_revision_409(self, pm):
+        h = AdminHandler(body={"pool": "fast", "enabled": False,
+                               "expected_revision": 0})
+        mp_admin.handle_post_model_pools_toggle(h, pm)
+        status, body = h.sent[-1]
+        assert status == 409
+        assert body["status"] == "revision_conflict"
+        assert pm.pool_registry.snapshot().pools["fast"].pool.enabled is True
+
+    def test_toggle_unknown_pool_404(self, pm):
+        h = AdminHandler(body={"pool": "nope", "enabled": False,
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_toggle(h, pm)
+        status, body = h.sent[-1]
+        assert status == 404
+        assert body["status"] == "unknown_pool"
+
+    def test_toggle_missing_fields_400(self, pm):
+        h = AdminHandler(body={"pool": "fast"})
+        mp_admin.handle_post_model_pools_toggle(h, pm)
+        assert h.sent[-1][0] == 400
+        assert pm.pool_registry.snapshot().revision == 1  # 未变更
+
+    def test_toggle_after_external_edit_uses_latest_raw(self, registry, tmp_path):
+        # 外部编辑（无 revision 键）→ reload 拾取 → flip 基于最新原始结构
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "extra", "priority": 3, "kind": "cloud",
+             "provider": "prov", "model_id": "cloud-m2",
+             "declared_protocols": ["openai"]})
+        import yaml as _yaml
+        (tmp_path / "model_pools.yaml").write_text(
+            _yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+        registry.reload_from_disk()
+        pm2 = FakePM(registry, active={"qwen-small"},
+                     local_models={"qwen-small": _local_model()},
+                     cloud_models={"prov/cloud-m": object()},
+                     providers={"prov": object()})
+        h = AdminHandler(body={"pool": "fast", "enabled": False,
+                               "expected_revision": registry.snapshot().revision})
+        mp_admin.handle_post_model_pools_toggle(h, pm2)
+        assert h.sent[-1][0] == 200
+        ids = [c.candidate.id for c in registry.snapshot().pools["fast"].candidates]
+        assert "extra" in ids                           # 外部新增候选不丢失

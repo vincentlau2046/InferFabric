@@ -7,6 +7,7 @@
   POST /admin/model-pools/validate  静态校验，零出网、零副作用
   GET  /admin/model-pools/status    每池双协议当前选择视图
   POST /admin/model-pools/dry-run   给定协议/能力 → 选择/排除原因，零副作用
+  POST /admin/model-pools/toggle    服务端原子翻转单池 enabled（CAS）
 
 真实探测（PROBED 证据）不在本接口自动执行：需管理员显式操作 + 出网授权
 （spec §5.1），推迟到独立任务。
@@ -142,3 +143,45 @@ def handle_post_model_pools_dry_run(handler, pm):
     body["pool"] = pool_name
     body["protocol"] = protocol
     handler._send_json(body)
+
+
+def handle_post_model_pools_toggle(handler, pm):
+    """单池 enabled 开关 — 服务端字段级原子修改。
+
+    dashboard 开关走此端点而非 GET→PUT 读-改-写：GET 视图有损（悬空候选
+    被剔除、declared_protocols 不回传），经视图重建配置会丢数据。body 携带
+    expected_revision 做 CAS；409 时前端应重新拉取后再试。
+    """
+    data = handler._read_body()
+    if data is None:
+        return
+    pool_name = data.get("pool")
+    enabled = data.get("enabled")
+    expected = data.get("expected_revision")
+    if (not isinstance(pool_name, str) or not pool_name
+            or not isinstance(enabled, bool)
+            or not isinstance(expected, int)):
+        handler._send_json(
+            {"error": "pool (str), enabled (bool), expected_revision (int) required",
+             "status": "bad_request"}, 400)
+        return
+    try:
+        snap = pm.pool_registry.flip_pool_enabled(
+            pool_name, enabled, expected_revision=expected)
+    except KeyError:
+        handler._send_json(
+            {"error": f"Unknown pool: {pool_name}", "status": "unknown_pool"}, 404)
+        return
+    except RevisionConflict:
+        handler._send_json(
+            {"error": "revision conflict — reload and retry",
+             "status": "revision_conflict",
+             "current_revision": pm.pool_registry.snapshot().revision}, 409)
+        return
+    except ValueError as e:
+        handler._send_json(
+            {"error": str(e), "status": "invalid_config",
+             "issues": str(e).split("; ")}, 400)
+        return
+    handler._send_json({"status": "updated", "revision": snap.revision,
+                        "pool": pool_name, "enabled": enabled})

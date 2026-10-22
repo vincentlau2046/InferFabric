@@ -91,6 +91,9 @@ class PoolRegistry:
         self._config_path = Path(config_path)
         self._lock = threading.Lock()
         self._snapshot: RegistrySnapshot = _EMPTY_SNAPSHOT
+        # 最后一次成功加载/写入的原始配置 dict（toggle 等字段级修改的基底，
+        # 保留悬空候选/未回传字段，避免经有损视图重建丢数据）
+        self._raw: dict | None = None
         self._known_local = _as_getter(known_local)
         self._known_providers = _as_getter(known_providers)
         self._provider_base = provider_base or (lambda provider: "")
@@ -127,6 +130,7 @@ class PoolRegistry:
             log.error("model_pools.yaml invalid — keeping last good snapshot: %s",
                       "; ".join(issues))
             return False
+        self._raw = raw
         self._publish_locked(parsed)
         return True
 
@@ -158,6 +162,41 @@ class PoolRegistry:
                 raise ValueError("; ".join(issues))
             raw["revision"] = new_revision
             self._write_atomic(raw)
+            self._raw = raw
+            self._publish_locked(parsed)
+            return self._snapshot
+
+    def flip_pool_enabled(self, pool_name: str, enabled: bool,
+                          expected_revision: int) -> RegistrySnapshot:
+        """服务端原子翻转单池 enabled（保留其余原始结构）。
+
+        与 update() 同一 CAS/写盘/发布路径，但不要求调用方持有完整配置 —
+        基于 self._raw 做字段级修改，悬空候选与未回传字段不丢失。
+
+        Raises:
+            KeyError: 池不存在（含从未成功加载任何配置）。
+            ValueError: 翻转后校验失败（不应发生 — 仅改 enabled）。
+            RevisionConflict: expected_revision 过期。
+        """
+        import copy
+        with self._lock:
+            raw = copy.deepcopy(self._raw) if self._raw else None
+            pools = (raw or {}).get("pools") or {}
+            if not isinstance(pools, dict) or pool_name not in pools:
+                raise KeyError(pool_name)
+            current = self._snapshot.revision
+            if expected_revision != current:
+                raise RevisionConflict(
+                    f"expected_revision {expected_revision} != current {current}")
+            pools[pool_name]["enabled"] = bool(enabled)
+            new_revision = current + 1
+            raw.pop("revision", None)
+            parsed, issues = load_pools_dict(raw, current_revision=new_revision)
+            if parsed is None:
+                raise ValueError("; ".join(issues))
+            raw["revision"] = new_revision
+            self._write_atomic(raw)
+            self._raw = raw
             self._publish_locked(parsed)
             return self._snapshot
 

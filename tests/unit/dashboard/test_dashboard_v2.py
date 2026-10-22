@@ -65,7 +65,7 @@ def test_js_modules_list():
     import inferfabric.dashboard as dash
     assert getattr(dash, "JS_MODULES", None) == [
         "ui", "store", "charts", "overview", "inference",
-        "monitor", "deploy", "cloud", "anomaly",
+        "monitor", "deploy", "cloud", "model-pools", "anomaly",
     ]
 
 
