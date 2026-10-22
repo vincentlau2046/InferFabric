@@ -185,6 +185,10 @@ def _serve_api_spec(handler, pm):
     from inferfabric.api_spec import get_openapi_spec
     handler._send_json(get_openapi_spec())
 
+
+# 逻辑模型池管理接口（admin 路由表引用；零协议转换、零出网校验）
+from inferfabric.model_pool import admin as mp_admin  # noqa: E402
+
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
     "/health":                  lambda h, pm: h._send_json({"status": "ok", "gpu_mode": pm.mgr.gpu_mode}),
@@ -216,6 +220,9 @@ _GET_ROUTES = {
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
+    # ─── Admin: Logical Model Pools ─────────────────────────────────
+    "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
+    "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
     "/api/openapi.json":        _serve_api_spec,
 }
 
@@ -248,6 +255,11 @@ _POST_ROUTES = {
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
     "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
+    # ─── Admin: Logical Model Pools ─────────────────────────────────
+    # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
+    "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_put_model_pools(h, pm)),
+    "/admin/model-pools/validate": _admin(lambda h, pm: mp_admin.handle_validate_model_pools(h, pm)),
+    "/admin/model-pools/dry-run": _admin(lambda h, pm: mp_admin.handle_post_model_pools_dry_run(h, pm)),
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
 }
