@@ -65,6 +65,8 @@ class Selection:
     decisions: tuple[CandidateDecision, ...] = ()
     chosen: ResolvedCandidate | None = None
     error: str | None = None
+    # P2：全部入选候选（按 priority,id 升序），供回退循环按序尝试
+    ordered: tuple[ResolvedCandidate, ...] = ()
 
 
 def _evidence_ok(resolved: ResolvedCandidate, protocol: str,
@@ -88,6 +90,7 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
     required_features = req.required_features()
     decisions: list[CandidateDecision] = []
     chosen: ResolvedCandidate | None = None
+    included_ordered: list[ResolvedCandidate] = []
     had_protocol_compatible = False
 
     # 确定性：按 (priority, id) 升序，不信任调用方传入顺序
@@ -121,6 +124,8 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
                                            included=included, reason=reason))
         if included and chosen is None:
             chosen = resolved
+        if included:
+            included_ordered.append(resolved)
 
     error = None
     if chosen is None:
@@ -132,4 +137,5 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
             error = "no_compatible_target"
 
     return Selection(pool=pool.name, decisions=tuple(decisions),
-                     chosen=chosen, error=error)
+                     chosen=chosen, error=error,
+                     ordered=tuple(included_ordered))

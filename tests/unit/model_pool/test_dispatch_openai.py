@@ -216,7 +216,7 @@ class TestPoolChatDispatch:
         cloud_results = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None):
+                       original_model=None, suppress_client_errors=False):
             cloud_results.append({"model": data["model"], "protocol": protocol,
                                   "original": original_model})
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,

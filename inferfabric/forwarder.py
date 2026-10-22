@@ -26,14 +26,33 @@ from inferfabric.proxy.usage import normalize_usage
 @dataclass
 class CloudResult:
     """cloud 路由请求结果 — 供 RequestLog 补全"""
-    status: int = 200
+    status: int | None = 200
     # {prompt_tokens, prompt_tokens_cached, completion_tokens}（normalize_usage 口径）
     usage: dict = field(default_factory=dict)
     ttft_ms: float | None = None
     duration_ms: float = 0.0
     error: str | None = None
+    # P2（model_pool）：suppress 模式下失败未写客户端 → committed=False；
+    # 成功路径（send_json/流式）已交付 → True。默认 True 不影响既有调用方。
+    committed: bool = True
+    # 429 时上游 Retry-After 秒数（suppress 模式读取，供池层预算内等待）
+    retry_after: float | None = None
 
 log = logging.getLogger("inferfabric.forwarder")
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """从响应头解析 Retry-After 秒数；缺失/非法/超长 → None（调用方用默认值）。"""
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+        if raw is None:
+            return None
+        val = float(raw)
+        return val if 0 <= val <= 3600 else None
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Local model type filter ──
@@ -193,11 +212,17 @@ def handle_json_response(handler, resp, model_obj, original_model, data, auth_he
 # ── Cloud provider forwarding (PR-D) ──
 
 
-def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai", original_model=None):
+def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai", original_model=None,
+                     suppress_client_errors: bool = False):
     """双协议透传：OpenAI → cloud OpenAI endpoint, Anthropic → cloud Anthropic endpoint。
 
     IFF 不做协议转换，客户端用什么协议发，就往对应的云端端点转发。
     IFF 持有云端凭证，客户端只需 IFF key。
+
+    suppress_client_errors=True（P2 model_pool 传输边界）：单次尝试、失败不写
+    客户端、不内层重试，失败装入 CloudResult(committed=False)；成功路径行为
+    不变（send_json/流式直发，committed=True）。默认 False 时与本函数历史
+    行为逐字节一致（既有 forwarder 测试即回归证明）。
 
     Returns CloudResult for request logging (G-1a).
     """
@@ -209,13 +234,15 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         if not cloud_model.anthropic_available:
             err = f"Provider {provider_cfg.name} does not support Anthropic protocol"
             hint = "该 provider 仅支持 OpenAI 协议，请改用 POST /v1/chat/completions"
-            send_json(handler, {"error": err, "hint": hint}, 501)
-            return CloudResult(status=501, error=err)
+            if not suppress_client_errors:
+                send_json(handler, {"error": err, "hint": hint}, 501)
+            return CloudResult(status=501, error=err, committed=False)
         if not provider_cfg.anthropic_base:
             err = f"Provider {provider_cfg.name} has no Anthropic base configured"
             hint = "该 provider 未配置 Anthropic 端点（anthropic_base），无法以 Anthropic 协议访问"
-            send_json(handler, {"error": err, "hint": hint}, 501)
-            return CloudResult(status=501, error=err)
+            if not suppress_client_errors:
+                send_json(handler, {"error": err, "hint": hint}, 501)
+            return CloudResult(status=501, error=err, committed=False)
         url = f"{provider_cfg.anthropic_base.rstrip('/')}/messages"
         headers = {
             "Content-Type": "application/json",
@@ -225,13 +252,15 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         if not cloud_model.openai_available:
             err = f"Provider {provider_cfg.name} does not support OpenAI protocol"
             hint = "该 provider 仅支持 Anthropic 协议，请改用 POST /v1/messages"
-            send_json(handler, {"error": err, "hint": hint}, 501)
-            return CloudResult(status=501, error=err)
+            if not suppress_client_errors:
+                send_json(handler, {"error": err, "hint": hint}, 501)
+            return CloudResult(status=501, error=err, committed=False)
         if not provider_cfg.openai_base:
             err = f"Provider {provider_cfg.name} has no OpenAI base configured"
             hint = "该 provider 未配置 OpenAI 端点（openai_base），无法以 OpenAI 协议访问"
-            send_json(handler, {"error": err, "hint": hint}, 501)
-            return CloudResult(status=501, error=err)
+            if not suppress_client_errors:
+                send_json(handler, {"error": err, "hint": hint}, 501)
+            return CloudResult(status=501, error=err, committed=False)
         url = f"{provider_cfg.openai_base.rstrip('/')}/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -246,12 +275,31 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
     body = json.dumps(data).encode("utf-8")
 
     # R2: 云端转发退避重试（3 次尝试，0.5s/1s/2s 指数退避）
-    max_retries = 3
+    # P2 suppress 模式：单次尝试，退避/重试交由池层统一预算（spec §6.3）
+    max_retries = 1 if suppress_client_errors else 3
     last_error = None
     for attempt in range(max_retries):
         try:
             req = Request(url, data=body, headers=headers, method="POST")
             resp = urlopen(req, timeout=provider_cfg.timeout)
+
+            # suppress 模式：可重试状态（429/5xx）不内层重试、不写客户端，
+            # 原样装进结果交池层按动作表处理（429 携带 Retry-After）
+            if suppress_client_errors and should_retry_on_status(resp.status):
+                retry_after = (_retry_after_seconds(resp.headers)
+                               if resp.status == 429 else None)
+                try:
+                    resp.read()
+                except Exception:
+                    pass
+                resp.close()
+                return CloudResult(
+                    status=resp.status,
+                    error=f"Cloud provider returned HTTP {resp.status}",
+                    committed=False,
+                    retry_after=retry_after,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
 
             # Retryable status (429/5xx) → close and backoff
             if should_retry_on_status(resp.status) and attempt < max_retries - 1:
@@ -294,6 +342,16 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         except _HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
             e.close()
+            if suppress_client_errors:
+                # 单次尝试：真实状态码原样上交（池层按 401/403/429/4xx/5xx 分类）
+                return CloudResult(
+                    status=e.code,
+                    error=f"Cloud provider error ({e.code}): {error_body[:500]}",
+                    committed=False,
+                    retry_after=(_retry_after_seconds(getattr(e, "headers", None))
+                                 if e.code == 429 else None),
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
             if should_retry_on_status(e.code) and attempt < max_retries - 1:
                 log.warning(
                     "Cloud %s HTTP %d (attempt %d/%d), retrying in %.1fs...",
@@ -327,6 +385,14 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
     log.error("Cloud %s request failed after %d attempts: %s",
               provider_cfg.name, max_retries, last_error)
     err_msg = f"Cloud provider unreachable: {last_error}"
+    if suppress_client_errors:
+        # status=None = 连接层失败（池层按「立即切下一候选」处理，不做同目标重试）
+        return CloudResult(
+            status=None,
+            error=err_msg,
+            committed=False,
+            duration_ms=(time.monotonic() - start) * 1000,
+        )
     send_json(handler, {"error": err_msg}, 503)
     return CloudResult(
         status=503,
@@ -338,7 +404,8 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
 # ── Local forward with retry chain ──
 
 
-def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_model):
+def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_model,
+                            suppress_client_errors: bool = False):
     """CCR-style retry chain: local vLLM + exponential backoff → error on exhaustion.
 
     Returns the upstream HTTP status code once the response is sent to the
@@ -346,19 +413,33 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
     502 by handle_json_response). Returns None when all retries are
     exhausted. The caller (ProxyHandler._forward_local) uses the return
     value to write a RequestLog for the usage statistics.
+
+    suppress_client_errors=True（P2 model_pool 传输边界）：单次尝试；可重试
+    状态（429/5xx）与连接失败不写客户端、不退避，直接返回 None 作为
+    「未提交失败」信号（池层据此切下一候选）。非重试able 状态仍经
+    handle_json_response 交付（committed）。默认 False 行为不变。
     """
     was_stream = data.get("stream", False)
     data["model"] = model_obj.served_name or "vllm_qwen27b"
     body = json.dumps(data).encode("utf-8")
 
     last_error = None
-    for attempt in range(UPSTREAM_LOCAL_RETRIES + 1):
+    for attempt in range(1 if suppress_client_errors else UPSTREAM_LOCAL_RETRIES + 1):
         conn = None
         try:
             conn = HTTPConnection("127.0.0.1", model_obj.port, timeout=300)
             conn.request("POST", "/v1/messages", body=body,
                          headers={"Content-Type": "application/json"})
             resp = conn.getresponse()
+
+            if suppress_client_errors and should_retry_on_status(resp.status):
+                # 未提交失败（429/5xx）→ 不写客户端、不退避，交池层处理
+                try:
+                    resp.read()
+                except Exception:
+                    pass
+                resp.close()
+                return None
 
             if should_retry_on_status(resp.status) and attempt < UPSTREAM_LOCAL_RETRIES:
                 try:
@@ -392,6 +473,8 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                     conn.close()
                 except Exception:
                     pass
+            if suppress_client_errors:
+                return None          # 连接失败：未提交，池层切下一候选
             if attempt < UPSTREAM_LOCAL_RETRIES:
                 delay_s = exponential_backoff(attempt)
                 log.warning("Local %s connection failed (attempt %d/%d): %s — retry in %.1fs",
@@ -414,5 +497,7 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                     pass
 
     log.error("Local model failed after all retries: %s", last_error)
+    if suppress_client_errors:
+        return None
     send_json(handler, {"error": f"Local model unreachable: {last_error}"}, 503)
     return None

@@ -120,6 +120,10 @@ class ProxyManager:
             provider_base=self._provider_base_url,
         )
         self.pool_registry.load()
+        # P2：上游凭证错误（401/403）的端点冷却（内存，进程内；
+        # 键 = endpoint_fingerprint，选择期排除 reason=cooldown）
+        from inferfabric.model_pool.pool_forward import CooldownStore
+        self.pool_cooldowns = CooldownStore()
         # R5: ResponseCache — 精确匹配响应缓存（IFF_CACHE_ENABLED 环境变量可覆盖 YAML）
         _cache_env = os.environ.get("IFF_CACHE_ENABLED")
         if _cache_env is not None:

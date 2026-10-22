@@ -53,7 +53,8 @@ def registry(tmp_path):
 def anth_local(monkeypatch):
     calls = []
 
-    def fake_local(handler, pm, data, auth_header, model_obj, original_model):
+    def fake_local(handler, pm, data, auth_header, model_obj, original_model,
+                   suppress_client_errors=False):
         calls.append({"model": data.get("model"), "model_obj": model_obj,
                       "original": original_model, "auth": auth_header})
         return 200
@@ -84,7 +85,7 @@ class TestPoolMessagesDispatch:
         cloud_calls = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None):
+                       original_model=None, suppress_client_errors=False):
             cloud_calls.append({"model": data["model"], "protocol": protocol})
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,
                                    duration_ms=1.0, error=None)
