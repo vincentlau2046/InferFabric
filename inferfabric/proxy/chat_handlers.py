@@ -221,6 +221,14 @@ def handle_chat(handler, pm, data):
     handler._usage = {"prompt_tokens": 0, "prompt_tokens_cached": 0,
                       "completion_tokens": 0}
 
+    # 逻辑模型池（iff/*）：完整名鉴权 + 池选择，先于直连鉴权/缓存
+    # （spec §13 顺序：鉴权→槽位识别→选择→传输；池请求跳过响应缓存）
+    # 函数内 import 避免 chat_handlers ↔ model_pool.dispatch 循环依赖
+    if model.startswith("iff/") and getattr(pm, "pool_registry", None) is not None:
+        from inferfabric.model_pool.dispatch import handle_pool_chat
+        if handle_pool_chat(handler, pm, data, model):
+            return
+
     # PR-A: Auth check
     if pm.auth.enabled:
         model_for_auth = model.split("/")[-1] if "/" in model else model

@@ -109,6 +109,17 @@ class ProxyManager:
         # R9: AnomalyCollector — 结构化异常事件（线程安全环形缓冲）
         from inferfabric.anomaly_collector import AnomalyCollector
         self.anomalies = AnomalyCollector()
+        # 逻辑模型池（iff/*）：配置缺失/损坏 = 功能关闭，不阻塞代理启动
+        from inferfabric.model_pool.registry import PoolRegistry
+        self.pool_registry = PoolRegistry(
+            IFF_DATA_DIR / "model_pools.yaml",
+            IFF_DATA_DIR / "model_pool_evidence.json",
+            known_local=lambda: {m.served_name for m in self.mgr._models.values()
+                                 if m.served_name},
+            known_providers=lambda: set(self.cloud.providers or ()),
+            provider_base=self._provider_base_url,
+        )
+        self.pool_registry.load()
         # R5: ResponseCache — 精确匹配响应缓存（IFF_CACHE_ENABLED 环境变量可覆盖 YAML）
         _cache_env = os.environ.get("IFF_CACHE_ENABLED")
         if _cache_env is not None:
@@ -133,6 +144,13 @@ class ProxyManager:
         self._req_counter = itertools.count()
         # R7: 多副本选择器缓存
         self._selectors: dict = {}
+
+    def _provider_base_url(self, provider_name: str) -> str:
+        """池端点指纹用：provider 任一已配置 base URL（仅作变化检测器）。"""
+        cfg = self.cloud.get_provider_config(provider_name)
+        if cfg is None:
+            return ""
+        return cfg.openai_base or cfg.anthropic_base or ""
 
     def new_request_id(self) -> str:
         """Generate a unique, thread-safe request ID for logging.
