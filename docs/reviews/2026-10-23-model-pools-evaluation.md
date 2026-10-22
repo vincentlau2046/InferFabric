@@ -7,7 +7,7 @@
 - 设计：`docs/superpowers/specs/2026-10-23-logical-model-pools-design.md`
 - 计划：`docs/superpowers/plans/2026-10-23-logical-model-pools.md`
 - 状态：`specs/model-pools/STATUS.md`
-- 提交链：aa7e11c…96cfee5（13 笔，sandbox main）
+- 提交链：aa7e11c…b9beb9f（15 笔，sandbox main；b9beb9f 为提交卫生修复，见 §6.1）
 
 ## 1. 核心验收对照（spec §14，P1+P2 范围）
 
@@ -32,7 +32,8 @@
 
 | 门 | 结果 |
 |---|---|
-| 全量 pytest（unit + integration） | **1484 passed / 0 failed**（43.4s，sandbox main，评审修复后复验） |
+| 全量 pytest（unit + integration） | **1484 passed / 0 failed**（43.4s，sandbox 工作区，评审修复后复验） |
+| 提交树复验（干净 worktree @ b9beb9f） | **1443 passed / 0 failed** + import 冒烟 6.1.4（差值 41 例为他人未提交 WIP 测试，仅存在于工作区） |
 | `python3 -c "import inferfabric"` | 通过（6.1.6） |
 | 隔离 HTTP 冒烟（生产 --async 同款 build_app） | 10/10 通过（评审修复后复验） |
 | `node --check`（model-pools.js） | 通过 |
@@ -135,6 +136,28 @@ pools:
 Minor（记账不修）：selector 证据预过滤纯优化；route 字段与 record 单源
 统一留 P3；dashboard 候选表虚拟滚动（当前规模远低于阈值）。
 
+### 6.1 提交卫生修复（b9beb9f）与安全审查复扫
+
+**提交卫生修复**：提交树干净 worktree 复验发现 13 例 RED（test_ssrf 11 +
+test_cloud_discovery 2）。bisect 定位：0d6b565 整文件暂存 handler.py 时
+误扫入既有未提交的 cloud-test UX WIP（与生产 f0c642e/48c5745 已合入内容
+重复），配套测试更新仍留在工作区 → 提交树「旧测试 vs 新代码」不自洽。
+逐一核对确认**仅 handler.py 受污染**（其余 M 文件的净 diff 均为纯任务
+增量；forwarder 的 _CLOUD_UA WIP 此前已用 /tmp 剥离法排除）。
+修复：三方合并剥离（base − WIP + 任务 50 行，零冲突）→ commit b9beb9f；
+工作区 handler.py 原样恢复 WIP 未提交状态。修复后提交树全量
+**1443 passed / 0 failed**。**合入审查请看净 diff
+（`git diff a86f5bc..b9beb9f`），勿逐笔看中间提交**（中间提交历史仍含
+已剥除的 WIP，末端提交已抵消）。
+
+**安全审查复扫（提交后自动扫描）3 项 MEDIUM**：均位于基线 a86f5bc 的
+cloud-test URL 校验/探测代码（`_PRIVATE_NETS` 子网清单不完全、探测响应
+无上限读取、拒绝日志含完整 URL），**不在本任务净 diff 内**（本任务对
+handler.py 的 50 行增量不含任何被标记模式）。属生产既有代码问题，归
+cloud UX 工作流处理；本任务不代改（避免再次污染任务 diff）。三点建议
+（显式公网地址策略、探测读取上限+finally 关闭、日志脱敏为
+scheme/host/port+静态码）已在合入清单中转达用户。
+
 ## 7. 生产合入前需用户单独批准的事项
 
 1. **PR-14 边界**：`forwarder.py` 改动为增量可选参数
@@ -152,8 +175,9 @@ Minor（记账不修）：selector 证据预过滤纯优化；route 字段与 re
 ## 8. 部署步骤草案（不执行）
 
 ```bash
-# 1. 沙箱终态复验（已通过，合入前重跑）
+# 1. 沙箱终态复验（已通过，合入前重跑）—— 提交树用干净 worktree，工作区含他人 WIP
 cd sandbox && python3 -m pytest tests/unit/ tests/integration/ -q
+git worktree add /tmp/iff-verify HEAD && cd /tmp/iff-verify && python3 -m pytest tests/unit/ tests/integration/ -q
 # 2. diff 审查后合入生产（main-only 工作流：ff-merge，精确文件清单）
 #    - inferfabric/model_pool/（新增目录）
 #    - inferfabric/forwarder.py / proxy/handler.py / proxy/chat_handlers.py（增量）

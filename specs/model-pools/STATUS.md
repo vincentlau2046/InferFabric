@@ -14,7 +14,8 @@
 | Dashboard 面板（Task 9） | 完成 | 只读池面板 + 双协议解释 + 服务端原子 toggle（CAS 409 处理）；Node VM 行为测试 6 例 |
 | /v1/models 逻辑名（Task 10） | 完成 | iff/<pool> owned_by=iff-pool；无能力并集；空 registry 输出与现状一致；test_v1_models.py |
 | 评审修复 pass（Task 11 Step 4） | 完成 | 19 项 Important TDD 修复（配置硬化/revision 推进/证据指纹/证据功能覆盖/§7 不可迁移守卫/跨位置强制/预算覆盖排队/committed 边界/客户端脱敏/501 不回退/云发现/served_name 就绪/物理目标容量门/逐 attempt 观测/重载顺序/缓存旁路/CAS 顺序/竞态窗口）；tests/unit/model_pool/test_review_fixes.py 36 例 |
-| 全量回归 | 通过 | unit + integration：1484 passed（评审修复 pass 后复验） |
+| 全量回归 | 通过 | 工作区 1484 passed（评审修复 pass 后复验）；提交树干净 worktree 1443 passed（b9beb9f 后复验，差值 41 例为他人未提交 WIP 测试） |
+| 提交卫生修复 | 完成 | 0d6b565 误扫入 handler.py 的 cloud-test WIP（=生产 f0c642e/48c5745 内容）经三方合并剥离（commit b9beb9f，提交树 13 例 RED → 全绿）；工作区 WIP 原样保留未提交；合入审查看净 diff `git diff a86f5bc..b9beb9f` |
 | import 冒烟 | 通过 | `python3 -c "import inferfabric"` → 6.1.6 |
 | 隔离 HTTP 冒烟 | 通过 | 生产 --async 同款 build_app + 假 vLLM 双协议上游：OpenAI/Anthropic iff/fast 200 且内容来自选定候选；unknown_pool 404；no_compatible_target 400；admin GET/PUT/dry-run 全链路；全程零 ensure_service（评审修复后复验 10/10） |
 | 独立代码评审 | 完成 | 20 Important + 3 Minor → 19 项 TDD 修复 / 6 项裁决 / 3 项 Minor 记账；见评估报告 §6 |
@@ -24,4 +25,5 @@
 | 真实探测（PROBED 证据）/ 预算硬顶 | 留白 | 需管理员显式出网授权 / 独立任务 |
 
 提交链（sandbox main）：aa7e11c → e536a6a → 6499430 → 886ecba → 9f87b89 →
-2db6790 → 0d6b565 → 63146c7 → d2f702c → b792599 → d74d769 → 8a581f9 → 96cfee5
+2db6790 → 0d6b565 → 63146c7 → d2f702c → b792599 → d74d769 → 8a581f9 →
+96cfee5 → 468d006（评审修复）→ b9beb9f（提交卫生修复）
