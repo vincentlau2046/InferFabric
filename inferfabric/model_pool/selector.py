@@ -111,12 +111,9 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
         elif cand.kind == "cloud" and f"{cand.provider}/{cand.model_id}" not in runtime.cloud_models:
             reason = "cloud_model_missing"
 
-        if reason in ("ok", "feature_unsupported"):
-            # 协议证据已过（或仅功能不匹配）→ 视为协议兼容
-            if _evidence_ok(resolved, req.protocol, pool.accept_declared) \
-                    and location in pool.allowed_locations:
-                had_protocol_compatible = True
-        elif reason in ("local_not_ready", "cloud_model_missing"):
+        # 「协议兼容但未就绪」才有 no_ready_target；功能不匹配属兼容性问题
+        # （no_compatible_target），不算未就绪
+        if reason in ("local_not_ready", "cloud_model_missing", "cooldown"):
             had_protocol_compatible = True
 
         included = reason == "ok"
