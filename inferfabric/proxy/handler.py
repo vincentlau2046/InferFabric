@@ -800,6 +800,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 seen_cloud_ids.add(model_id)
                 all_models.append(cm.to_api_dict())
 
+        # 逻辑模型池：启用且有可解析候选的池以逻辑名列出（Task 10）。
+        # 不合并候选能力（无 capability union）— 池是路由目标，非能力聚合。
+        pool_reg = getattr(pm, "pool_registry", None)
+        if pool_reg is not None:
+            snap = pool_reg.snapshot()
+            existing_ids = {m.get("id") for m in all_models}
+            for name, ps in snap.pools.items():
+                logical = f"iff/{name}"
+                if (ps.pool.enabled and ps.candidates
+                        and logical not in existing_ids):
+                    all_models.append({"id": logical, "object": "model",
+                                       "owned_by": "iff-pool"})
+
         if all_models:
             self._send_json({"object": "list", "data": all_models})
         else:
