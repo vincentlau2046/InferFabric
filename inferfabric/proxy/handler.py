@@ -9,7 +9,6 @@ Extracted from proxy.py (v4.1 P3 split).
 """
 
 import errno
-import re
 import sys
 import os
 import signal
@@ -253,7 +252,6 @@ _POST_ROUTES = {
     "/admin/cloud/test":        _admin(lambda h, pm: h._handle_cloud_test(pm)),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
-    "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
@@ -1635,23 +1633,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         pm._cloud_discovered = True
         # Restart polling after reload (reload stops the old polling thread)
         pm.cloud.start_polling()
-        # 双键注册表只数短名键（与 discover 一致，避免计数膨胀）
-        unique = sum(1 for k in models if "/" not in k)
         self._send_json({
             "status": "reloaded",
             "providers": len(pm.cloud.providers),
-            "cloud_models": unique,
+            "cloud_models": len(models),
         })
 
     def _handle_cloud_discover(self, pm):
         """POST /admin/cloud/discover — 手动触发模型发现。"""
         models = pm.cloud.discover_all()
         pm._cloud_discovered = True
-        # 注册表是双键（短名 + provider/ 前缀）——只数短名键，避免把 4 个模型报成 8
-        unique = {k: m for k, m in models.items() if "/" not in k}
         self._send_json({
             "status": "discovered",
-            "cloud_models": len(unique),
+            "cloud_models": len(models),
             "models": [
                 {
                     "id": m.model_id,
@@ -1660,331 +1654,148 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "anthropic": m.anthropic_available,
                     "discovered_at": m.discovered_at,
                 }
-                for m in unique.values()
+                for m in models.values()
             ],
         })
 
     def _validate_cloud_test_url(self, url: str, pm) -> tuple:
-        """Validate a cloud provider test URL (v6.6 relaxed policy).
+        """Validate a cloud provider test URL for SSRF protection.
 
         Returns (is_valid: bool, reason: str, resolved_ips: list[str]).
         The resolved_ips list is returned on success so the caller can
         connect directly to the verified IP (TOCTOU mitigation — prevents
         DNS rebinding between validation and connection).
-
-        Policy (admin-only endpoint; the whole point is to validate a
-        provider BEFORE it is registered, so no registry whitelist):
-          - scheme must be http or https (http for intranet relay stations)
-          - host must be an IP literal or resolve via DNS
-          - cloud metadata address 169.254.169.254 is still rejected
-          - private / LAN / loopback targets are ALLOWED (intranet relay
-            scenario) and logged — the endpoint is localhost/admin-gated,
-            so an attacker with dashboard access can already operate this box.
+        Checks:
+          - scheme must be https
+          - host must not resolve to a private/internal IP
+          - host must be a registered cloud provider base URL
         """
+        # Parse URL
         try:
             parsed = urlparse(url)
         except Exception:
             return False, "invalid URL", []
 
-        if parsed.scheme not in ("http", "https"):
-            return False, "only http/https URLs are allowed", []
+        # Only allow HTTPS
+        if parsed.scheme != "https":
+            return False, "only https URLs are allowed", []
 
         hostname = parsed.hostname
         if not hostname:
             return False, "missing hostname in URL", []
 
-        _METADATA_IP = "169.254.169.254"
-
-        def _ip_kind(ip_str: str) -> str:
-            """'metadata' | 'ok'."""
-            try:
-                ip = ipaddress.ip_address(ip_str)
-            except ValueError:
-                return "ok"
-            check_ip = ip.ipv4_mapped if ip.version == 6 and ip.ipv4_mapped else ip
-            if check_ip == ipaddress.ip_address(_METADATA_IP):
-                return "metadata"
-            return "ok"
-
-        # IP literal host (intranet relay: http://192.168.x.x:3000/v1) — no DNS
-        try:
-            ipaddress.ip_address(hostname)
-            if _ip_kind(hostname) == "metadata":
-                return False, "cloud metadata address not allowed", []
-            log.warning("Cloud test → IP literal %s (admin-initiated)", hostname)
-            return True, "ok (ip literal)", [hostname]
-        except ValueError:
-            pass
-
+        # DNS resolve and check for private IPs
+        _PRIVATE_NETS = [
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("10.0.0.0/8"),
+            ipaddress.ip_network("172.16.0.0/12"),
+            ipaddress.ip_network("192.168.0.0/16"),
+            ipaddress.ip_network("169.254.0.0/16"),
+            ipaddress.ip_network("100.64.0.0/10"),  # CGNAT / cloud metadata
+            ipaddress.ip_network("::1/128"),
+            ipaddress.ip_network("fc00::/7"),
+        ]
         safe_ips = []
         try:
             resolved = socket.getaddrinfo(hostname, None)
             for family, _type, _proto, _canonname, sockaddr in resolved:
                 ip_str = sockaddr[0]
-                if _ip_kind(ip_str) == "metadata":
-                    continue
                 try:
                     ip = ipaddress.ip_address(ip_str)
+                    # IPv4-mapped IPv6: unwrap and check against v4 nets
                     check_ip = ip.ipv4_mapped if ip.version == 6 and ip.ipv4_mapped else ip
-                    if check_ip.is_private or check_ip.is_loopback or check_ip.is_link_local:
-                        log.warning(
-                            "Cloud test → private/LAN address %s (%s) — "
-                            "admin-initiated intranet relay test", hostname, ip_str)
+                    for net in _PRIVATE_NETS:
+                        if check_ip in net:
+                            return False, f"private IP address not allowed: {ip_str}", []
+                    safe_ips.append(ip_str)
                 except ValueError:
                     pass
-                safe_ips.append(ip_str)
         except socket.gaierror:
             return False, f"DNS resolution failed for {hostname}", []
 
         if not safe_ips:
             return False, "no valid IPs resolved", []
 
-        if parsed.scheme == "http":
-            log.warning("Cloud test → plain http endpoint %s (intranet relay)", url)
+        # Check against registered cloud provider whitelist
+        try:
+            pm.ensure_cloud_discovered()
+            provider_hosts = set()
+            for _pname, pcfg in pm.cloud.providers.items():
+                for base_field in ("openai_base", "anthropic_base"):
+                    base_url = getattr(pcfg, base_field, "") or ""
+                    if base_url:
+                        try:
+                            parsed_base = urlparse(base_url)
+                            if parsed_base.hostname:
+                                provider_hosts.add(parsed_base.hostname)
+                        except Exception:
+                            pass
+            if hostname not in provider_hosts:
+                return False, f"host '{hostname}' is not a registered cloud provider", []
+        except Exception as e:
+            log.warning("Cloud provider whitelist check failed: %s", e)
+            return False, "cloud provider registry unavailable", []
 
         return True, "ok", safe_ips
 
-    def _make_pinned_conn(self, host: str, port: int, resolved_ip: str,
-                          use_tls: bool, timeout: int = 15):
-        """Build an HTTP connection to a verified IP (TOCTOU mitigation).
-
-        TCP-connects to resolved_ip, optionally wraps TLS with
-        server_hostname=host (SNI + cert validation). Tests patch this
-        factory to inject canned connections.
-        """
-        import http.client
-        conn = http.client.HTTPConnection(resolved_ip, port, timeout=timeout)
-        conn.connect()
-        if use_tls:
-            import ssl
-            ctx = ssl.create_default_context()
-            sock = ctx.wrap_socket(conn.sock, server_hostname=host)
-            conn.sock = sock
-        conn._http_vsn_str = 'HTTP/1.1'
-        return conn
-
-    def _probe_cloud_endpoint(self, base_url: str, api_key: str, protocol: str,
-                              probe_model: str, resolved_ip: str) -> dict:
-        """Probe one provider base URL; classify the result.
-
-        Returns {"status", "protocol", "url", "http_status", "model_count",
-        "message"} where status is one of:
-        ok | ok_no_listing | rate_limited | auth_failed | model_unavailable | error
-
-        - probe_model set  -> real 1-token completion (strongest signal)
-        - otherwise        -> GET {base}/models listing
-        Anthropic bases accept both "https://host/.../v1" and bare-base forms.
-        """
-        parsed = urlparse(base_url)
-        scheme = parsed.scheme or "https"
-        host = parsed.hostname or ""
-        port = parsed.port or (443 if scheme == "https" else 80)
-        use_tls = scheme == "https"
-        base = base_url.rstrip("/")
-
-        if protocol == "anthropic":
-            if base.endswith("/v1"):
-                list_paths = [base + "/models"]
-                msg_paths = [base + "/messages"]
-            else:
-                list_paths = [base + "/v1/models", base + "/models"]
-                msg_paths = [base + "/v1/messages", base + "/messages"]
-        else:
-            list_paths = [base + "/models"]
-            msg_paths = [base + "/chat/completions"]
-
-        def _auth_headers() -> dict:
-            h = {"Content-Type": "application/json"}
-            h["Host"] = host if not parsed.port else f"{host}:{parsed.port}"
-            if protocol == "anthropic":
-                # 空 key = 公开端点裸测：不发空 x-api-key（§3.3-A）；协议头恒发
-                if api_key:
-                    h["x-api-key"] = api_key
-                h["anthropic-version"] = "2023-06-01"
-            elif api_key:
-                h["Authorization"] = f"Bearer {api_key}"
-            return h
-
-        def _read_body(resp, limit=2000) -> str:
-            try:
-                return resp.read(limit).decode("utf-8", "replace")
-            except Exception:
-                return ""
-
-        def _detail_from(raw: str) -> str:
-            """Short human-readable error detail from an upstream error body."""
-            if not raw:
-                return ""
-            try:
-                obj = json.loads(raw)
-                err = obj.get("error") if isinstance(obj, dict) else None
-                if isinstance(err, dict) and err.get("message"):
-                    return str(err["message"])[:160]
-                if isinstance(err, str):
-                    return err[:160]
-                if isinstance(obj, dict) and obj.get("detail"):
-                    return str(obj["detail"])[:160]
-            except Exception:
-                pass
-            return raw[:160].strip()
-
-        paths = msg_paths if probe_model else list_paths
-        last = {"status": "error", "http_status": 0, "model_count": 0, "message": "no response"}
-        for path_url in paths:
-            path = path_url[len(base):] or "/"
-            try:
-                conn = self._make_pinned_conn(host, port, resolved_ip, use_tls)
-            except Exception as e:
-                return {"status": "error", "protocol": protocol, "url": base_url,
-                        "http_status": 0, "model_count": 0,
-                        "message": f"connect failed: {e}"}
-            try:
-                if probe_model:
-                    body = json.dumps({"model": probe_model, "max_tokens": 1,
-                                       "messages": [{"role": "user", "content": "ping"}]})
-                    conn.request("POST", path, body=body, headers=_auth_headers())
-                    resp = conn.getresponse()
-                    raw = _read_body(resp)
-                    code = resp.status
-                    if 200 <= code < 300:
-                        last = {"status": "ok", "http_status": code, "model_count": 1,
-                                "message": f"探测模型 '{probe_model}' 可用（真实生成 1 token 验证）"}
-                    elif code in (401, 403):
-                        detail = _detail_from(raw)
-                        # §3.4：百炼 key 正常、模型不在套餐也回 403（detail 含 not_supported）
-                        # → 归为 model_unavailable（连接与鉴权正常，仅该模型不可用）
-                        unsupported = bool(re.search(
-                            r'not.?supported|unsupported.?model|model.?(not|un)?found',
-                            detail, re.IGNORECASE))
-                        if code == 403 and unsupported:
-                            last = {"status": "model_unavailable", "http_status": code, "model_count": 0,
-                                    "message": f"探测模型 '{probe_model}' 不在套餐 (HTTP {code}): {detail or '上游未返回详情'}"}
-                        else:
-                            last = {"status": "auth_failed", "http_status": code, "model_count": 0,
-                                    "message": f"鉴权失败 (HTTP {code}): {detail or 'API Key 无效或无权限'}"}
-                    else:
-                        last = {"status": "model_unavailable", "http_status": code, "model_count": 0,
-                                "message": f"模型 '{probe_model}' 不可用 (HTTP {code}): {_detail_from(raw) or '上游未返回详情'}"}
-                else:
-                    conn.request("GET", path, headers=_auth_headers())
-                    resp = conn.getresponse()
-                    raw = _read_body(resp)
-                    code = resp.status
-                    if 200 <= code < 300:
-                        try:
-                            mc = len((json.loads(raw) or {}).get("data", []))
-                        except Exception:
-                            mc = -1
-                        last = {"status": "ok", "http_status": code, "model_count": mc,
-                                "message": "连接正常" + (f"，上游列出 {mc} 个模型" if mc >= 0 else "")}
-                    elif code in (401, 403):
-                        last = {"status": "auth_failed", "http_status": code, "model_count": 0,
-                                "message": f"鉴权失败 (HTTP {code}): {_detail_from(raw) or 'API Key 无效或无权限'}"}
-                    elif code == 429:
-                        last = {"status": "rate_limited", "http_status": code, "model_count": 0,
-                                "message": f"可达但限流 (HTTP 429): {_detail_from(raw) or '上游未返回详情'}"}
-                    else:
-                        # 404 on /models: reachable but no listing (e.g. Baidu
-                        # qianfan) — connection OK, model list unknown.
-                        last = {"status": "ok_no_listing", "http_status": code, "model_count": 0,
-                                "message": f"可达但无模型列表 (HTTP {code}) — 可填探测模型进一步验证"}
-                if last["status"] != "error":
-                    return {"status": last["status"], "protocol": protocol, "url": base_url,
-                            "http_status": last["http_status"], "model_count": last["model_count"],
-                            "message": last["message"]}
-            except Exception as e:
-                last = {"status": "error", "http_status": 0, "model_count": 0,
-                        "message": f"request failed: {e}"}
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-        return {"status": last["status"], "protocol": protocol, "url": base_url,
-                "http_status": last.get("http_status", 0), "model_count": 0,
-                "message": last.get("message", "no response")}
-
-    #: probe 结果中视为『通过』的状态（UI 添加门禁用）
-    CLOUD_TEST_PASS_STATUSES = ("ok", "ok_no_listing", "rate_limited")
-
     def _handle_cloud_test(self, pm):
-        """POST /admin/cloud/test — 探测单个 provider base URL（允许未注册）。
-
-        body: {url: base_url, api_key, protocol: openai|anthropic, probe_model?}
-        返回 {status, protocol, url, http_status, model_count, message, pass}
-        """
+        """POST /admin/cloud/test — 测试 Provider 连接。"""
         data = self._read_body()
         if not data:
             self._send_json({"error": "No body"}, 400)
             return
-        base_url = data.get("url", "")
+        url = data.get("url", "")
         api_key = data.get("api_key", "")
-        protocol = data.get("protocol", "openai")
-        probe_model = (data.get("probe_model") or "").strip()
-        if not base_url:
+        if not url:
             self._send_json({"error": "Missing url"}, 400)
             return
-        if protocol not in ("openai", "anthropic"):
-            self._send_json({"error": "Invalid protocol"}, 400)
-            return
 
-        valid, reason, safe_ips = self._validate_cloud_test_url(base_url, pm)
+        # SSRF validation (returns resolved IPs to prevent DNS rebinding TOCTOU)
+        valid, reason, safe_ips = self._validate_cloud_test_url(url, pm)
         if not valid:
-            log.warning("Cloud test URL rejected: %s — reason: %s", base_url, reason)
-            self._send_json({"error": f"URL check failed: {reason}"}, 400)
+            log.warning("Cloud test URL rejected: %s — reason: %s", url, reason)
+            self._send_json({"error": f"SSRF check failed: {reason}"}, 400)
             return
 
+        # Use the first resolved IP directly to prevent DNS rebinding
+        # between validation and connection (TOCTOU mitigation).
+        # We use http.client.HTTPConnection for the TCP socket to the
+        # verified IP, then manually wrap with ssl.SSLSocket using
+        # server_hostname=<original hostname> for SNI + cert validation.
         resolved_ip = safe_ips[0]
-        result = self._probe_cloud_endpoint(base_url, api_key, protocol, probe_model, resolved_ip)
-        result["pass"] = result["status"] in self.CLOUD_TEST_PASS_STATUSES
-        self._send_json(result)
+        try:
+            import http.client
+            import ssl
+            parsed = urlparse(url)
+            port = parsed.port or 443
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
 
-    def _handle_cloud_provider_test(self, pm):
-        """POST /admin/cloud/provider-test — 用已存 key 测试已注册 provider 的全部 base。
+            # Build TCP connection to verified IP, then TLS with original hostname
+            ctx = ssl.create_default_context()
+            # Step 1: TCP connect to the verified IP (no DNS rebind possible)
+            tcp_conn = http.client.HTTPConnection(resolved_ip, port, timeout=15)
+            tcp_conn.connect()
+            # Step 2: TLS wrap with server_hostname=original hostname (SNI + cert check)
+            sock = ctx.wrap_socket(tcp_conn.sock, server_hostname=parsed.hostname)
+            tcp_conn.sock = sock
+            tcp_conn._http_vsn_str = 'HTTP/1.1'
 
-        body: {provider, probe_model?}
-        返回 {provider, key_set, results: [...], ok: bool}
-        """
-        data = self._read_body()
-        name = ((data or {}).get("provider") or "").strip()
-        probe_model = ((data or {}).get("probe_model") or "").strip()
-        if not name:
-            self._send_json({"error": "Missing provider"}, 400)
-            return
-        cfg = pm.cloud.providers.get(name)
-        if cfg is None:
-            self._send_json({"error": f"Provider '{name}' not found"}, 404)
-            return
-
-        key_set = bool(cfg.api_key)
-        targets = []
-        if cfg.openai_base:
-            targets.append(("openai", cfg.openai_base))
-        if cfg.anthropic_base:
-            targets.append(("anthropic", cfg.anthropic_base))
-        if not targets:
-            self._send_json({"provider": name, "key_set": key_set, "results": [],
-                             "ok": False, "message": "该 Provider 未配置任何 Base URL"}, 400)
-            return
-
-        results = []
-        for protocol, base_url in targets:
-            try:
-                valid, reason, safe_ips = self._validate_cloud_test_url(base_url, pm)
-                if not valid:
-                    results.append({"status": "error", "protocol": protocol, "url": base_url,
-                                    "http_status": 0, "model_count": 0,
-                                    "message": f"URL check failed: {reason}"})
-                    continue
-                results.append(self._probe_cloud_endpoint(
-                    base_url, cfg.api_key, protocol, probe_model, safe_ips[0]))
-            except Exception as e:
-                results.append({"status": "error", "protocol": protocol, "url": base_url,
-                                "http_status": 0, "model_count": 0, "message": str(e)})
-        for r in results:
-            r["pass"] = r["status"] in self.CLOUD_TEST_PASS_STATUSES
-        ok = all(r["pass"] for r in results)
-        self._send_json({"provider": name, "key_set": key_set, "results": results, "ok": ok})
+            headers = {
+                "Host": parsed.hostname if not parsed.port else f"{parsed.hostname}:{parsed.port}",
+                "Content-Type": "application/json",
+            }
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            tcp_conn.request("GET", path, headers=headers)
+            resp = tcp_conn.getresponse()
+            body = json.loads(resp.read().decode("utf-8")) or {}
+            model_count = len(body.get("data", []))
+            tcp_conn.close()
+            self._send_json({"status": "ok", "model_count": model_count})
+        except Exception as e:
+            self._send_json({"error": str(e)}, 502)
 
     def _handle_cloud_providers(self, pm):
         """GET/POST/DELETE /admin/cloud/providers — 列出、添加或删除 provider。"""
