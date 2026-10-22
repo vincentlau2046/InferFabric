@@ -290,6 +290,8 @@ class _WFile:
         self.data = b""
 
     def write(self, b):
+        if isinstance(b, str):
+            b = b.encode()
         self.data += b
 
     def flush(self):
@@ -389,3 +391,66 @@ class TestForwarderSuppressBoundary:
                                   protocol="openai")
         assert result.status == 400                # 现行为：直发客户端
         assert h.status == 400 and h.wfile.data    # 客户端已收到错误
+
+
+class _FlakyStreamResp:
+    """流式响应替身：输出 chunks_before_fail 个块后上游断连（IncompleteRead）。"""
+
+    def __init__(self, chunks_before_fail=1, status=200):
+        self.status = status
+        self._chunks = [b"data: c1\n\n"] * chunks_before_fail
+
+    def getheader(self, h, default=None):
+        return {"content-type": "text/event-stream"}.get(h, default)
+
+    def read(self, n=-1):
+        if self._chunks:
+            return self._chunks.pop(0)
+        from http.client import IncompleteRead
+        raise IncompleteRead(b"", None)
+
+    def close(self):
+        pass
+
+
+class TestCommittedStreamBoundary:
+    """安全审查 2026-10-23 #2：已提交（headers/首块已写）后上游中断，
+    必须报告 committed — 池层据此不重放、不发第二信封（spec §6.4）。"""
+
+    @pytest.mark.parametrize("chunks", [0, 1])   # headers 后断 / 首块后断
+    @patch("inferfabric.forwarder.urlopen")
+    def test_cloud_suppress_midstream_fail_is_committed(self, mock_urlopen, chunks):
+        from inferfabric.forwarder import forward_to_cloud
+        cfg, cm = _provider_cfg()
+        mock_urlopen.return_value = _FlakyStreamResp(chunks_before_fail=chunks)
+        h = _FakeRespHandler()
+        result = forward_to_cloud(
+            h, {"model": "m", "messages": [], "stream": True}, cfg, cm,
+            protocol="openai", suppress_client_errors=True)
+        assert result.committed is True           # 已输出 → 不可重放
+        assert mock_urlopen.call_count == 1       # 无第二次上游调用
+        assert h.status == 200                    # 客户端已收到响应头
+
+    @pytest.mark.parametrize("chunks", [0, 1])
+    @patch("inferfabric.forwarder.HTTPConnection")
+    def test_anthropic_local_suppress_midstream_fail_is_committed(self,
+                                                                  mock_conn, chunks):
+        from inferfabric.forwarder import forward_anthropic_local
+        conn = mock_conn.return_value
+        conn.getresponse.return_value = _FlakyStreamResp(chunks_before_fail=chunks)
+        h = _FakeRespHandler()
+        pm = SimpleNamespace(response_cache=None)
+        model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
+        status = forward_anthropic_local(
+            h, pm, {"model": "x", "messages": [], "stream": True},
+            "key", model_obj, "iff/fast", suppress_client_errors=True)
+        assert status == 200                      # committed 信号（None = 可重放）
+        assert h.status == 200
+
+    def test_run_attempts_does_not_replay_committed_stream(self):
+        # 端到端不变量：committed 流中断 → 第二候选零调用
+        t = Recorder([AttemptResult(ok=False, committed=True, status=200,
+                                    error="stream truncated")])
+        out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
+        assert out.committed is True and out.ok is False
+        assert t.calls == ["c1"]

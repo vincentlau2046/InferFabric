@@ -278,6 +278,9 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
     # P2 suppress 模式：单次尝试，退避/重试交由池层统一预算（spec §6.3）
     max_retries = 1 if suppress_client_errors else 3
     last_error = None
+    # P2 安全边界：客户端响应是否已开始输出（headers/首块已写）。
+    # committed 后的任何失败都不可重放/不可再写第二信封（spec §6.4）。
+    committed = False
     for attempt in range(max_retries):
         try:
             req = Request(url, data=body, headers=headers, method="POST")
@@ -315,6 +318,7 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
             if was_stream:
                 # v6.1: TTFT = 首个内容 token（回调记 handler._ttft_ms），
                 # 不再用 HTTP header 到达时刻（header 早于 prefill 完成，语义错误）
+                committed = True   # headers 即将发出 — 此后失败不可重放（§6.4）
                 sse_buf = SSELineBuffer(first_token_ttft_cb(handler))
                 pipe_stream_response(handler, resp, sse_buf)
                 return CloudResult(
@@ -327,6 +331,7 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
                 resp_body = resp.read()
                 result = json.loads(resp_body)
                 resp.close()
+                committed = True   # send_json 原子交付客户端
                 send_json(handler, result)
                 # 双协议归一化（含缓存命中拆分）— CloudResult.usage 携带
                 # prompt_tokens / prompt_tokens_cached / completion_tokens
@@ -371,6 +376,17 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
                 duration_ms=(time.monotonic() - start) * 1000,
             )
         except Exception as e:
+            if suppress_client_errors and committed:
+                # 已开始输出后上游中断 → committed 失败：
+                # 不重放、不切候选、不写第二信封（§6.4，安全审查 2026-10-23 #2）
+                log.error("Cloud %s stream failed after commit: %s",
+                          provider_cfg.name, e)
+                return CloudResult(
+                    status=200,
+                    error=f"upstream stream failed: {e}",
+                    committed=True,
+                    duration_ms=(time.monotonic() - start) * 1000,
+                )
             if attempt < max_retries - 1:
                 log.warning(
                     "Cloud %s request failed (attempt %d/%d), retrying in %.1fs...",
@@ -386,6 +402,12 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
               provider_cfg.name, max_retries, last_error)
     err_msg = f"Cloud provider unreachable: {last_error}"
     if suppress_client_errors:
+        if committed:
+            # 防御兜底：异常路径已在上文返回，此处不应到达；仍按 committed 处理
+            return CloudResult(
+                status=200, error=err_msg, committed=True,
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
         # status=None = 连接层失败（池层按「立即切下一候选」处理，不做同目标重试）
         return CloudResult(
             status=None,
@@ -424,6 +446,9 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
     body = json.dumps(data).encode("utf-8")
 
     last_error = None
+    # P2 安全边界：已交付客户端的上游状态（None = 未提交）。
+    # committed 后的失败返回该状态而非 None — 池层不重放（spec §6.4）。
+    committed_status = None
     for attempt in range(1 if suppress_client_errors else UPSTREAM_LOCAL_RETRIES + 1):
         conn = None
         try:
@@ -458,12 +483,14 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                 # message.usage.input_tokens + message_delta 的 usage.output_tokens）
                 # v6.1: 首 token 回调 — TTFT 记首个 content_block_delta 时刻
                 # （message_start 是 metadata 前言，不算 token）
+                committed_status = resp.status   # headers 即将发出（§6.4）
                 sse_buf = SSELineBuffer(first_token_ttft_cb(handler))
                 pipe_stream_response(handler, resp, sse_buf)
                 handler._usage = dict(sse_buf.usage)
             else:
                 handle_json_response(handler, resp, model_obj, original_model, data, auth_header,
                                      response_cache=getattr(pm, 'response_cache', None))
+                committed_status = resp.status
             return resp.status
 
         except (ConnectionRefusedError, ConnectionResetError, OSError, BrokenPipeError) as e:
@@ -474,7 +501,8 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                 except Exception:
                     pass
             if suppress_client_errors:
-                return None          # 连接失败：未提交，池层切下一候选
+                # committed（流中断）→ 返回已交付状态；None = 未提交可切候选
+                return committed_status
             if attempt < UPSTREAM_LOCAL_RETRIES:
                 delay_s = exponential_backoff(attempt)
                 log.warning("Local %s connection failed (attempt %d/%d): %s — retry in %.1fs",
@@ -486,6 +514,8 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
 
         except Exception as e:
             log.error("Local %s unexpected error: %s", model_obj.name, e)
+            if suppress_client_errors:
+                return committed_status   # committed 流中断 → 不重放；未提交 → None
             break
         finally:
             # M1: 统一在此关闭 conn — 成功返回、可重试状态分支、异常路径都经过
@@ -498,6 +528,6 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
 
     log.error("Local model failed after all retries: %s", last_error)
     if suppress_client_errors:
-        return None
+        return committed_status   # committed → 已交付状态；否则 None = 未提交
     send_json(handler, {"error": f"Local model unreachable: {last_error}"}, 503)
     return None
