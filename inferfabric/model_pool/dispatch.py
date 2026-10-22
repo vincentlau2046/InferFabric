@@ -113,12 +113,20 @@ def _agent_kwargs(handler) -> dict:
     }
 
 
+def _sanitize_error(err) -> str | None:
+    """日志安全：上游错误串压平换行并截断，防止大段响应内容/凭证进日志。"""
+    if err is None:
+        return None
+    flat = " ".join(str(err).split())
+    return flat[:300]
+
+
 def _log(pm, handler, *, req_id, key_name, model, status, error=None,
          route=None, cloud_provider=None, usage=None, ttft_ms=None):
     usage = usage or {}
     pm.logger.log(RequestLog(
         req_id=req_id, key_name=key_name, model=model,
-        status=status, error=error, route=route,
+        status=status, error=_sanitize_error(error), route=route,
         cloud_provider=cloud_provider,
         tokens_in=usage.get("prompt_tokens", 0),
         tokens_in_cached=usage.get("prompt_tokens_cached", 0),
@@ -185,14 +193,144 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
         return True
 
     cand = sel.chosen.candidate
-    if cand.kind == "local":
-        return _forward_pool_local_openai(
-            handler, pm, data, model=model, pool=pool_snap.pool.name, cand=cand,
-            req_id=req_id, key_name=key_name)
-    return _forward_pool_cloud(
-        handler, pm, data, protocol="openai", model=model,
-        pool=pool_snap.pool.name, cand=cand, req_id=req_id, key_name=key_name,
-        error_sender=_send_pool_error_openai)
+    # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
+    # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
+    gate = pm.dual_gate.acquire(model)
+    if not gate.ok:
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+             status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}")
+        handler._send_json(
+            {"error": f"Rate limited: {gate.reason}", "status": "rate_limit"}, 429)
+        return True
+    try:
+        if cand.kind == "local":
+            return _forward_pool_local_openai(
+                handler, pm, data, model=model, pool=pool_snap.pool.name, cand=cand,
+                req_id=req_id, key_name=key_name)
+        return _forward_pool_cloud(
+            handler, pm, data, protocol="openai", model=model,
+            pool=pool_snap.pool.name, cand=cand, req_id=req_id, key_name=key_name,
+            error_sender=_send_pool_error_openai)
+    finally:
+        gate.release()
+
+
+# ── Anthropic 入口 ──
+
+# IFF 错误码 → (HTTP status, Anthropic error type, 是否带 Retry-After)
+_ANTHROPIC_CONTRACT = {
+    "unknown_pool": (404, "not_found_error", False),
+    "no_compatible_target": (400, "invalid_request_error", False),
+    "pool_disabled": (503, "overloaded_error", True),
+    "no_ready_target": (503, "overloaded_error", True),
+    "pool_unavailable": (503, "overloaded_error", True),
+}
+
+
+def _send_pool_error_anthropic(handler, pm, *, req_id, key_name, model, code, message):
+    status, err_type, retry = _ANTHROPIC_CONTRACT.get(code, (503, "overloaded_error", True))
+    extra = {"Retry-After": str(_RETRY_AFTER_S)} if retry else None
+    _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+         status=status, error=code)
+    handler._send_json(
+        {"type": "error", "error": {"type": err_type, "message": message}},
+        status, extra_headers=extra)
+
+
+def handle_pool_messages(handler, pm, data, model) -> bool:
+    """Anthropic /v1/messages 的 iff/ 池分支。
+
+    Returns:
+        True  — 请求已完整处理（含错误响应已发）
+        False — 不是池请求，调用方继续原路径
+    """
+    if not is_pool_name(model):
+        return False
+
+    req_id = pm.new_request_id()
+    handler._req_start = getattr(handler, "_req_start", None) or time.monotonic()
+    auth_header = handler.headers.get("Authorization", "") or handler.headers.get("x-api-key", "")
+    key_name = pm.auth.key_name(auth_header) if pm.auth.enabled else "anonymous"
+
+    if pm.auth.enabled:
+        auth_ok, auth_reason = pm.auth.check(auth_header, model)
+        if not auth_ok:
+            # 鉴权失败走标准 401 信封（authentication_error）
+            _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+                 status=401, error=auth_reason)
+            handler._send_json(
+                {"type": "error",
+                 "error": {"type": "authentication_error", "message": auth_reason}},
+                401)
+            return True
+
+    registry = getattr(pm, "pool_registry", None)
+    snapshot = registry.snapshot() if registry is not None else None
+    pool_snap = (snapshot.pools.get(pool_name_of(model))
+                 if snapshot is not None else None)
+    if pool_snap is None:
+        _send_pool_error_anthropic(
+            handler, pm, req_id=req_id, key_name=key_name, model=model,
+            code="unknown_pool",
+            message=f"Unknown logical model: {model}")
+        return True
+
+    sel = select(pool_snap, extract_requirements("anthropic", data), runtime_view(pm))
+    if sel.chosen is None:
+        _send_pool_error_anthropic(
+            handler, pm, req_id=req_id, key_name=key_name, model=model,
+            code=sel.error or "no_compatible_target",
+            message=f"No eligible target for {model} "
+                    f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
+        return True
+
+    cand = sel.chosen.candidate
+    # 统一限流（同 OpenAI 路径；Anthropic 直连路径带 30s 等待语义，保持一致）
+    gate = pm.dual_gate.acquire(model, timeout=30)
+    if not gate.ok:
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+             status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}")
+        handler._send_json(
+            {"type": "error",
+             "error": {"type": "rate_limit_error",
+                       "message": f"Rate limited: {gate.reason}"}},
+            429)
+        return True
+    try:
+        if cand.kind == "local":
+            return _forward_pool_local_anthropic(
+                handler, pm, data, model=model, pool=pool_snap.pool.name, cand=cand,
+                req_id=req_id, key_name=key_name, auth_header=auth_header)
+        return _forward_pool_cloud(
+            handler, pm, data, protocol="anthropic", model=model,
+            pool=pool_snap.pool.name, cand=cand, req_id=req_id, key_name=key_name,
+            error_sender=_send_pool_error_anthropic)
+    finally:
+        gate.release()
+
+
+def _forward_pool_local_anthropic(handler, pm, data, *, model, pool, cand,
+                                  req_id, key_name, auth_header):
+    """本地候选（Anthropic 入站）：ready_only，复用 forward_anthropic_local。"""
+    model_obj = pm.mgr.find_model_by_served_name(cand.model_name)
+    if model_obj is None or model_obj.name not in pm.mgr.active_services:
+        _send_pool_error_anthropic(
+            handler, pm, req_id=req_id, key_name=key_name, model=model,
+            code="no_ready_target",
+            message=f"Local target '{cand.model_name}' is no longer active")
+        return True
+
+    data["model"] = model_obj.served_name or cand.model_name
+
+    # gate 已由 handle_pool_messages 统一获取/释放
+    status = forwarder.forward_anthropic_local(
+        handler, pm, data, auth_header, model_obj, model)
+    if status is not None:
+        usage = getattr(handler, "_usage", {}) or {}
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+             status=200 if status == 200 else 502, route=f"pool:{pool}/local",
+             usage=usage, ttft_ms=getattr(handler, "_ttft_ms", None))
+    return True
 
 
 def _forward_pool_local_openai(handler, pm, data, *, model, pool, cand,
@@ -227,36 +365,27 @@ def _forward_pool_local_openai(handler, pm, data, *, model, pool, cand,
     body = json.dumps(data).encode("utf-8")
     upstream_path = _ENGINE_API_PATHS.get(model_obj.type, "/v1/chat/completions")
 
-    gate = pm.dual_gate.acquire(model)  # 限流键 = 逻辑名（跨候选共享池配额）
-    if not gate.ok:
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=429, error=gate.reason, route=f"pool:{pool}/local")
-        handler._send_json(
-            {"error": f"Rate limited: {gate.reason}", "status": "rate_limit"}, 429)
-        return True
-    try:
-        # P1：同目标重试与直连路径一致（3 次），不跨候选；cache_body=None
-        # —— 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）
-        sent = False
-        for attempt in range(3):
-            if _forward_request(handler, pm, target_port, body, stream,
-                                model_name=model, upstream_path=upstream_path,
-                                cache_body=None):
-                sent = True
-                usage = getattr(handler, "_usage", {}) or {}
-                _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-                     status=200, route=f"pool:{pool}/local",
-                     usage=usage, ttft_ms=getattr(handler, "_ttft_ms", None))
-                break
-            if attempt < 2:
-                time.sleep(0.5 * (2 ** attempt))
-        if not sent:
+    # gate 已由 handle_pool_chat 统一获取/释放（含 ollama 分支）
+    # P1：同目标重试与直连路径一致（3 次），不跨候选；cache_body=None
+    # —— 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）
+    sent = False
+    for attempt in range(3):
+        if _forward_request(handler, pm, target_port, body, stream,
+                            model_name=model, upstream_path=upstream_path,
+                            cache_body=None):
+            sent = True
+            usage = getattr(handler, "_usage", {}) or {}
             _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-                 status=502, error="upstream_unavailable", route=f"pool:{pool}/local")
-            handler._send_json({"error": "Upstream unavailable after retry",
-                                "status": "upstream_unavailable"}, 502)
-    finally:
-        gate.release()
+                 status=200, route=f"pool:{pool}/local",
+                 usage=usage, ttft_ms=getattr(handler, "_ttft_ms", None))
+            break
+        if attempt < 2:
+            time.sleep(0.5 * (2 ** attempt))
+    if not sent:
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+             status=502, error="upstream_unavailable", route=f"pool:{pool}/local")
+        handler._send_json({"error": "Upstream unavailable after retry",
+                            "status": "upstream_unavailable"}, 502)
     return True
 
 
