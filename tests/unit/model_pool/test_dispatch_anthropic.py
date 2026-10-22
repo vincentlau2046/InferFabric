@@ -75,9 +75,10 @@ class TestPoolMessagesDispatch:
         assert anth_local[0]["original"] == "iff/fast"
         assert anth_local[0]["model_obj"].served_name == "qwen-small"
         assert pm.ensure_service_calls == []          # ready_only
-        assert pm.dual_gate.acquired == ["iff/fast"]  # 限流键 = 逻辑名
+        assert pm.dual_gate.acquired[:1] == ["iff/fast"]  # 外层逻辑名 gate
+        assert pm.dual_gate.acquired[1:] == ["qwen-small"]  # 物理目标 gate（F16）  # 限流键 = 逻辑名
         assert h.sent == []
-        assert any(getattr(e, "route", None) == "pool:fast/local"
+        assert any(getattr(e, "route", None) == "pool:fast/local:qwen-small"
                    and getattr(e, "model", None) == "iff/fast"
                    for e in pm.logger.entries)
 

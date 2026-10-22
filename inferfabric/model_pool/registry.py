@@ -124,8 +124,19 @@ class PoolRegistry:
         if not isinstance(raw, dict) or not raw:
             return False
         file_revision = raw.get("revision")
-        revision = int(file_revision) if isinstance(file_revision, int) else self._snapshot.revision + 1
-        parsed, issues = load_pools_dict(raw, current_revision=revision)
+        current = self._snapshot.revision
+        revision = file_revision if isinstance(file_revision, int) else current + 1
+        # 外部编辑常原地保留旧 revision 键：内容变化必须推进 revision，
+        # 否则持有旧 revision 的编辑者可 CAS 覆盖掉他人的修改（评审 #2）
+        if raw != self._raw and revision <= current:
+            revision = current + 1
+        try:
+            parsed, issues = load_pools_dict(raw, current_revision=revision)
+        except Exception as e:
+            # 解析崩溃（畸形类型逃逸静态校验等）→ 保留最后有效快照，不抛出
+            log.error("model_pools.yaml parse crashed (%s) — keeping last good snapshot",
+                      type(e).__name__)
+            return False
         if parsed is None:
             log.error("model_pools.yaml invalid — keeping last good snapshot: %s",
                       "; ".join(issues))
@@ -180,14 +191,16 @@ class PoolRegistry:
         """
         import copy
         with self._lock:
-            raw = copy.deepcopy(self._raw) if self._raw else None
-            pools = (raw or {}).get("pools") or {}
-            if not isinstance(pools, dict) or pool_name not in pools:
-                raise KeyError(pool_name)
+            # CAS 先于存在性检查：池被外部删除时，过期 revision 必须报冲突
+            # （409）而非 404 — 否则调用方会基于陈旧状态误判「池不存在」
             current = self._snapshot.revision
             if expected_revision != current:
                 raise RevisionConflict(
                     f"expected_revision {expected_revision} != current {current}")
+            raw = copy.deepcopy(self._raw) if self._raw else None
+            pools = (raw or {}).get("pools") or {}
+            if not isinstance(pools, dict) or pool_name not in pools:
+                raise KeyError(pool_name)
             pools[pool_name]["enabled"] = bool(enabled)
             new_revision = current + 1
             raw.pop("revision", None)
@@ -265,9 +278,12 @@ class PoolRegistry:
                 state=EvidenceState.DECLARED, protocol=protocol,
                 features=cand.features, fingerprint=fp,
                 recorded_at="", source="admin-declare")
-        # store 条目覆盖同协议声明
+        # store 条目覆盖同协议声明；指纹不符（provider base/认证/模型变化）
+        # 的旧证据不注入 — 避免为「现在的端点」背书「过去的探测」（评审 #3）
         for key, ev in self.evidence._data.items():
             if not key.startswith(prefix + ":"):
+                continue
+            if ev.fingerprint != fp:
                 continue
             protocol = key.rsplit(":", 1)[-1]
             out[protocol] = ev

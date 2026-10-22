@@ -205,10 +205,11 @@ class TestPoolChatDispatch:
         assert forwarded[0]["body"]["model"] == "qwen-small"  # 改写为 served_name
         assert forwarded[0]["cache_body"] is None             # 池请求不写缓存
         assert pm.ensure_service_calls == []                  # 绝不自动启动
-        assert pm.dual_gate.acquired == ["iff/fast"]          # 限流键 = 逻辑名
+        assert pm.dual_gate.acquired[:1] == ["iff/fast"]  # 外层逻辑名 gate
+        assert pm.dual_gate.acquired[1:] == ["qwen-small"]  # 物理目标 gate（F16）          # 限流键 = 逻辑名
         assert h.sent == []                                   # 无错误响应
         # RequestLog 记录逻辑名 + pool 路由
-        assert any(getattr(e, "route", None) == "pool:fast/local"
+        assert any(getattr(e, "route", None) == "pool:fast/local:qwen-small"
                    and getattr(e, "model", None) == "iff/fast"
                    for e in pm.logger.entries)
 

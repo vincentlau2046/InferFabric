@@ -85,7 +85,8 @@ class TestRunAttempts:
 
     def test_429_waits_within_budget_and_retries_same_target(self):
         sleeps = []
-        clock = iter([0.0, 0.0, 1.0, 1.0, 2.0])   # start,check,after-sleep,...
+        # start,check,t0,duration,remaining,check,t0,duration（F18 计时）
+        clock = iter([0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0])
         t = Recorder([AttemptResult(status=429, retry_after=1.0), _ok()])
         out = run_attempts(_pool(deadline_ms=5000), [_cand("c1")], t,
                            monotonic=lambda: next(clock),
@@ -97,7 +98,7 @@ class TestRunAttempts:
     def test_429_over_budget_switches_candidate(self):
         # Retry-After=10s > 剩余 deadline=3s → 无法在预算内尊重 → 切候选
         sleeps = []
-        clock = iter([0.0, 0.0, 0.0, 0.0])   # start,check,remaining,再check
+        clock = iter([0.0] * 8)   # 同上：每次 attempt 消耗 3 个 mono
         t = Recorder([AttemptResult(status=429, retry_after=10.0), _ok()])
         out = run_attempts(_pool(deadline_ms=3000),
                            [_cand("c1"), _cand("c2")], t,
@@ -177,6 +178,10 @@ def registry(tmp_path):
 
 class TestSelectorIntegration:
     def test_select_returns_ordered_eligible(self, registry):
+        # 跨位置回退显式开启（F6 默认关闭：本地+云候选默认只保留 chosen 位置）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
@@ -209,6 +214,10 @@ class TestSelectorIntegration:
 
 class TestDispatchFailover:
     def test_local_conn_fail_falls_to_cloud(self, registry, monkeypatch):
+        # 跨本地/云回退需显式开启（用户约束：默认关闭，逐池开启）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         local_calls = []
 
         def fake_forward(handler, pm, target_port, body, stream, model_name="",
@@ -240,7 +249,8 @@ class TestDispatchFailover:
         assert cloud_calls[0]["suppress"] is True       # 池路径必须抑制直发
         assert cloud_calls[0]["model"] == "cloud-m"
         assert h.sent == []                             # 成功无错误信封
-        assert pm.dual_gate.released == 1
+        # 外层逻辑名 gate + 两个物理目标 gate（F16）各释放一次
+        assert pm.dual_gate.released == 3
 
     def test_cloud_401_cooldown_excludes_next_request(self, registry, monkeypatch):
         cloud_calls = []

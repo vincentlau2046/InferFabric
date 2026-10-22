@@ -100,13 +100,73 @@ def extract_requirements(protocol: str, data: dict) -> RequestRequirements:
 
 def runtime_view(pm) -> RuntimeView:
     cooldowns = getattr(pm, "pool_cooldowns", None)
+    # 就绪集合用 served_name（候选引用的是 served_name；active_services
+    # 存内部 name — name≠served_name 的模型此前永远不 ready，评审 #15）
+    active: set = set()
+    get_model = getattr(pm.mgr, "get_model", None)
+    for name in set(pm.mgr.active_services):
+        model_obj = None
+        if get_model is not None:
+            try:
+                model_obj = get_model(name)
+            except Exception:
+                model_obj = None
+        if model_obj is not None:
+            active.add(getattr(model_obj, "served_name", None) or name)
+        active.add(name)
     return RuntimeView(
-        active_services=set(pm.mgr.active_services),
+        active_services=active,
         cloud_models=dict(getattr(pm.cloud, "cloud_models", None) or {}),
         # P2：冷却端点在选择期排除（reason=cooldown）
         cooling_fingerprints=(cooldowns.cooling_fingerprints()
                               if cooldowns is not None else frozenset()),
     )
+
+
+def _pool_has_cloud_candidates(pool_snap) -> bool:
+    return any(c.candidate.kind == "cloud" for c in pool_snap.candidates)
+
+
+def _ensure_cloud_discovered(pm, pool_snap) -> None:
+    """池含云候选时补一次云发现（惰性；pm 未提供入口则跳过，评审 #14）。"""
+    ecd = getattr(pm, "ensure_cloud_discovered", None)
+    if ecd is None or not _pool_has_cloud_candidates(pool_snap):
+        return
+    try:
+        ecd()
+    except Exception as e:
+        log.warning("cloud discovery failed on pool path (%s) — "
+                    "cloud candidates use last known state", type(e).__name__)
+
+
+def _has_non_migratable_history(protocol: str, data: dict) -> bool:
+    """spec §7：不可迁移的历史（无原目标归属时拒绝跨候选迁移）。
+
+    - OpenAI：assistant.tool_calls / role:tool 消息（工具调用历史）
+    - Anthropic：带 signature 的 thinking 块、tool_use/tool_result 块
+    单候选池不受影响（无从迁移 — 同一物理目标内重试是安全的）。
+    """
+    msgs = data.get("messages")
+    if not isinstance(msgs, list):
+        return False
+    for msg in msgs:
+        if not isinstance(msg, dict):
+            continue
+        if protocol == "openai":
+            if msg.get("role") == "tool" or msg.get("tool_calls"):
+                return True
+        else:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "thinking" and block.get("signature"):
+                    return True
+                if block.get("type") in ("tool_use", "tool_result"):
+                    return True
+    return False
 
 
 def _agent_kwargs(handler) -> dict:
@@ -188,6 +248,8 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
             message=f"Unknown logical model: {model}")
         return True
 
+    _ensure_cloud_discovered(pm, pool_snap)
+
     sel = select(pool_snap, extract_requirements("openai", data), runtime_view(pm))
     if sel.chosen is None:
         _send_pool_error_openai(
@@ -197,8 +259,19 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
                     f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
         return True
 
+    # spec §7：不可迁移历史 + 多候选可服务 → 拒绝（无从安全迁移）
+    if len(sel.ordered) > 1 and _has_non_migratable_history("openai", data):
+        _send_pool_error_openai(
+            handler, pm, req_id=req_id, key_name=key_name, model=model,
+            code="no_compatible_target",
+            message=f"Request for {model} carries tool-call history and the pool "
+                    f"has multiple eligible targets — refusing to migrate it "
+                    f"(session affinity is not yet supported)")
+        return True
+
     # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
     # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
+    budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
     gate = pm.dual_gate.acquire(model)
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
@@ -218,7 +291,10 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
 
         # P2：预算内回退循环（统一 max_attempts/deadline，spec §6.2–§6.4）
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
-                               cooldowns=getattr(pm, "pool_cooldowns", None))
+                               cooldowns=getattr(pm, "pool_cooldowns", None),
+                               deadline_start=budget_start)
+        _log_failed_attempts(pm, handler, outcome, req_id=req_id,
+                             key_name=key_name, model=model)
     finally:
         gate.release()
     _finish_outcome_openai(handler, pm, outcome, req_id=req_id,
@@ -286,6 +362,8 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
             message=f"Unknown logical model: {model}")
         return True
 
+    _ensure_cloud_discovered(pm, pool_snap)
+
     sel = select(pool_snap, extract_requirements("anthropic", data), runtime_view(pm))
     if sel.chosen is None:
         _send_pool_error_anthropic(
@@ -295,7 +373,19 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
                     f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
         return True
 
+    # spec §7：不可迁移历史（thinking 签名/tool_use/tool_result）+ 多候选
+    # 可服务 → 拒绝（签名只对生成它的目标有效）
+    if len(sel.ordered) > 1 and _has_non_migratable_history("anthropic", data):
+        _send_pool_error_anthropic(
+            handler, pm, req_id=req_id, key_name=key_name, model=model,
+            code="no_compatible_target",
+            message=f"Request for {model} carries non-migratable history "
+                    f"(thinking signatures / tool results) and the pool has "
+                    f"multiple eligible targets — refusing to migrate it")
+        return True
+
     # 统一限流（同 OpenAI 路径；Anthropic 直连路径带 30s 等待语义，保持一致）
+    budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
     gate = pm.dual_gate.acquire(model, timeout=30)
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
@@ -318,7 +408,10 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
                                   model=model, pool=pool_name, cand=cand)
 
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
-                               cooldowns=getattr(pm, "pool_cooldowns", None))
+                               cooldowns=getattr(pm, "pool_cooldowns", None),
+                               deadline_start=budget_start)
+        _log_failed_attempts(pm, handler, outcome, req_id=req_id,
+                             key_name=key_name, model=model)
     finally:
         gate.release()
     _finish_outcome_anthropic(handler, pm, outcome, req_id=req_id,
@@ -328,6 +421,16 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
 # ── P2 单候选传输（返回 AttemptResult；客户端写只发生在成功/已提交路径） ──
 
+def _log_failed_attempts(pm, handler, outcome, *, req_id, key_name, model):
+    """spec §9.2：逐 attempt 结构化观测 — 失败尝试各记一条（含目标标识路由）。"""
+    for rec in getattr(outcome, "attempts", None) or ():
+        if rec.ok:
+            continue
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+             status=rec.status if rec.status is not None else 0,
+             error=rec.error, route=rec.route)
+
+
 def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptResult:
     """本地候选（OpenAI 入站）：ready_only，绝不调用 ensure_service。
 
@@ -335,13 +438,13 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptRes
     失败、headers 未发送（未提交 → 池层切下一候选）。上游错误响应会被直发
     （committed → 终止不回退）— 这是 PR-14 冻结核心路径的既有语义。
     """
-    route = f"pool:{pool}/local"
+    route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
     model_obj = pm.mgr.find_model_by_served_name(c.model_name)
     if model_obj is None or model_obj.name not in pm.mgr.active_services:
         # select 后的竞态窗口（模型刚好被停）— 不自动启动；未提交、零上游调用
         return AttemptResult(status=None, route=route,
-                             error=f"local target '{cand.model_name}' is no longer active")
+                             error=f"local target '{c.model_name}' is no longer active")
 
     target_port = pm.get_target_port(c.model_name)
     if not target_port:
@@ -351,26 +454,37 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptRes
     data["model"] = model_obj.served_name or c.model_name
     stream = bool(data.get("stream", False))
 
-    # ollama 原生路径（与 handle_chat 同判据）— 无返回信号，视为已交付
-    if model_obj.is_ollama or model_obj.is_ollama_cpp:
-        handle_ollama_native(handler, pm, data, target_port, model_obj)
-        return AttemptResult(ok=True, status=200, committed=True, route=route,
-                             usage=getattr(handler, "_usage", {}) or {},
-                             ttft_ms=getattr(handler, "_ttft_ms", None))
+    # 物理目标容量门（spec §8，评审 #16）：同一物理目标跨池/跨直连共享并发
+    # 预算 — 键 = served_name（与直连路由一致），区别于外层逻辑名 gate
+    gate = pm.dual_gate.acquire(c.model_name, timeout=30)
+    if not gate.ok:
+        return AttemptResult(status=429, route=route,
+                             error=f"physical target '{c.model_name}' rate "
+                                   f"limited: {gate.reason}")
+    try:
+        # ollama 原生路径（与 handle_chat 同判据）— 无返回信号，视为已交付
+        if model_obj.is_ollama or model_obj.is_ollama_cpp:
+            handle_ollama_native(handler, pm, data, target_port, model_obj)
+            return AttemptResult(ok=True, status=200, committed=True, route=route,
+                                 usage=getattr(handler, "_usage", {}) or {},
+                                 ttft_ms=getattr(handler, "_ttft_ms", None))
 
-    _normalize_tools_for_openai(data)
-    body = json.dumps(data).encode("utf-8")
-    upstream_path = _ENGINE_API_PATHS.get(model_obj.type, "/v1/chat/completions")
+        _normalize_tools_for_openai(data)
+        body = json.dumps(data).encode("utf-8")
+        upstream_path = _ENGINE_API_PATHS.get(model_obj.type, "/v1/chat/completions")
 
-    # 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）
-    if _forward_request(handler, pm, target_port, body, stream,
-                        model_name=model, upstream_path=upstream_path,
-                        cache_body=None):
-        return AttemptResult(ok=True, status=200, committed=True, route=route,
-                             usage=getattr(handler, "_usage", {}) or {},
-                             ttft_ms=getattr(handler, "_ttft_ms", None))
-    return AttemptResult(status=None, route=route,
-                         error=f"local target '{c.model_name}' unreachable")
+        # 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）。
+        # model_name 必须是真实模型名 — _forward_request 以它释放副本配额
+        if _forward_request(handler, pm, target_port, body, stream,
+                            model_name=model_obj.name, upstream_path=upstream_path,
+                            cache_body=None):
+            return AttemptResult(ok=True, status=200, committed=True, route=route,
+                                 usage=getattr(handler, "_usage", {}) or {},
+                                 ttft_ms=getattr(handler, "_ttft_ms", None))
+        return AttemptResult(status=None, route=route,
+                             error=f"local target '{c.model_name}' unreachable")
+    finally:
+        gate.release()
 
 
 def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
@@ -381,7 +495,7 @@ def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
     - None → 连接失败/可重试状态（429/5xx），未写客户端 → 切下一候选
     - 200 → 已交付；其余状态 → handle_json_response 已直发（committed → 终止）
     """
-    route = f"pool:{pool}/local"
+    route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
     model_obj = pm.mgr.find_model_by_served_name(c.model_name)
     if model_obj is None or model_obj.name not in pm.mgr.active_services:
@@ -389,9 +503,19 @@ def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
                              error=f"local target '{c.model_name}' is no longer active")
 
     data["model"] = model_obj.served_name or c.model_name
-    status = forwarder.forward_anthropic_local(
-        handler, pm, data, auth_header, model_obj, model,
-        suppress_client_errors=True)
+
+    # 物理目标容量门（同 OpenAI 本地候选，spec §8）
+    gate = pm.dual_gate.acquire(c.model_name, timeout=30)
+    if not gate.ok:
+        return AttemptResult(status=429, route=route,
+                             error=f"physical target '{c.model_name}' rate "
+                                   f"limited: {gate.reason}")
+    try:
+        status = forwarder.forward_anthropic_local(
+            handler, pm, data, auth_header, model_obj, model,
+            suppress_client_errors=True)
+    finally:
+        gate.release()
     if status is None:
         return AttemptResult(status=None, route=route,
                              error=f"local target '{c.model_name}' unreachable")
@@ -406,7 +530,7 @@ def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
 def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand) -> AttemptResult:
     """云候选：suppress 模式取真实状态码/Retry-After，失败不写客户端。"""
     c = cand.candidate
-    route = f"pool:{pool}/cloud:{c.provider}"
+    route = f"pool:{pool}/cloud:{c.provider}/{c.model_id}"
     provider_cfg = pm.cloud.get_provider_config(c.provider)
     cloud_model = pm.cloud.cloud_models.get(f"{c.provider}/{c.model_id}")
     if provider_cfg is None or cloud_model is None:
@@ -415,10 +539,20 @@ def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand) -> Attempt
             error=f"cloud target '{c.provider}/{c.model_id}' unavailable")
 
     data["model"] = c.model_id
-    result = forwarder.forward_to_cloud(
-        handler, data, provider_cfg, cloud_model,
-        protocol=protocol, original_model=model,
-        suppress_client_errors=True)
+
+    # 物理目标容量门（spec §8）：键 = provider/model_id（与云直连一致）
+    gate = pm.dual_gate.acquire(f"{c.provider}/{c.model_id}", timeout=30)
+    if not gate.ok:
+        return AttemptResult(status=429, route=route,
+                             error=f"cloud target '{c.provider}/{c.model_id}' "
+                                   f"rate limited: {gate.reason}")
+    try:
+        result = forwarder.forward_to_cloud(
+            handler, data, provider_cfg, cloud_model,
+            protocol=protocol, original_model=model,
+            suppress_client_errors=True)
+    finally:
+        gate.release()
     committed = getattr(result, "committed", True)
     if committed and (result.status or 0) == 200 and not result.error:
         return AttemptResult(ok=True, status=200, committed=True, route=route,
@@ -443,17 +577,19 @@ def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
              status=outcome.status or 502, error=outcome.error,
              route=outcome.route)
     elif outcome.status is not None:
-        # 非回退类上游错误（400/404/422 等）→ 按上游状态返回明确错误
+        # 非回退类上游错误（400/404/422 等）→ 按上游状态返回明确错误。
+        # 信封用固定文案：outcome.error 可能携带上游响应片段（含凭证），
+        # 只进日志（_sanitize_error 截断），不回传客户端（评审 #10）
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=outcome.status, error=outcome.error, route=outcome.route)
-        handler._send_json({"error": outcome.error or "upstream error",
-                            "status": "upstream_error"}, outcome.status)
+        handler._send_json(
+            {"error": f"upstream returned HTTP {outcome.status}",
+             "status": "upstream_error"}, outcome.status)
     else:
         _send_pool_error_openai(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="pool_unavailable",
-            message=f"All targets failed for {model}"
-                    + (f" — {outcome.error}" if outcome.error else ""))
+            message=f"All targets failed for {model}")
 
 
 # 上游 HTTP 状态 → Anthropic error type（非回退类终止错误的信封）
@@ -476,17 +612,17 @@ def _finish_outcome_anthropic(handler, pm, outcome, *, req_id, key_name, model):
              status=outcome.status or 502, error=outcome.error,
              route=outcome.route)
     elif outcome.status is not None:
+        # 固定文案回客户端（评审 #10）：上游错误体只进日志，不入信封
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=outcome.status, error=outcome.error, route=outcome.route)
         err_type = _ANTHROPIC_STATUS_TYPE.get(outcome.status, "api_error")
         handler._send_json(
             {"type": "error",
              "error": {"type": err_type,
-                       "message": outcome.error or "upstream error"}},
+                       "message": f"upstream returned HTTP {outcome.status}"}},
             outcome.status)
     else:
         _send_pool_error_anthropic(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="pool_unavailable",
-            message=f"All targets failed for {model}"
-                    + (f" — {outcome.error}" if outcome.error else ""))
+            message=f"All targets failed for {model}")

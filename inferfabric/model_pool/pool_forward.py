@@ -78,6 +78,20 @@ class AttemptResult:
 
 
 @dataclass
+class AttemptRecord:
+    """单次真实上游调用的结构化记录（spec §9.2 逐 attempt 观测）。"""
+    ordinal: int
+    candidate_id: str
+    route: str | None = None
+    status: int | None = None
+    error: str | None = None
+    committed: bool = False
+    ok: bool = False
+    retry_after: float | None = None
+    duration_ms: float | None = None
+
+
+@dataclass
 class AttemptOutcome:
     """整个回退循环的最终结果（dispatch 据此记日志 + 发协议信封）。"""
     ok: bool = False
@@ -91,6 +105,8 @@ class AttemptOutcome:
     route: str | None = None
     usage: dict = field(default_factory=dict)
     ttft_ms: float | None = None
+    # 全部真实上游调用（含成功/失败/终止），按发生顺序
+    attempts: list[AttemptRecord] = field(default_factory=list)
 
 
 def _is_non_fallback(status: int | None) -> bool:
@@ -107,7 +123,7 @@ def _is_non_fallback(status: int | None) -> bool:
 
 
 def run_attempts(pool, candidates, transport, cooldowns=None, *,
-                 monotonic=None, sleep=None) -> AttemptOutcome:
+                 monotonic=None, sleep=None, deadline_start=None) -> AttemptOutcome:
     """按候选序（调用方已排序/过滤）在预算内执行传输并按动作表回退。
 
     Args:
@@ -116,15 +132,19 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         transport: callable(candidate) -> AttemptResult（每次真实上游调用）
         cooldowns: CooldownStore | None（401/403 时写入端点冷却）
         monotonic/sleep: 可注入时钟/等待（测试用）
+        deadline_start: 预算起点（monotonic 时钟）。None = 循环开始时刻。
+            调用方在「限流排队之前」捕获并传入 — 排队等待计入预算（§6.3）。
     """
     mono = monotonic or time.monotonic
     do_sleep = sleep or time.sleep
     max_attempts = max(1, int(pool.max_attempts))
-    deadline = mono() + pool.deadline_ms / 1000.0
+    deadline = ((deadline_start if deadline_start is not None else mono())
+                + pool.deadline_ms / 1000.0)
 
     queue = list(candidates)
     retried: set[str] = set()   # 已做同目标重试的候选（5xx 一次 / 429 等待一次）
     attempts = 0
+    records: list[AttemptRecord] = []
     last: AttemptResult = AttemptResult()
     last_cand = None
 
@@ -134,20 +154,27 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         cand = queue[0]
         last_cand = cand
         attempts += 1
+        t0 = mono()
         res = transport(cand)
         last = res
+        records.append(AttemptRecord(
+            ordinal=attempts, candidate_id=cand.candidate.id, route=res.route,
+            status=res.status, error=res.error, committed=res.committed,
+            ok=res.ok, retry_after=res.retry_after,
+            duration_ms=(mono() - t0) * 1000.0))
 
         if res.ok:
             return AttemptOutcome(ok=True, committed=True,
                                   status=res.status or 200,
                                   candidate_id=cand.candidate.id, route=res.route,
-                                  usage=res.usage, ttft_ms=res.ttft_ms)
+                                  usage=res.usage, ttft_ms=res.ttft_ms,
+                                  attempts=records)
         if res.committed:
             # 响应已提交（含流中断）→ 终止，不重试不切换（§6.4）
             return AttemptOutcome(ok=False, committed=True, status=res.status,
                                   error=res.error, candidate_id=cand.candidate.id,
                                   route=res.route, usage=res.usage,
-                                  ttft_ms=res.ttft_ms)
+                                  ttft_ms=res.ttft_ms, attempts=records)
         if res.status in (401, 403):
             if cooldowns is not None:
                 cooldowns.add(cand.endpoint_fingerprint)
@@ -166,6 +193,12 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                 log.info("pool candidate '%s' 429 — waiting %.1fs (Retry-After)",
                          cand.candidate.id, want)
                 do_sleep(want)   # 同目标重试，受 attempts/deadline 约束
+        elif _is_non_fallback(res.status):
+            # 确定性错误（4xx/501）→ 终止，不回退。先于 5xx 分支判定：
+            # 501 属「不回退」类，落入 5xx 重试分支会变成可回退（评审 #12）
+            return AttemptOutcome(ok=False, committed=False, status=res.status,
+                                  error=res.error, candidate_id=cand.candidate.id,
+                                  route=res.route, attempts=records)
         elif res.status is None:
             # 连接失败/端点不可达 → 立即切下一候选
             queue.pop(0)
@@ -174,11 +207,6 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                 queue.pop(0)     # 5xx 已重试原目标 1 次 → 切换
             else:
                 retried.add(cand.candidate.id)
-        elif _is_non_fallback(res.status):
-            # 确定性错误 → 终止，不回退
-            return AttemptOutcome(ok=False, committed=False, status=res.status,
-                                  error=res.error, candidate_id=cand.candidate.id,
-                                  route=res.route)
         else:
             # 未归类的未提交失败 → 保守切下一候选
             queue.pop(0)
@@ -187,4 +215,4 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                           error=last.error or "all candidates failed",
                           error_code="pool_unavailable",
                           candidate_id=last_cand.candidate.id if last_cand else None,
-                          route=last.route)
+                          route=last.route, attempts=records)

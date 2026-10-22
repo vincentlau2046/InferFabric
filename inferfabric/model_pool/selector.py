@@ -107,12 +107,18 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
             reason = "cooldown"
         elif not _evidence_ok(resolved, req.protocol, pool.accept_declared):
             reason = "no_evidence"
-        elif not set(required_features) <= set(cand.features):
-            reason = "feature_unsupported"
-        elif cand.kind == "local" and cand.model_name not in runtime.active_services:
-            reason = "local_not_ready"
-        elif cand.kind == "cloud" and f"{cand.provider}/{cand.model_id}" not in runtime.cloud_models:
-            reason = "cloud_model_missing"
+        else:
+            # 功能覆盖以「本次放行的证据」为准（评审 #4）：PROBED 证据只
+            # 背书探测过的功能，声明式证据由 registry 镜像 cand.features。
+            # 证据未覆盖的功能不投递（未知能力不默认当作支持）。
+            ev = resolved.evidence.get(req.protocol)
+            allowed_features = ev.features if ev is not None else ()
+            if not set(required_features) <= set(allowed_features):
+                reason = "feature_unsupported"
+            elif cand.kind == "local" and cand.model_name not in runtime.active_services:
+                reason = "local_not_ready"
+            elif cand.kind == "cloud" and f"{cand.provider}/{cand.model_id}" not in runtime.cloud_models:
+                reason = "cloud_model_missing"
 
         # 「协议兼容但未就绪」才有 no_ready_target；功能不匹配属兼容性问题
         # （no_compatible_target），不算未就绪
@@ -126,6 +132,26 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
             chosen = resolved
         if included:
             included_ordered.append(resolved)
+
+    # 跨位置回退默认关闭（评审 #6）：以 chosen 的位置为准，其余位置的
+    # 入选候选不参与回退序（决策表标注 cross_location_disabled）
+    if chosen is not None and not pool.allow_cross_location:
+        chosen_loc = "local" if chosen.candidate.kind == "local" else "cloud"
+        keep: list[ResolvedCandidate] = []
+        revised: list[CandidateDecision] = []
+        pair = list(zip(decisions, ordered))
+        for d, resolved in pair:
+            loc = "local" if resolved.candidate.kind == "local" else "cloud"
+            if d.included and loc != chosen_loc:
+                revised.append(CandidateDecision(
+                    candidate_id=d.candidate_id, included=False,
+                    reason="cross_location_disabled"))
+            else:
+                revised.append(d)
+                if d.included:
+                    keep.append(resolved)
+        decisions = revised
+        included_ordered = keep
 
     error = None
     if chosen is None:

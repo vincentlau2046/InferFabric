@@ -345,8 +345,16 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
         except _HTTPError as e:
-            error_body = e.read().decode("utf-8", errors="replace")
-            e.close()
+            # 错误体读取本身可能断连（截断的 5xx 响应）→ 空体降级，
+            # 不让 IncompleteRead 逃逸取代可分类的状态码（评审 #11）
+            try:
+                error_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                error_body = ""
+            try:
+                e.close()
+            except Exception:
+                pass
             if suppress_client_errors:
                 # 单次尝试：真实状态码原样上交（池层按 401/403/429/4xx/5xx 分类）
                 return CloudResult(
@@ -490,9 +498,13 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                 pipe_stream_response(handler, resp, sse_buf)
                 handler._usage = dict(sse_buf.usage)
             else:
-                handle_json_response(handler, resp, model_obj, original_model, data, auth_header,
-                                     response_cache=getattr(pm, 'response_cache', None))
+                # committed 先于写客户端（评审 #9）：handle_json_response 中途
+                # 写失败时按「已提交」上报，池层不重放（§6.4）。
+                # suppress（池路径）不写响应缓存（spec §9.3，评审 #21）。
                 committed_status = resp.status
+                handle_json_response(handler, resp, model_obj, original_model, data, auth_header,
+                                     response_cache=(None if suppress_client_errors
+                                                     else getattr(pm, 'response_cache', None)))
             return resp.status
 
         except (ConnectionRefusedError, ConnectionResetError, OSError, BrokenPipeError) as e:

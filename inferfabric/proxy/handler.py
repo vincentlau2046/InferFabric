@@ -1531,25 +1531,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_reload_config(self, pm):
         """POST /reload-config — 热加载 models.d/*.yaml 并刷新 dashboard 缓存。"""
-        # 逻辑模型池热加载（model_pools.yaml 外部编辑 + 证据失效检查）
-        pool_reload_note = None
-        if hasattr(pm, 'pool_registry') and pm.pool_registry is not None:
-            try:
-                pm.pool_registry.reload_from_disk()
-            except Exception as e:
-                pool_reload_note = f"model_pools reload failed: {e}"
         if hasattr(pm, 'config_reloader') and pm.config_reloader:
+            # 池重载已并入 reload_all（依赖域 models/auth/cloud 之后执行，
+            # 评审 #20）；失败域如实回报（B2）
             failed = pm.config_reloader.reload_all() or []
             body = {"status": "reloaded"}
             if failed:
-                # B2: 如实回报失败域，不再无条件声称成功
                 body["failed"] = failed
-            if pool_reload_note:
-                body.setdefault("failed", []).append(pool_reload_note)
             self._send_json(body)
         else:
             # Fallback: direct reload if ConfigReloader not available
             pm.mgr.reload_models()
+            # 池重载在依赖（models）之后（评审 #20）
+            pool_reload_note = None
+            if hasattr(pm, 'pool_registry') and pm.pool_registry is not None:
+                try:
+                    pm.pool_registry.reload_from_disk()
+                except Exception as e:
+                    pool_reload_note = f"model_pools reload failed: {e}"
             try:
                 from inferfabric.dashboard import invalidate_cache
                 invalidate_cache()

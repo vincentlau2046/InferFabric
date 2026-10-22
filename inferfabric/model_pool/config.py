@@ -36,6 +36,25 @@ log = logging.getLogger("inferfabric.model_pool.config")
 VALID_KINDS = {"local", "cloud"}
 VALID_FEATURES = {"tools", "stream", "vision", "structured"}
 VALID_PROTOCOLS = {"openai", "anthropic"}
+VALID_LOCATIONS = {"local", "cloud"}
+
+
+def _str_seq(value, field_name: str, where: str, issues: list[str]) -> tuple[str, ...] | None:
+    """list/tuple of str → tuple；类型不符记 issue 并返回 None（不抛异常）。
+
+    YAML 可解析但类型畸形的值（`features: 4`、`declared_protocols: [{}]`）
+    必须降级为校验问题，而不是 TypeError 逃逸导致整份配置无法加载。
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        issues.append(f"{where}: {field_name} must be a list of strings")
+        return None
+    for item in value:
+        if not isinstance(item, str):
+            issues.append(f"{where}: {field_name} entries must be strings")
+            return None
+    return tuple(value)
 
 
 @dataclass(frozen=True)
@@ -72,17 +91,22 @@ class PoolsFile:
 
 def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateConfig | None:
     cid = raw.get("id", "")
-    if not cid:
-        issues.append(f"pool '{pool_name}': candidate missing id")
+    if not isinstance(cid, str) or not cid:
+        issues.append(f"pool '{pool_name}': candidate id must be a non-empty string")
         return None
     kind = raw.get("kind", "")
-    if kind not in VALID_KINDS:
+    if not isinstance(kind, str) or kind not in VALID_KINDS:
         issues.append(f"pool '{pool_name}' candidate '{cid}': kind must be one of {sorted(VALID_KINDS)}, got {kind!r}")
         return None
 
-    model_name = str(raw.get("model_name", "") or "")
-    provider = str(raw.get("provider", "") or "")
-    model_id = str(raw.get("model_id", "") or "")
+    model_name = raw.get("model_name", "")
+    provider = raw.get("provider", "")
+    model_id = raw.get("model_id", "")
+    for label, value in (("model_name", model_name), ("provider", provider),
+                         ("model_id", model_id)):
+        if not isinstance(value, str):
+            issues.append(f"pool '{pool_name}' candidate '{cid}': {label} must be a string")
+            return None
     if kind == "local" and not model_name:
         issues.append(f"pool '{pool_name}' candidate '{cid}': local candidate requires model_name")
         return None
@@ -101,15 +125,20 @@ def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateC
                 f"logical namespace — pools must not reference pools")
             return None
 
-    declared = tuple(raw.get("declared_protocols") or ())
+    where = f"pool '{pool_name}' candidate '{cid}'"
+    declared = _str_seq(raw.get("declared_protocols"), "declared_protocols", where, issues)
+    if declared is None:
+        return None
     for p in declared:
         if p not in VALID_PROTOCOLS:
-            issues.append(f"pool '{pool_name}' candidate '{cid}': unknown protocol {p!r}")
+            issues.append(f"{where}: unknown protocol {p!r}")
             return None
-    features = tuple(raw.get("features") or ())
+    features = _str_seq(raw.get("features"), "features", where, issues)
+    if features is None:
+        return None
     for f in features:
         if f not in VALID_FEATURES:
-            issues.append(f"pool '{pool_name}' candidate '{cid}': unknown feature {f!r}")
+            issues.append(f"{where}: unknown feature {f!r}")
             return None
 
     try:
@@ -154,7 +183,15 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
             issues.append(f"pool '{name}': duplicate priority {c.priority} (candidate '{c.id}')")
         seen_priorities.add(c.priority)
 
-    allowed_locations = tuple(raw.get("allowed_locations") or ())
+    allowed_locations = _str_seq(raw.get("allowed_locations"), "allowed_locations",
+                                 f"pool '{name}'", issues)
+    if allowed_locations is None:
+        return None
+    for loc in allowed_locations:
+        if loc not in VALID_LOCATIONS:
+            issues.append(f"pool '{name}': unknown location {loc!r} "
+                          f"(must be one of {sorted(VALID_LOCATIONS)})")
+            return None
     allow_cross = bool(raw.get("allow_cross_location", False))
     if allow_cross and not ({"local", "cloud"} <= set(allowed_locations)):
         issues.append(
