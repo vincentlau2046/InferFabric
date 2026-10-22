@@ -447,6 +447,30 @@ class TestCommittedStreamBoundary:
         assert status == 200                      # committed 信号（None = 可重放）
         assert h.status == 200
 
+    @patch("inferfabric.forwarder.urlopen")
+    def test_cloud_committed_stream_error_is_fixed_code(self, mock_urlopen, caplog):
+        """安全审查 2026-10-23 #3：已提交流中断的 error/log 不插值 str(e)。
+
+        str(e) 可携带上游响应片段/内部细节 → 固定错误码 + 日志只记异常类名。
+        """
+        from inferfabric.forwarder import forward_to_cloud
+        cfg, cm = _provider_cfg()
+        mock_urlopen.return_value = _FlakyStreamResp(chunks_before_fail=1)
+        h = _FakeRespHandler()
+        with caplog.at_level("ERROR", logger="inferfabric.forwarder"):
+            result = forward_to_cloud(
+                h, {"model": "m", "messages": [], "stream": True}, cfg, cm,
+                protocol="openai", suppress_client_errors=True)
+        assert result.committed is True
+        assert result.error == "upstream_stream_failed_after_commit"   # 固定码
+        assert "IncompleteRead" not in result.error                    # 无异常细节
+        err_msgs = [r.getMessage() for r in caplog.records
+                    if r.levelname == "ERROR"]
+        assert err_msgs, "expected an ERROR log for committed stream failure"
+        joined = " ".join(err_msgs)
+        assert "IncompleteRead" in joined        # 异常类名（安全元数据）在
+        assert "bytes read" not in joined        # str(e) 细节不在
+
     def test_run_attempts_does_not_replay_committed_stream(self):
         # 端到端不变量：committed 流中断 → 第二候选零调用
         t = Recorder([AttemptResult(ok=False, committed=True, status=200,

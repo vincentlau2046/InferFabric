@@ -378,12 +378,14 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         except Exception as e:
             if suppress_client_errors and committed:
                 # 已开始输出后上游中断 → committed 失败：
-                # 不重放、不切候选、不写第二信封（§6.4，安全审查 2026-10-23 #2）
-                log.error("Cloud %s stream failed after commit: %s",
-                          provider_cfg.name, e)
+                # 不重放、不切候选、不写第二信封（§6.4，安全审查 2026-10-23 #2）。
+                # 不插值 str(e)（可携带上游响应片段）— 固定错误码 + 异常类名
+                # （安全审查 2026-10-23 #3）
+                log.error("Cloud %s stream failed after commit (%s) — truncated",
+                          provider_cfg.name, type(e).__name__)
                 return CloudResult(
                     status=200,
-                    error=f"upstream stream failed: {e}",
+                    error="upstream_stream_failed_after_commit",
                     committed=True,
                     duration_ms=(time.monotonic() - start) * 1000,
                 )
