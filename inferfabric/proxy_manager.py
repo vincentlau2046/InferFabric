@@ -117,7 +117,7 @@ class ProxyManager:
             known_local=lambda: {m.served_name for m in self.mgr._models.values()
                                  if m.served_name},
             known_providers=lambda: set(self.cloud.providers or ()),
-            provider_base=self._provider_base_url,
+            provider_route=self._provider_route_urls,
         )
         self.pool_registry.load()
         # P2：上游凭证错误（401/403）的端点冷却（内存，进程内；
@@ -149,12 +149,17 @@ class ProxyManager:
         # R7: 多副本选择器缓存
         self._selectors: dict = {}
 
-    def _provider_base_url(self, provider_name: str) -> str:
-        """池端点指纹用：provider 任一已配置 base URL（仅作变化检测器）。"""
+    def _provider_route_urls(self, provider_name: str) -> dict[str, str]:
+        """池路由快照/端点指纹用：provider 双协议 base URL（终审 #5/#6）。
+
+        编译期捕获进 ResolvedCandidate.route（mid-flight 请求不受 provider
+        热更新影响）；指纹覆盖双端点 — 任一协议 base 变化即失效旧证据。
+        """
         cfg = self.cloud.get_provider_config(provider_name)
         if cfg is None:
-            return ""
-        return cfg.openai_base or cfg.anthropic_base or ""
+            return {"openai_base": "", "anthropic_base": ""}
+        return {"openai_base": getattr(cfg, "openai_base", "") or "",
+                "anthropic_base": getattr(cfg, "anthropic_base", "") or ""}
 
     def new_request_id(self) -> str:
         """Generate a unique, thread-safe request ID for logging.

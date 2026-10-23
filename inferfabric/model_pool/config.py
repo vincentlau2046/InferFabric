@@ -57,6 +57,20 @@ def _str_seq(value, field_name: str, where: str, issues: list[str]) -> tuple[str
     return tuple(value)
 
 
+def _strict_bool(value, field_name: str, where: str, issues: list[str]) -> bool | None:
+    """bool → 原值；缺省 → False；其他类型（含 "false"/"true" 字符串）→ 记 issue 返回 None。
+
+    YAML 引号布尔（enabled: "false"）经 bool() 会静默变 True，安全开关
+    （enabled / accept_declared / allow_cross_location）绝不允许字符串强转。
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    issues.append(f"{where}: {field_name} must be a boolean, got {value!r}")
+    return None
+
+
 @dataclass(frozen=True)
 class CandidateConfig:
     id: str
@@ -192,14 +206,19 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
             issues.append(f"pool '{name}': unknown location {loc!r} "
                           f"(must be one of {sorted(VALID_LOCATIONS)})")
             return None
-    allow_cross = bool(raw.get("allow_cross_location", False))
+    allow_cross = _strict_bool(raw.get("allow_cross_location"), "allow_cross_location",
+                               f"pool '{name}'", issues)
+    enabled = _strict_bool(raw.get("enabled"), "enabled", f"pool '{name}'", issues)
+    accept_declared = _strict_bool(raw.get("accept_declared"), "accept_declared",
+                                   f"pool '{name}'", issues)
+    if allow_cross is None or enabled is None or accept_declared is None:
+        return None
     if allow_cross and not ({"local", "cloud"} <= set(allowed_locations)):
         issues.append(
             f"pool '{name}': allow_cross_location=true requires allowed_locations "
             f"to contain both 'local' and 'cloud'")
 
     # 候选为空 → 池强制 disabled（不假装可用）
-    enabled = bool(raw.get("enabled", False))
     if not candidates:
         enabled = False
 
@@ -215,7 +234,7 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
         enabled=enabled,
         strategy=str(raw.get("strategy", "priority_failover")),
         allowed_locations=allowed_locations,
-        accept_declared=bool(raw.get("accept_declared", False)),
+        accept_declared=accept_declared,
         allow_cross_location=allow_cross,
         max_attempts=max_attempts,
         deadline_ms=deadline_ms,

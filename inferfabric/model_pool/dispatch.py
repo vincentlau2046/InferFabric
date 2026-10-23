@@ -9,6 +9,7 @@
 - 错误契约（spec §12）按入站协议生成对应信封；已提交响应不写第二份信封
 """
 
+import copy
 import json
 import logging
 import time
@@ -143,7 +144,8 @@ def _has_non_migratable_history(protocol: str, data: dict) -> bool:
     """spec §7：不可迁移的历史（无原目标归属时拒绝跨候选迁移）。
 
     - OpenAI：assistant.tool_calls / role:tool 消息（工具调用历史）
-    - Anthropic：带 signature 的 thinking 块、tool_use/tool_result 块
+    - Anthropic：带 signature 的 thinking 块、redacted_thinking 块、
+      tool_use/tool_result 块
     单候选池不受影响（无从迁移 — 同一物理目标内重试是安全的）。
     """
     msgs = data.get("messages")
@@ -163,6 +165,9 @@ def _has_non_migratable_history(protocol: str, data: dict) -> bool:
                 if not isinstance(block, dict):
                     continue
                 if block.get("type") == "thinking" and block.get("signature"):
+                    return True
+                # redacted_thinking 是加密归属块：换目标即校验失败（终审 #3）
+                if block.get("type") == "redacted_thinking":
                     return True
                 if block.get("type") in ("tool_use", "tool_result"):
                     return True
@@ -259,8 +264,10 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
                     f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
         return True
 
-    # spec §7：不可迁移历史 + 多候选可服务 → 拒绝（无从安全迁移）
-    if len(sel.ordered) > 1 and _has_non_migratable_history("openai", data):
+    # spec §7：不可迁移历史 + 多候选可服务 → 拒绝（无从安全迁移）。
+    # 用静态兼容数而非当前就绪数：冷却/宕机中的备用随时可能恢复成
+    # 迁移目标，就绪数波动不得改变拒绝决策（终审 #3）
+    if sel.compatible_count > 1 and _has_non_migratable_history("openai", data):
         _send_pool_error_openai(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="no_compatible_target",
@@ -282,12 +289,14 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
     try:
         pool_name = pool_snap.pool.name
 
-        def transport(cand):
+        def transport(cand, remaining):
             if cand.candidate.kind == "local":
                 return _attempt_local_openai(handler, pm, data, model=model,
-                                             pool=pool_name, cand=cand)
+                                             pool=pool_name, cand=cand,
+                                             remaining=remaining)
             return _attempt_cloud(handler, pm, data, protocol="openai",
-                                  model=model, pool=pool_name, cand=cand)
+                                  model=model, pool=pool_name, cand=cand,
+                                  remaining=remaining)
 
         # P2：预算内回退循环（统一 max_attempts/deadline，spec §6.2–§6.4）
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
@@ -375,7 +384,7 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
     # spec §7：不可迁移历史（thinking 签名/tool_use/tool_result）+ 多候选
     # 可服务 → 拒绝（签名只对生成它的目标有效）
-    if len(sel.ordered) > 1 and _has_non_migratable_history("anthropic", data):
+    if sel.compatible_count > 1 and _has_non_migratable_history("anthropic", data):
         _send_pool_error_anthropic(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="no_compatible_target",
@@ -399,13 +408,15 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
     try:
         pool_name = pool_snap.pool.name
 
-        def transport(cand):
+        def transport(cand, remaining):
             if cand.candidate.kind == "local":
                 return _attempt_local_anthropic(handler, pm, data, model=model,
                                                 pool=pool_name, cand=cand,
-                                                auth_header=auth_header)
+                                                auth_header=auth_header,
+                                                remaining=remaining)
             return _attempt_cloud(handler, pm, data, protocol="anthropic",
-                                  model=model, pool=pool_name, cand=cand)
+                                  model=model, pool=pool_name, cand=cand,
+                                  remaining=remaining)
 
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
                                cooldowns=getattr(pm, "pool_cooldowns", None),
@@ -422,21 +433,39 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 # ── P2 单候选传输（返回 AttemptResult；客户端写只发生在成功/已提交路径） ──
 
 def _log_failed_attempts(pm, handler, outcome, *, req_id, key_name, model):
-    """spec §9.2：逐 attempt 结构化观测 — 失败尝试各记一条（含目标标识路由）。"""
+    """spec §9.2：逐 attempt 结构化观测 — 失败尝试进进程日志。
+
+    不写 RequestLog（终审 #15）：attempt 行会污染请求计数与费用归属
+    （metrics 按行聚合，一次池请求的失败尝试不是独立请求）。
+    req_id 把进程日志与最终那条 RequestLog 行关联起来。
+    """
     for rec in getattr(outcome, "attempts", None) or ():
         if rec.ok:
             continue
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=rec.status if rec.status is not None else 0,
-             error=rec.error, route=rec.route)
+        log.warning("pool attempt failed: req=%s pool_model=%s ordinal=%d "
+                    "target=%s status=%s committed=%s admitted=%s "
+                    "retry_after=%s error=%s route=%s",
+                    req_id, model, rec.ordinal, rec.candidate_id,
+                    rec.status, rec.committed, rec.admitted,
+                    rec.retry_after, rec.error, rec.route)
 
 
-def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptResult:
+def _gate_timeout(remaining: float | None) -> float | None:
+    """物理门等待上限：受剩余预算约束（终审 #7），不超过默认 30s。"""
+    if remaining is None:
+        return 30.0
+    return max(1.0, min(30.0, float(remaining)))
+
+
+def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
+                          remaining=None) -> AttemptResult:
     """本地候选（OpenAI 入站）：ready_only，绝不调用 ensure_service。
 
     _forward_request 单次语义：True=响应已完整交付（committed）；False=连接
     失败、headers 未发送（未提交 → 池层切下一候选）。上游错误响应会被直发
     （committed → 终止不回退）— 这是 PR-14 冻结核心路径的既有语义。
+    ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，终审 #13）—
+    不再调 handle_ollama_native（该路径无返回信号，无法区分已交付/未提交）。
     """
     route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
@@ -446,28 +475,23 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptRes
         return AttemptResult(status=None, route=route,
                              error=f"local target '{c.model_name}' is no longer active")
 
-    target_port = pm.get_target_port(c.model_name)
-    if not target_port:
-        return AttemptResult(status=None, route=route,
-                             error=f"local target '{c.model_name}' has no available port")
-
     data["model"] = model_obj.served_name or c.model_name
     stream = bool(data.get("stream", False))
 
     # 物理目标容量门（spec §8，评审 #16）：同一物理目标跨池/跨直连共享并发
-    # 预算 — 键 = served_name（与直连路由一致），区别于外层逻辑名 gate
-    gate = pm.dual_gate.acquire(c.model_name, timeout=30)
+    # 预算 — 键 = served_name（与直连路由一致）。acquire_target 只占
+    # per-model 并发，不双扣外层已计费的 RPM/全局并发（终审 #8）。
+    # 门先于端口预留（终审 #14）：失败时不占用副本端口。
+    gate = pm.dual_gate.acquire_target(c.model_name, timeout=_gate_timeout(remaining))
     if not gate.ok:
-        return AttemptResult(status=429, route=route,
+        return AttemptResult(admitted=False, route=route,
                              error=f"physical target '{c.model_name}' rate "
                                    f"limited: {gate.reason}")
     try:
-        # ollama 原生路径（与 handle_chat 同判据）— 无返回信号，视为已交付
-        if model_obj.is_ollama or model_obj.is_ollama_cpp:
-            handle_ollama_native(handler, pm, data, target_port, model_obj)
-            return AttemptResult(ok=True, status=200, committed=True, route=route,
-                                 usage=getattr(handler, "_usage", {}) or {},
-                                 ttft_ms=getattr(handler, "_ttft_ms", None))
+        target_port = pm.get_target_port(c.model_name)
+        if not target_port:
+            return AttemptResult(status=None, route=route,
+                                 error=f"local target '{c.model_name}' has no available port")
 
         _normalize_tools_for_openai(data)
         body = json.dumps(data).encode("utf-8")
@@ -477,7 +501,7 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptRes
         # model_name 必须是真实模型名 — _forward_request 以它释放副本配额
         if _forward_request(handler, pm, target_port, body, stream,
                             model_name=model_obj.name, upstream_path=upstream_path,
-                            cache_body=None):
+                            cache_body=None, timeout=remaining):
             return AttemptResult(ok=True, status=200, committed=True, route=route,
                                  usage=getattr(handler, "_usage", {}) or {},
                                  ttft_ms=getattr(handler, "_ttft_ms", None))
@@ -488,12 +512,13 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand) -> AttemptRes
 
 
 def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
-                             auth_header) -> AttemptResult:
-    """本地候选（Anthropic 入站）：ready_only，suppress 模式取「未提交失败」信号。
+                             auth_header, remaining=None) -> AttemptResult:
+    """本地候选（Anthropic 入站）：ready_only，suppress 模式取 CloudResult 信号。
 
-    forward_anthropic_local(suppress_client_errors=True)：
-    - None → 连接失败/可重试状态（429/5xx），未写客户端 → 切下一候选
-    - 200 → 已交付；其余状态 → handle_json_response 已直发（committed → 终止）
+    forward_anthropic_local(suppress_client_errors=True) 返回 CloudResult：
+    - committed=False → 未写客户端（连接失败/可重试状态）→ 切下一候选
+    - committed=True + status=200 → 已交付
+    - committed=True + 其他状态 → 已直发（committed → 终止）
     """
     route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
@@ -504,30 +529,35 @@ def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
 
     data["model"] = model_obj.served_name or c.model_name
 
-    # 物理目标容量门（同 OpenAI 本地候选，spec §8）
-    gate = pm.dual_gate.acquire(c.model_name, timeout=30)
+    # 物理目标容量门（同 OpenAI 本地候选，spec §8；终审 #8/#14）
+    gate = pm.dual_gate.acquire_target(c.model_name, timeout=_gate_timeout(remaining))
     if not gate.ok:
-        return AttemptResult(status=429, route=route,
+        return AttemptResult(admitted=False, route=route,
                              error=f"physical target '{c.model_name}' rate "
                                    f"limited: {gate.reason}")
     try:
-        status = forwarder.forward_anthropic_local(
+        result = forwarder.forward_anthropic_local(
             handler, pm, data, auth_header, model_obj, model,
-            suppress_client_errors=True)
+            suppress_client_errors=True, timeout=remaining)
     finally:
         gate.release()
-    if status is None:
-        return AttemptResult(status=None, route=route,
-                             error=f"local target '{c.model_name}' unreachable")
-    if status == 200:
+    committed = getattr(result, "committed", False)
+    status = getattr(result, "status", None)
+    if committed and status == 200 and not getattr(result, "error", None):
         return AttemptResult(ok=True, status=200, committed=True, route=route,
                              usage=getattr(handler, "_usage", {}) or {},
                              ttft_ms=getattr(handler, "_ttft_ms", None))
-    return AttemptResult(ok=False, committed=True, status=status, route=route,
-                         error=f"local upstream HTTP {status}")
+    if committed:
+        return AttemptResult(ok=False, committed=True, status=status, route=route,
+                             error=getattr(result, "error", None))
+    # 未提交失败：保留状态/Retry-After 供回退决策（429 等待、5xx 重试）
+    return AttemptResult(ok=False, committed=False, status=status, route=route,
+                         error=getattr(result, "error", None),
+                         retry_after=getattr(result, "retry_after", None))
 
 
-def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand) -> AttemptResult:
+def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand,
+                   remaining=None) -> AttemptResult:
     """云候选：suppress 模式取真实状态码/Retry-After，失败不写客户端。"""
     c = cand.candidate
     route = f"pool:{pool}/cloud:{c.provider}/{c.model_id}"
@@ -538,19 +568,28 @@ def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand) -> Attempt
             status=None, route=route,
             error=f"cloud target '{c.provider}/{c.model_id}' unavailable")
 
+    # 快照路由（终审 #5）：mid-flight 请求用编译期捕获的端点，不读 live
+    # provider 配置 — provider 热更新不得改变已选中候选的目标
+    snap_base = (cand.route or {}).get(f"{protocol}_base") if cand.route else None
+    if snap_base:
+        provider_cfg = copy.copy(provider_cfg)
+        setattr(provider_cfg, f"{protocol}_base", snap_base)
+
     data["model"] = c.model_id
 
-    # 物理目标容量门（spec §8）：键 = provider/model_id（与云直连一致）
-    gate = pm.dual_gate.acquire(f"{c.provider}/{c.model_id}", timeout=30)
+    # 物理目标容量门（spec §8）：键 = provider/model_id（与云直连一致；
+    # 终审 #8 acquire_target / 终审 #7 等待受剩余预算约束）
+    gate = pm.dual_gate.acquire_target(f"{c.provider}/{c.model_id}",
+                                       timeout=_gate_timeout(remaining))
     if not gate.ok:
-        return AttemptResult(status=429, route=route,
+        return AttemptResult(admitted=False, route=route,
                              error=f"cloud target '{c.provider}/{c.model_id}' "
                                    f"rate limited: {gate.reason}")
     try:
         result = forwarder.forward_to_cloud(
             handler, data, provider_cfg, cloud_model,
             protocol=protocol, original_model=model,
-            suppress_client_errors=True)
+            suppress_client_errors=True, timeout=remaining)
     finally:
         gate.release()
     committed = getattr(result, "committed", True)
@@ -567,21 +606,31 @@ def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand) -> Attempt
 # ── 结果处理（记日志 + 按入站协议发信封；已提交不写第二份信封） ──
 
 def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
+    # 物理身份（终审 #15）：成功/已提交行的 model/cloud_provider 按实际目标
+    # 填写（local=served_name / cloud=model_id）— 费用归因按物理模型计价；
+    # 逻辑名只出现在 route。pool_unavailable 走 _send_pool_error_*（逻辑名）。
+    phys = outcome.physical_model or model
+    prov = outcome.cloud_provider
     if outcome.ok:
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=200, route=outcome.route, usage=outcome.usage,
-             ttft_ms=outcome.ttft_ms)
+             ttft_ms=outcome.ttft_ms, cloud_provider=prov)
     elif outcome.committed:
-        # 响应已提交（含流中断/上游错误已直发）→ 只记日志（spec §6.4）
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=outcome.status or 502, error=outcome.error,
-             route=outcome.route)
+        # 响应已提交（含流中断/上游错误已直发）→ 只记日志（spec §6.4）。
+        # error 用固定错误码（终审 #16）：上游错误体可能含敏感内容，明细只
+        # 进进程日志（_log_failed_attempts），不入 RequestLog
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
+             status=outcome.status or 502,
+             error=f"upstream_http_{outcome.status or 502}",
+             route=outcome.route, cloud_provider=prov)
     elif outcome.status is not None:
         # 非回退类上游错误（400/404/422 等）→ 按上游状态返回明确错误。
-        # 信封用固定文案：outcome.error 可能携带上游响应片段（含凭证），
-        # 只进日志（_sanitize_error 截断），不回传客户端（评审 #10）
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=outcome.status, error=outcome.error, route=outcome.route)
+        # 信封与日志都用固定文案/错误码（评审 #10、终审 #16）：上游错误体
+        # 只进进程日志，不回传客户端、不入 RequestLog
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
+             status=outcome.status,
+             error=f"upstream_http_{outcome.status}",
+             route=outcome.route, cloud_provider=prov)
         handler._send_json(
             {"error": f"upstream returned HTTP {outcome.status}",
              "status": "upstream_error"}, outcome.status)
@@ -603,18 +652,25 @@ _ANTHROPIC_STATUS_TYPE = {
 
 
 def _finish_outcome_anthropic(handler, pm, outcome, *, req_id, key_name, model):
+    # 物理身份 + 固定错误码 — 同 _finish_outcome_openai（终审 #15/#16）
+    phys = outcome.physical_model or model
+    prov = outcome.cloud_provider
     if outcome.ok:
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=200, route=outcome.route, usage=outcome.usage,
-             ttft_ms=outcome.ttft_ms)
+             ttft_ms=outcome.ttft_ms, cloud_provider=prov)
     elif outcome.committed:
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=outcome.status or 502, error=outcome.error,
-             route=outcome.route)
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
+             status=outcome.status or 502,
+             error=f"upstream_http_{outcome.status or 502}",
+             route=outcome.route, cloud_provider=prov)
     elif outcome.status is not None:
-        # 固定文案回客户端（评审 #10）：上游错误体只进日志，不入信封
-        _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-             status=outcome.status, error=outcome.error, route=outcome.route)
+        # 固定文案回客户端（评审 #10）：上游错误体只进进程日志，
+        # 不入信封、不入 RequestLog（终审 #16）
+        _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
+             status=outcome.status,
+             error=f"upstream_http_{outcome.status}",
+             route=outcome.route, cloud_provider=prov)
         err_type = _ANTHROPIC_STATUS_TYPE.get(outcome.status, "api_error")
         handler._send_json(
             {"type": "error",

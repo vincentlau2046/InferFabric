@@ -45,6 +45,9 @@ class ResolvedCandidate:
     candidate: CandidateConfig
     endpoint_fingerprint: str
     evidence: dict[str, Evidence] = field(default_factory=dict)  # protocol → evidence
+    # cloud 候选编译时的双协议路由快照（openai_base / anthropic_base），
+    # mid-flight 请求持旧快照引用不受 provider 配置变化影响（终审 #5）
+    route: dict[str, str] = field(default_factory=dict)
 
     @property
     def evidence_key_prefix(self) -> str:
@@ -87,7 +90,8 @@ class PoolRegistry:
     def __init__(self, config_path: Path, evidence_path: Path,
                  known_local: _KnownRef = (),
                  known_providers: _KnownRef = (),
-                 provider_base: Callable[[str], str] | None = None):
+                 provider_base: Callable[[str], str] | None = None,
+                 provider_route: Callable[[str], dict[str, str]] | None = None):
         self._config_path = Path(config_path)
         self._lock = threading.Lock()
         self._snapshot: RegistrySnapshot = _EMPTY_SNAPSHOT
@@ -97,6 +101,7 @@ class PoolRegistry:
         self._known_local = _as_getter(known_local)
         self._known_providers = _as_getter(known_providers)
         self._provider_base = provider_base or (lambda provider: "")
+        self._provider_route = provider_route
         self.evidence = EvidenceStore(evidence_path)
 
     # ── 快照 ──
@@ -112,10 +117,13 @@ class PoolRegistry:
         with self._lock:
             self._load_locked()
 
-    def _load_locked(self) -> bool:
+    def _load_locked(self) -> bool | None:
+        """三态：True=拾取新配置；None=无文件或内容未变；False=非法/损坏
+        （保留最后有效快照）。调用方必须区分 False 与 None — 前者要在
+        reload_all 里上报失败，后者是正常空转（终审 #19）。"""
         import yaml as _yaml
         if not self._config_path.exists():
-            return False
+            return None
         try:
             raw = _yaml.safe_load(self._config_path.read_text(encoding="utf-8"))
         except Exception as e:
@@ -123,12 +131,20 @@ class PoolRegistry:
             return False
         if not isinstance(raw, dict) or not raw:
             return False
+        unchanged = raw == self._raw
         file_revision = raw.get("revision")
         current = self._snapshot.revision
-        revision = file_revision if isinstance(file_revision, int) else current + 1
-        # 外部编辑常原地保留旧 revision 键：内容变化必须推进 revision，
-        # 否则持有旧 revision 的编辑者可 CAS 覆盖掉他人的修改（评审 #2）
-        if raw != self._raw and revision <= current:
+        if isinstance(file_revision, int):
+            revision = file_revision
+        else:
+            revision = current + 1
+        if unchanged:
+            # 内容未变绝不回退 revision（二次重载磁盘 revision 键仍为旧值，
+            # 回退会让陈旧 CAS 编辑者重新获得写窗口 — 终审 #4）
+            revision = max(revision, current)
+        elif revision <= current:
+            # 外部编辑常原地保留旧 revision 键：内容变化必须推进 revision，
+            # 否则持有旧 revision 的编辑者可 CAS 覆盖掉他人的修改（评审 #2）
             revision = current + 1
         try:
             parsed, issues = load_pools_dict(raw, current_revision=revision)
@@ -143,10 +159,10 @@ class PoolRegistry:
             return False
         self._raw = raw
         self._publish_locked(parsed)
-        return True
+        return None if unchanged else True
 
-    def reload_from_disk(self) -> bool:
-        """热加载（SIGHUP / /reload-config 复用）。返回是否拾取到新配置。"""
+    def reload_from_disk(self) -> bool | None:
+        """热加载（SIGHUP / /reload-config 复用）。三态见 _load_locked。"""
         self.evidence.load()
         with self._lock:
             return self._load_locked()
@@ -235,6 +251,18 @@ class PoolRegistry:
     def _publish_locked(self, parsed: PoolsFile) -> None:
         self._snapshot = self._compile(parsed)
 
+    def _route_for(self, provider: str) -> dict[str, str]:
+        """provider 的双协议路由（openai_base / anthropic_base）。
+
+        provider_route 回调优先（per-protocol）；仅提供 provider_base 时
+        双协议共用同一 base（向后兼容）。"""
+        if self._provider_route is not None:
+            route = self._provider_route(provider) or {}
+            return {"openai_base": str(route.get("openai_base", "")),
+                    "anthropic_base": str(route.get("anthropic_base", ""))}
+        base = self._provider_base(provider)
+        return {"openai_base": base, "anthropic_base": base}
+
     def _compile(self, parsed: PoolsFile) -> RegistrySnapshot:
         known_local = self._known_local()
         known_providers = self._known_providers()
@@ -250,18 +278,24 @@ class PoolRegistry:
                             f"not found in models.d — excluded")
                         continue
                     fp = endpoint_fingerprint("local", cand.model_name, "", cand.model_name)
+                    route: dict[str, str] = {}
                 else:
                     if cand.provider not in known_providers:
                         issues.append(
                             f"candidate '{cand.id}': provider '{cand.provider}' "
                             f"not configured — excluded")
                         continue
+                    # 指纹覆盖双协议 base：任一协议端点变化即失效全部旧证据
+                    # （终审 #6 — 只看 openai_base 会漏 anthropic 端点变更）
+                    route = self._route_for(cand.provider)
                     fp = endpoint_fingerprint(
-                        "cloud", cand.provider, self._provider_base(cand.provider),
+                        "cloud", cand.provider,
+                        f"openai={route['openai_base']}|anthropic={route['anthropic_base']}",
                         cand.model_id)
                 resolved.append(ResolvedCandidate(
                     candidate=cand, endpoint_fingerprint=fp,
                     evidence=self._evidence_for(cand, fp),
+                    route=route,
                 ))
             pools[name] = PoolSnapshot(
                 revision=parsed.revision, pool=pool,

@@ -41,10 +41,15 @@ class FakeAuth:
 class FakeGate:
     def __init__(self):
         self.acquired = []
+        self.target_acquired = []
         self.released = 0
 
     def acquire(self, model, timeout=None):
         self.acquired.append(model)
+        return SimpleNamespace(ok=True, reason="", release=self.release)
+
+    def acquire_target(self, model, timeout=None):
+        self.target_acquired.append(model)
         return SimpleNamespace(ok=True, reason="", release=self.release)
 
     def release(self):
@@ -180,7 +185,7 @@ def forwarded(monkeypatch):
     calls = []
 
     def fake_forward(handler, pm, target_port, body, stream, model_name="",
-                     upstream_path=None, cache_body=None):
+                     upstream_path=None, cache_body=None, timeout=None):
         calls.append({"port": target_port, "body": json.loads(body),
                       "stream": stream, "cache_body": cache_body,
                       "model_name": model_name})
@@ -205,28 +210,34 @@ class TestPoolChatDispatch:
         assert forwarded[0]["body"]["model"] == "qwen-small"  # 改写为 served_name
         assert forwarded[0]["cache_body"] is None             # 池请求不写缓存
         assert pm.ensure_service_calls == []                  # 绝不自动启动
-        assert pm.dual_gate.acquired[:1] == ["iff/fast"]  # 外层逻辑名 gate
-        assert pm.dual_gate.acquired[1:] == ["qwen-small"]  # 物理目标 gate（F16）          # 限流键 = 逻辑名
+        assert pm.dual_gate.acquired == ["iff/fast"]        # 外层逻辑名 gate（限流键）
+        assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理目标门= acquire_target
         assert h.sent == []                                   # 无错误响应
         # RequestLog 记录逻辑名 + pool 路由
         assert any(getattr(e, "route", None) == "pool:fast/local:qwen-small"
-                   and getattr(e, "model", None) == "iff/fast"
+                   and getattr(e, "model", None) == "qwen-small"  # 物理目标（终审 #15）
                    for e in pm.logger.entries)
 
     def test_inactive_local_falls_through_to_cloud(self, registry, forwarded, monkeypatch):
         cloud_results = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None, suppress_client_errors=False):
+                       original_model=None, suppress_client_errors=False, timeout=None):
             cloud_results.append({"model": data["model"], "protocol": protocol,
                                   "original": original_model})
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,
                                    duration_ms=1.0, error=None)
 
+        # 跨位置回退显式开启（终审 #2：本地未就绪不落云是默认行为）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         pm = FakePM(registry, active=set(),  # qwen-small 未激活
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": []}
 
@@ -257,7 +268,9 @@ class TestPoolChatDispatch:
              "declared_protocols": ["anthropic"]}]
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": []}
 
@@ -360,7 +373,9 @@ class TestPoolChatDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [

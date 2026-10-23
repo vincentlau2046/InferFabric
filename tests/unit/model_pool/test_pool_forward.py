@@ -59,7 +59,7 @@ class Recorder:
         self.results = list(results)
         self.calls = []
 
-    def __call__(self, cand):
+    def __call__(self, cand, remaining=None):
         self.calls.append(cand.candidate.id)
         return self.results.pop(0) if self.results else AttemptResult()
 
@@ -185,7 +185,9 @@ class TestSelectorIntegration:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         sel = select(registry.snapshot().pools["fast"],
                      RequestRequirements(protocol="openai"),
                      dispatch.runtime_view(pm))
@@ -194,10 +196,16 @@ class TestSelectorIntegration:
         assert sel.chosen is sel.ordered[0]
 
     def test_cooldown_excludes_candidate(self, registry):
+        # 跨位置回退显式开启（冷却本地 → 云备用可达需 opt-in）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         pm.pool_cooldowns = CooldownStore()
         # 冷却本地候选（fingerprint 与 registry 解析一致）
         fp = registry.snapshot().pools["fast"].candidates[0].endpoint_fingerprint
@@ -221,14 +229,14 @@ class TestDispatchFailover:
         local_calls = []
 
         def fake_forward(handler, pm, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             local_calls.append(target_port)
             return False                       # 连接失败，headers 未发送
 
         cloud_calls = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None, suppress_client_errors=False):
+                       original_model=None, suppress_client_errors=False, timeout=None):
             cloud_calls.append({"model": data["model"],
                                 "suppress": suppress_client_errors})
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,
@@ -239,7 +247,9 @@ class TestDispatchFailover:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": []}
 
@@ -256,7 +266,7 @@ class TestDispatchFailover:
         cloud_calls = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None, suppress_client_errors=False):
+                       original_model=None, suppress_client_errors=False, timeout=None):
             cloud_calls.append(data["model"])
             return SimpleNamespace(status=401, usage={}, ttft_ms=None,
                                    duration_ms=1.0,
@@ -272,7 +282,9 @@ class TestDispatchFailover:
              "declared_protocols": ["openai"]}]
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         pm.pool_cooldowns = CooldownStore()
 
         h1 = FakeHandler()
@@ -451,10 +463,11 @@ class TestCommittedStreamBoundary:
         h = _FakeRespHandler()
         pm = SimpleNamespace(response_cache=None)
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
-        status = forward_anthropic_local(
+        result = forward_anthropic_local(
             h, pm, {"model": "x", "messages": [], "stream": True},
             "key", model_obj, "iff/fast", suppress_client_errors=True)
-        assert status == 200                      # committed 信号（None = 可重放）
+        # 终审 #10 契约：CloudResult committed 信号（committed=False = 可重放）
+        assert result.status == 200 and result.committed is True
         assert h.status == 200
 
     @patch("inferfabric.forwarder.urlopen")

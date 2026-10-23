@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import inferfabric.model_pool.dispatch as dispatch
+from inferfabric.forwarder import CloudResult
 from inferfabric.model_pool.registry import PoolRegistry
 
 from tests.unit.model_pool.test_dispatch_openai import (
@@ -54,10 +55,11 @@ def anth_local(monkeypatch):
     calls = []
 
     def fake_local(handler, pm, data, auth_header, model_obj, original_model,
-                   suppress_client_errors=False):
+                   suppress_client_errors=False, timeout=None):
         calls.append({"model": data.get("model"), "model_obj": model_obj,
                       "original": original_model, "auth": auth_header})
-        return 200
+        # Phase E 契约：suppress 模式返回 CloudResult（终审 #10）
+        return CloudResult(status=200, committed=True)
 
     monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
     return calls
@@ -76,25 +78,31 @@ class TestPoolMessagesDispatch:
         assert anth_local[0]["model_obj"].served_name == "qwen-small"
         assert pm.ensure_service_calls == []          # ready_only
         assert pm.dual_gate.acquired[:1] == ["iff/fast"]  # 外层逻辑名 gate
-        assert pm.dual_gate.acquired[1:] == ["qwen-small"]  # 物理目标 gate（F16）  # 限流键 = 逻辑名
+        assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理目标 gate（acquire_target，终审 #8）
         assert h.sent == []
         assert any(getattr(e, "route", None) == "pool:fast/local:qwen-small"
-                   and getattr(e, "model", None) == "iff/fast"
+                   and getattr(e, "model", None) == "qwen-small"  # 物理模型（终审 #15）
                    for e in pm.logger.entries)
 
     def test_inactive_local_falls_to_cloud_anthropic_protocol(self, registry, anth_local, monkeypatch):
         cloud_calls = []
 
         def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
-                       original_model=None, suppress_client_errors=False):
+                       original_model=None, suppress_client_errors=False, timeout=None):
             cloud_calls.append({"model": data["model"], "protocol": protocol})
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,
                                    duration_ms=1.0, error=None)
 
+        # 跨位置回退显式开启（终审 #2：本地未就绪不落云是默认行为）
+        cfg = _raw_config_anthropic()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         pm = FakePM(registry, active=set(),
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
         data = {"model": "iff/fast", "messages": []}
 
@@ -146,7 +154,9 @@ class TestPoolMessagesDispatch:
              "declared_protocols": ["openai"]}]
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
         data = {"model": "iff/fast", "messages": []}
 
@@ -178,7 +188,9 @@ class TestPoolMessagesDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": object()})
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [

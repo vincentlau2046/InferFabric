@@ -109,7 +109,13 @@ class ConfigReloader:
         # 依赖域再编译池快照，否则外部编辑会被旧的依赖视图拒绝或错判
         if self._pool_registry:
             try:
-                self._pool_registry.reload_from_disk()
+                # 三态（终审 #19）：True=已应用；None=无文件/未变化（正常）；
+                # False=文件损坏/不可读 → 报告失败域，保留上一份好快照
+                result = self._pool_registry.reload_from_disk()
+                if result is False:
+                    failed.append("model_pools")
+                    log.error("ConfigReloader: model_pools reload rejected "
+                              "invalid file — keeping last good snapshot")
             except Exception as e:
                 failed.append("model_pools")
                 log.error("ConfigReloader: model_pools reload failed: %s", e)

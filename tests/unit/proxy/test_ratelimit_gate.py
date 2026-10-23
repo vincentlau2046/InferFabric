@@ -111,6 +111,33 @@ class TestRateLimiterV2:
 # ─── DualGateLimiter ───
 
 class TestDualGateLimiter:
+    def test_acquire_target_skips_rpm_and_global(self):
+        """物理目标容量门（终审 #8）：只占 per-model 并发信号量。
+
+        池路径嵌套调用（外层逻辑名 gate 已收 RPM + 全局并发）不得双扣：
+        acquire_target 跳过 Gate 1（RPM）与 Gate 2a（全局并发）。
+        """
+        rpm = RateLimiterV2(server_rpm=60, model_rpm_default=1, timeout=0.1)
+        gate = DualGateLimiter(rpm_limiter=rpm, max_concurrent=1, mode="reject",
+                               timeout=0.1, global_max_concurrent=1)
+        # 物理名 RPM 桶（1 token）耗尽
+        first = gate.acquire("qwen-small", timeout=0.1)
+        assert first.ok
+        first.release()
+        second = gate.acquire("qwen-small", timeout=0.1)
+        assert not second.ok            # RPM 桶空 → 全量 gate 拒绝
+        # 物理目标门跳过 RPM → 仍可得（嵌套不双扣）
+        t = gate.acquire_target("qwen-small", timeout=0.1)
+        assert t.ok
+        # 只占 per-model 并发（=1 已占）→ 同一物理目标第二个拒绝
+        t2 = gate.acquire_target("qwen-small", timeout=0.01)
+        assert not t2.ok
+        t.release()
+        # 全局并发未被 acquire_target 占用 → 另一逻辑名全量 gate 可过
+        other = gate.acquire("iff/fast", timeout=0.1)
+        assert other.ok
+        other.release()
+
     def test_observe_mode_no_429(self):
         """observe 模式：RPM 耗尽后不拒绝。"""
         rpm = RateLimiterV2(server_rpm=60, model_rpm_default=5, timeout=0.1)

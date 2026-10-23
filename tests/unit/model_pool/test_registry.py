@@ -107,7 +107,9 @@ class TestCandidateResolution:
         # 预置 probed 证据（指纹匹配 c1 的端点）
         reg = _make_registry(tmp_path)
         from inferfabric.model_pool.evidence import endpoint_fingerprint
-        fp = endpoint_fingerprint("cloud", "prov_a", "https://base/v1", "model_a")
+        fp = endpoint_fingerprint(
+            "cloud", "prov_a",
+            "openai=https://base/v1|anthropic=https://base/v1", "model_a")
         ev_key = "cloud:prov_a:model_a:openai"
         reg.evidence.record(ev_key, Evidence(
             state=EvidenceState.PROBED, protocol="openai", features=("tools",),
@@ -122,7 +124,9 @@ class TestCandidateResolution:
         # 先写证据文件，再全新 registry 启动加载 → 证据应注入候选
         from inferfabric.model_pool.evidence import EvidenceStore, endpoint_fingerprint
         ev_store = EvidenceStore(tmp_path / "evidence.json")
-        fp = endpoint_fingerprint("cloud", "prov_a", "https://base/v1", "model_a")
+        fp = endpoint_fingerprint(
+            "cloud", "prov_a",
+            "openai=https://base/v1|anthropic=https://base/v1", "model_a")
         ev_store.record("cloud:prov_a:model_a:openai", Evidence(
             state=EvidenceState.PROBED, protocol="openai", features=(),
             fingerprint=fp, recorded_at="t", source="admin-probe"))

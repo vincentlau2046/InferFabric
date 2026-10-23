@@ -33,10 +33,12 @@ def _resolved(cand, states=("PROBED",)):
                              evidence=evidence)
 
 
-def _pool_snap(cands, enabled=True, allowed=("cloud", "local"), accept_declared=False):
+def _pool_snap(cands, enabled=True, allowed=("cloud", "local"), accept_declared=False,
+               cross=False):
     pool = PoolConfig(
         name="fast", enabled=enabled, allowed_locations=tuple(allowed),
-        accept_declared=accept_declared, candidates=tuple(cands))
+        accept_declared=accept_declared, allow_cross_location=cross,
+        candidates=tuple(cands))
     return PoolSnapshot(revision=1, pool=pool,
                         candidates=tuple(_resolved(c) for c in cands))
 
@@ -201,10 +203,11 @@ class TestOrderingAndErrors:
         assert sel.error == "no_compatible_target"
 
     def test_falls_through_to_next_when_first_not_ready(self):
+        # 跨位置回退需显式开启（终审 #2：本地未就绪时绝不静默落云）
         snap = _pool_snap([
             _cand("l1", 1, kind="local", model_name="notactive"),
             _cand("c1", 2, kind="cloud", provider="prov", model_id="m1"),
-        ])
+        ], cross=True)
         sel = select(snap, _req(), _runtime(active=set(), cloud={"prov/m1": object()}))
         assert sel.chosen.candidate.id == "c1"
 
@@ -218,5 +221,7 @@ class TestOrderingAndErrors:
         reasons = {d.candidate_id: (d.reason, d.included) for d in sel.decisions}
         assert reasons["l1"] == ("local_not_ready", False)
         assert reasons["bad"] == ("no_evidence", False)
-        assert reasons["c1"] == ("ok", True)
-        assert sel.error is None
+        # cross 默认关闭：home=local（l1 静态兼容优先级最高），云候选
+        # 在就绪过滤之前即被排除（终审 #2）
+        assert reasons["c1"] == ("cross_location_disabled", False)
+        assert sel.error == "no_ready_target"

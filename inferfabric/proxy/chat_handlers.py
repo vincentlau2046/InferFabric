@@ -451,7 +451,7 @@ def handle_chat(handler, pm, data):
         gate.release()
 
 
-def _forward_request(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None):
+def _forward_request(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None):
     """Forward a request to an upstream service.
 
     Args:
@@ -460,6 +460,8 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
         cache_body: A3 (R5) — 转发前请求 body 快照（model 为客户端原名、
                     tools 未归一化）。非流式 200 且 JSON 可解析时用它写
                     响应缓存，保证与 GET 侧缓存键一致；None 则不写。
+        timeout: 可选连接/读超时秒数（池路径按剩余预算传入，终审 #7）。
+                 None = 引擎默认（既有行为逐字节不变）。
 
     Returns True if the response was fully sent to the client.
     Returns False if the caller should retry (headers not yet sent).
@@ -471,6 +473,8 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
     resp = None
     try:
         conn = pm.make_conn(target_port)
+        if timeout is not None:
+            conn.settimeout(timeout)
         conn.request("POST", upstream_path, body=body,
                       headers={"Content-Type": "application/json"})
         resp = conn.getresponse()

@@ -72,7 +72,7 @@ class Recorder:
         self.results = list(results)
         self.calls = []
 
-    def __call__(self, cand):
+    def __call__(self, cand, remaining=None):
         self.calls.append(cand.candidate.id)
         return self.results.pop(0) if self.results else AttemptResult()
 
@@ -297,7 +297,7 @@ class TestNonMigratableHistory:
                     local_models={"qwen-small": _local_model()})
 
         def fake_forward(handler, pmb, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             return True
         monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
         data = {"model": "iff/fast", "messages": [
@@ -405,8 +405,10 @@ class TestAttemptRecords:
         assert out.attempts[1].status == 500
         assert out.attempts[2].ok is True
 
-    def test_dispatch_logs_failed_attempts_with_target_identity(self, monkeypatch):
-        # dispatch 层：失败尝试各记一条 RequestLog，路由含物理目标标识
+    def test_dispatch_logs_failed_attempts_with_target_identity(self, monkeypatch,
+                                                                 caplog):
+        # dispatch 层（终审 #15 修订）：失败尝试不产生 RequestLog 行 —
+        # 目标身份（target/route）进进程日志；RequestLog 只保留最终结果行
         reg = _make_registry_with_local()
         pm = FakePM(reg, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
@@ -415,9 +417,14 @@ class TestAttemptRecords:
         h = FakeHandler()
         dispatch.handle_pool_chat(h, pm, {"model": "iff/fast", "messages": []},
                                   "iff/fast")
-        attempt_routes = [getattr(e, "route", None) for e in pm.logger.entries]
-        assert any(r and r.startswith("pool:fast/local:qwen-small")
-                   for r in attempt_routes)
+        # 唯一一条 RequestLog 是最终 pool_unavailable（逻辑名），无 attempt 行
+        assert len(pm.logger.entries) == 1
+        assert pm.logger.entries[0].error == "pool_unavailable"
+        # 失败尝试的物理目标标识进进程日志
+        records = [r for r in caplog.records
+                   if "pool attempt failed" in r.getMessage()]
+        assert records and "target=loc" in records[0].getMessage()
+        assert "pool:fast/local:qwen-small" in records[0].getMessage()
 
 
 # ── #15 served_name 就绪匹配 / #16 物理目标限流与副本释放 / #23 竞态窗口 ──
@@ -457,7 +464,7 @@ class TestLocalTargetIdentity:
         captured = {}
 
         def fake_forward(handler, pm, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             captured["model_name"] = model_name
             return True
 
@@ -548,7 +555,7 @@ class TestCloudDiscoveryOnPoolPath:
         pm.ensure_cloud_discovered = ecd
 
         def fake_forward(handler, pmb, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             return True
         monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
         h = FakeHandler()
@@ -566,7 +573,7 @@ class TestCloudDiscoveryOnPoolPath:
             pm.ensure_cloud_discovered_calls + 1)
 
         def fake_forward(handler, pmb, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             return True
         monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
         h = FakeHandler()
@@ -586,14 +593,15 @@ class TestPhysicalTargetGate:
         pm.dual_gate = gate
 
         def fake_forward(handler, pmb, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None):
+                         upstream_path=None, cache_body=None, timeout=None):
             return True
         monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
         dispatch._attempt_local_openai(
             FakeHandler(), pm, {"model": "iff/fast", "messages": []},
             model="iff/fast", pool="fast",
             cand=reg.snapshot().pools["fast"].candidates[0])
-        assert gate.acquired == ["qwen-small"]      # 物理目标键
+        assert gate.target_acquired == ["qwen-small"]   # 物理目标键（acquire_target，终审 #8）
+        assert gate.acquired == []                 # 不双扣外层 RPM/全局门
         assert gate.released == 1
 
 
@@ -735,10 +743,11 @@ class TestForwarderBoundaryFixes:
         h.wfile = _BoomFile()
         pm = SimpleNamespace(response_cache=None)
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
-        status = forward_anthropic_local(
+        result = forward_anthropic_local(
             h, pm, {"model": "x", "messages": []},
             "key", model_obj, "iff/fast", suppress_client_errors=True)
-        assert status == 200                       # committed 信号，非 None
+        # 终审 #10 契约：CloudResult committed 信号（非 None/未提交）
+        assert result.status == 200 and result.committed is True
 
     @patch("inferfabric.forwarder.HTTPConnection")
     def test_anthropic_local_suppress_mode_skips_response_cache(self, mock_conn):
