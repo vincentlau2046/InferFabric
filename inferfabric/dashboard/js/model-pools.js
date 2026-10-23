@@ -112,6 +112,8 @@
       + '<span class="mp-toggle-wrap">'
       + '<button type="button" class="mp-edit-btn" data-mp-edit="' + esc(name)
       + '">编辑</button>'
+      + '<button type="button" class="mp-edit-btn" data-mp-snippet="' + esc(name)
+      + '">接入片段</button>'
       + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
       + '"' + checked + '><span>启用</span></label>'
       + '</span>'
@@ -827,6 +829,8 @@
   function onModalClick(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
+    var cp = t.getAttribute('data-mp-copy');
+    if (cp) { doMpSnippetCopy(cp); return; }
     var act = t.getAttribute('data-mp-act');
     if (!act) return;
     var cand = t.getAttribute('data-mp-cand');
@@ -856,11 +860,89 @@
     }
   }
 
+  /* ── 接入片段（Task 8）：客户端复制即用代码 ── */
+
+  var _snippet = null;   // {pool, openai, anthropic} — copy 按钮的文本源
+
+  function snippetText(pool, proto) {
+    var host = '127.0.0.1';
+    try {
+      if (typeof location !== 'undefined' && location && location.hostname) {
+        host = location.hostname;
+      }
+    } catch (e) { /* 非浏览器环境 → 缺省本机 */ }
+    if (proto === 'anthropic') {
+      return 'from anthropic import Anthropic\n\n'
+        + 'client = Anthropic(\n'
+        + '    base_url="http://' + host + ':8999",   # 裸端口，不要加 /v1\n'
+        + '    api_key="<你的 IFF API key>",\n'
+        + ')\n'
+        + 'resp = client.messages.create(\n'
+        + '    model="iff/' + pool + '",\n'
+        + '    max_tokens=1024,\n'
+        + '    messages=[{"role": "user", "content": "你好"}],\n'
+        + ')\n'
+        + 'print(resp.content[0].text)';
+    }
+    return 'from openai import OpenAI\n\n'
+      + 'client = OpenAI(\n'
+      + '    base_url="http://' + host + ':8999/v1",\n'
+      + '    api_key="<你的 IFF API key>",\n'
+      + ')\n'
+      + 'resp = client.chat.completions.create(\n'
+      + '    model="iff/' + pool + '",\n'
+      + '    messages=[{"role": "user", "content": "你好"}],\n'
+      + ')\n'
+      + 'print(resp.choices[0].message.content)';
+  }
+
+  function doMpSnippet(pool) {
+    var modal = $('mpModal');
+    if (!modal) return;
+    var openai = snippetText(pool, 'openai');
+    var anthropic = snippetText(pool, 'anthropic');
+    _snippet = { pool: pool, openai: openai, anthropic: anthropic };
+    modal.innerHTML = '<div class="mp-editor">'
+      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(pool)
+      + '</b><span>接入片段 — 复制即用，之后换模型无需改客户端</span></div>'
+      + '<p class="mp-hint">注意：若 API key 配置了 models ACL，需包含'
+      + '<span class="mono">iff/' + esc(pool) + '</span>，否则会 401。</p>'
+      + '<p class="mp-snippet-title">OpenAI 协议</p>'
+      + '<pre class="mp-snippet">' + esc(openai) + '</pre>'
+      + '<button type="button" data-mp-copy="openai">复制 OpenAI 片段</button>'
+      + '<p class="mp-snippet-title">Anthropic 协议</p>'
+      + '<pre class="mp-snippet">' + esc(anthropic) + '</pre>'
+      + '<button type="button" data-mp-copy="anthropic">复制 Anthropic 片段</button>'
+      + '<p class="mp-hint">OpenAI SDK 的 base_url 要带 /v1；Anthropic SDK 用裸端口'
+      + ' — 再加会叠成 /v1/v1。</p>'
+      + '</div>';
+  }
+
+  async function doMpSnippetCopy(proto) {
+    if (!_snippet || !_snippet[proto]) {
+      UI.toast('请先打开接入片段', 'error');
+      return;
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator
+          && navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(_snippet[proto]);
+        UI.toast('片段已复制到剪贴板', 'ok');
+      } else {
+        UI.toast('当前环境不支持剪贴板 — 请手动选择文本复制', 'error');
+      }
+    } catch (e) {
+      UI.toast('复制失败：' + (e && e.message), 'error');
+    }
+  }
+
   function onBoxClick(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
     var edit = t.getAttribute('data-mp-edit');
     if (edit) { doMpEdit(edit); return; }
+    var snip = t.getAttribute('data-mp-snippet');
+    if (snip) { doMpSnippet(snip); return; }
     var del = t.getAttribute('data-mp-wizard-del');
     if (del) { doMpWizardToggle(del); return; }
     var add = t.getAttribute('data-mp-wizard-add');
@@ -887,4 +969,6 @@
   window.mpEditApply = mpEditApply;
   window.doMpWizardToggle = doMpWizardToggle;
   window.doMpWizardSubmit = doMpWizardSubmit;
+  window.doMpSnippet = doMpSnippet;
+  window.doMpSnippetCopy = doMpSnippetCopy;
 })();

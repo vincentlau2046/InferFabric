@@ -74,6 +74,7 @@ _RENDER_MUST_CONTAIN = [
     "no_evidence",          # 排除原因（解释性，非只给结果）
     'type="checkbox"',      # 原生开关（无自制伪 checkbox）
     'data-mp-edit="fast"',  # 编辑入口（卡片 → 三段式编辑器）
+    'data-mp-snippet="fast"',  # 接入片段入口（卡片 → 复制即用代码）
 ]
 
 _HARNESS = r"""
@@ -99,6 +100,10 @@ const window = {
     adminHeaders: () => ({'Content-Type': 'application/json'}),
   },
   store: {on: () => {}},
+};
+const clipboardWrites = [];
+const navigator = {
+  clipboard: {writeText: async (t) => { clipboardWrites.push(t); }},
 };
 const calls = [];
 const seen = {};
@@ -131,6 +136,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   window,
   document: {getElementById: el},
   fetch,
+  navigator,
   console,
 });
 (async () => {
@@ -151,7 +157,8 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   }
   const modalHtml = elements['mpModal'] ? elements['mpModal'].innerHTML : '';
   const previewHtml = elements['mpPreview'] ? elements['mpPreview'].innerHTML : '';
-  console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls}));
+  console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
+                              clipboardWrites}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -636,3 +643,37 @@ class TestWizard:
         assert not [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools"
                     and c["method"] == "POST"]     # 零 POST
+
+
+# ── Task 8：接入片段（客户端复制即用代码）──
+# 契约：
+# - doMpSnippet(pool)：#mpModal 内 OpenAI + Anthropic 两段可复制代码，
+#   base_url 用 location.hostname（缺省 127.0.0.1）+ 8999
+# - OpenAI base_url 带 /v1；Anthropic 用裸端口（再加会叠成 /v1/v1）
+# - ACL 提示：API key 若配了 models ACL，需含 iff/<pool> 否则 401
+# - doMpSnippetCopy(proto) → navigator.clipboard.writeText
+
+class TestSnippet:
+    def test_snippet_renders_both_protocols(self, run_panel):
+        out = run_panel(_routes(), actions=[{"fn": "doMpSnippet",
+                                             "args": ["fast"]}])
+        m = out["modalHtml"]
+        assert "iff/fast" in m
+        assert "127.0.0.1:8999/v1" in m             # OpenAI base_url 带 /v1
+        assert "from anthropic import Anthropic" in m
+        assert "from openai import OpenAI" in m
+        assert "models ACL" in m                    # ACL 提示
+        assert "/v1/v1" in m                        # 双 /v1 警告
+
+    def test_snippet_copy_uses_clipboard(self, run_panel):
+        actions = [
+            {"fn": "doMpSnippet", "args": ["fast"]},
+            {"fn": "doMpSnippetCopy", "args": ["openai"]},
+            {"fn": "doMpSnippetCopy", "args": ["anthropic"]},
+        ]
+        out = run_panel(_routes(), actions=actions)
+        assert len(out["clipboardWrites"]) == 2
+        assert "iff/fast" in out["clipboardWrites"][0]
+        assert 'base_url="http://127.0.0.1:8999/v1"' in out["clipboardWrites"][0]
+        assert 'base_url="http://127.0.0.1:8999"' in out["clipboardWrites"][1]
+        assert any("复制" in t["message"] for t in out["toasts"])

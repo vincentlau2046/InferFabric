@@ -1441,3 +1441,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   background: transparent; color: var(--if-text, #eee); cursor: pointer; }
 .mp-wizard-removed { font-size: 12px; color: var(--if-text-dim, #999);
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mp-snippet-title { margin: 10px 0 4px; font-size: 13px;
+  color: var(--if-text-dim, #999); }
+.mp-snippet { background: rgba(0, 0, 0, .25); border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; overflow-x: auto; margin: 4px 0 8px; }
