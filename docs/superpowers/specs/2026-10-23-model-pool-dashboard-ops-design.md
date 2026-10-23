@@ -147,8 +147,9 @@ api_key: <IFF API key>   # header: x-api-key
 
 ### 4.3 registry 快照 `configured` 字段与 `raw` 配置基底
 
-`RegistrySnapshot` 暴露 `configured: bool`（上次 reload 是否读到真实文件）；
-registry 另保留 `last_load_error: str | None`（最近一次加载失败原因，加载成功清空）。
+`PoolRegistry` 暴露 `configured: bool` 属性（曾成功加载/写入过有效配置）与
+`last_load_error: str | None`（最近一次加载失败原因，成功后清空）；
+`RegistrySnapshot` 结构不变（dispatch 不需要这两项）。
 `GET /admin/model-pools` 响应增加：
 
 - `configured: bool` + `load_error: str | null` — **三态**（builder check #4 裁决）：
