@@ -159,6 +159,10 @@ def _routes(toggle_status=200, toggle_body=None):
     return {
         "/admin/model-pools": {"status": 200, "body": _POOLS_BODY},
         "/admin/model-pools/status": {"status": 200, "body": _STATUS_BODY},
+        # v7.1.0：面板合并拉取三端点（runtime 缺失时旧后端会 404 → 面板容忍；
+        # 测试契约按新后端给 200 空运行态）
+        "/admin/model-pools/runtime": {"status": 200,
+                                       "body": {"revision": 3, "pools": {}}},
         "/admin/model-pools/toggle": {
             "status": toggle_status,
             "body": toggle_body or {"status": "updated", "revision": 4,
@@ -225,3 +229,82 @@ class TestToggle:
                          toggle_body={"error": "boom"})
         out = run_panel(routes, toggle={"pool": "fast", "enable": False})
         assert any(t["kind"] == "error" for t in out["toasts"])
+
+
+# ── Phase 1 Task 5+：运营视图（健康灯 / 候选链运行态 / 三态空态）──
+
+_RUNTIME_BODY = {
+    "revision": 3,
+    "pools": {
+        "fast": {"candidates": [
+            {"id": "loc", "kind": "local", "target": "qwen-small",
+             "fingerprint": "local|qwen-small||qwen-small", "active": True,
+             "cooling": {"remaining_s": 42.0, "reason": "cooldown_401",
+                         "probing": False},
+             "last_attempt": {"ok": False, "status": 503, "age_s": 187.0}},
+            {"id": "cld", "kind": "cloud", "target": "prov/cloud-m",
+             "fingerprint": "cloud|prov|https://b/v1|cloud-m", "active": False,
+             "cooling": None, "last_attempt": None},
+        ]},
+    },
+}
+
+
+def _ops_routes(pools_body=None, status_body=None, runtime_body=None):
+    return {
+        "/admin/model-pools": {"status": 200, "body": pools_body or _POOLS_BODY},
+        "/admin/model-pools/status": {"status": 200, "body": status_body or _STATUS_BODY},
+        "/admin/model-pools/runtime": {"status": 200,
+                                       "body": runtime_body or _RUNTIME_BODY},
+    }
+
+
+class TestOpsRender:
+    def test_runtime_states_rendered(self, run_panel):
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        # 候选 loc：冷却徽标 + 原因 + 最近失败
+        assert "冷却" in html
+        assert "cooldown_401" in html
+        assert "HTTP 503" in html
+
+    def test_health_lamp_ok_when_first_choice_serving(self, run_panel):
+        # openai chosen=loc（priority 1）→ mp-lamp-ok
+        out = run_panel(_ops_routes())
+        assert "mp-lamp-ok" in out["html"]
+
+    def test_health_lamp_warn_on_fallback(self, run_panel):
+        # openai chosen=cld（priority 2 → 回退中）；anthropic 无候选 → err
+        status = json.loads(json.dumps(_STATUS_BODY))
+        status["pools"]["fast"]["protocols"]["openai"]["chosen"] = "cld"
+        out = run_panel(_ops_routes(status_body=status))
+        assert "mp-lamp-warn" in out["html"]
+        assert "mp-lamp-err" in out["html"]
+
+    def test_unconfigured_state_message(self, run_panel):
+        pools = json.loads(json.dumps(_POOLS_BODY))
+        pools["pools"] = {}
+        pools["configured"] = False
+        pools["load_error"] = None
+        pools["raw"] = None
+        out = run_panel(_ops_routes(pools_body=pools))
+        assert "尚未配置" in out["html"]
+
+    def test_load_error_banner(self, run_panel):
+        pools = json.loads(json.dumps(_POOLS_BODY))
+        pools["pools"] = {}
+        pools["configured"] = False
+        pools["load_error"] = "model_pools.yaml invalid: bad things"
+        pools["raw"] = None
+        out = run_panel(_ops_routes(pools_body=pools))
+        assert "model_pools.yaml invalid: bad things" in out["html"]
+        assert "mp-error-banner" in out["html"]
+        # 坏文件：不出候选表
+        assert "qwen-small" not in out["html"]
+
+    def test_active_badge_local_vs_cloud(self, run_panel):
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        # loc 本地 active=True → 服务中；cld 云 active=False → 未发现
+        assert "服务中" in html
+        assert "未发现" in html

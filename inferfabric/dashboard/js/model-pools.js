@@ -33,10 +33,14 @@
 
   var POOLS_URL = '/admin/model-pools';
   var STATUS_URL = '/admin/model-pools/status';
+  var RUNTIME_URL = '/admin/model-pools/runtime';
   var TOGGLE_URL = '/admin/model-pools/toggle';
 
   var _revision = null;   // 最近渲染到的配置 revision（toggle CAS 用）
   var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
+  // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
+  // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
+  var _state = { def: null, status: null, runtime: null };
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -46,23 +50,70 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  /* ── 运行态辅助（v7.1.0）── */
+
+  // 每协议健康灯：chosen=首选候选 → ok；chosen 非空但非首选（回退中）→ warn；
+  // chosen 空（无可用候选，请求将收 pool_unavailable）→ err
+  function lampForProtocol(def, pv) {
+    var cands = (def.candidates || []).slice()
+      .sort(function (a, b) { return (a.priority || 0) - (b.priority || 0); });
+    var first = cands.length ? cands[0].id : null;
+    if (!pv || !pv.chosen) return 'mp-lamp-err';
+    return (first && pv.chosen === first) ? 'mp-lamp-ok' : 'mp-lamp-warn';
+  }
+
+  // 秒 → m:ss（冷却/隔离倒计时）
+  function fmtRemaining(s) {
+    if (s == null || isNaN(s)) return '';
+    var sec = Math.max(0, Math.round(s));
+    return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
+  }
+
+  // 候选行运行态：可用性徽标 + 冷却/隔离 + 最近失败
+  function runtimeBadge(rt) {
+    if (!rt) return '—';
+    var parts = [];
+    if (rt.cooling) {
+      var label = rt.cooling.reason === 'quarantine_404' ? '隔离'
+        : (rt.cooling.probing ? '探测中' : '冷却');
+      parts.push(label + ' ' + fmtRemaining(rt.cooling.remaining_s)
+        + (rt.cooling.reason ? ' (' + esc(rt.cooling.reason) + ')' : ''));
+    }
+    parts.push(rt.active
+      ? (rt.kind === 'local' ? '服务中' : '已发现')
+      : (rt.kind === 'local' ? '未启动' : '未发现'));
+    if (rt.last_attempt && !rt.last_attempt.ok) {
+      parts.push('HTTP ' + esc(rt.last_attempt.status));
+    }
+    return parts.join(' · ');
+  }
+
   /* ── 池卡片 ── */
-  function poolCard(name, def, st) {
+  function poolCard(name, def, st, rt) {
     var checked = def.enabled ? ' checked' : '';
     var html = '<div class="if-card mp-pool" data-mp-card="' + esc(name) + '">'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="mp-lamps">'
+      + ['openai', 'anthropic'].map(function (proto) {
+          var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
+          return '<span class="mp-lamp ' + cls + '" data-mp-lamp="' + esc(proto)
+            + '" title="' + esc(proto) + '"></span>';
+        }).join('')
+      + '</span>'
       + '<span class="mp-toggle-wrap">'
       + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
       + '"' + checked + '><span>启用</span></label>'
       + '</span>'
       + '</div>';
 
-    // 候选表（只读：id / 优先级 / 类型 / 目标 / 证据态）
+    // 候选链（id / 优先级 / 类型 / 目标 / 证据态 / 运行态）
     var cands = def.candidates || [];
+    var rtById = {};
+    (((rt || {}).candidates) || []).forEach(function (rc) { rtById[rc.id] = rc; });
     if (cands.length) {
       html += '<div class="cp-table-wrap"><table class="if-table">'
-        + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th><th>证据</th></tr></thead>'
+        + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th><th>证据</th><th>运行态</th></tr></thead>'
         + '<tbody>';
       cands.forEach(function (c) {
         var evKeys = Object.keys(c.evidence || {});
@@ -73,7 +124,8 @@
           + '<td class="mono">' + esc(c.priority) + '</td>'
           + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
           + '<td class="mono">' + esc(c.target) + '</td>'
-          + '<td class="mono">' + evTxt + '</td></tr>';
+          + '<td class="mono">' + evTxt + '</td>'
+          + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td></tr>';
       });
       html += '</tbody></table></div>';
     } else {
@@ -112,7 +164,7 @@
     return html;
   }
 
-  /* ── 渲染（只读拉取：定义 + 双协议状态） ── */
+  /* ── 渲染（拉取：定义 + 双协议状态 + 运行态；三态空态分支） ── */
   async function renderModelPools() {
     var box = $('mpPools');
     if (!box || _loading) return;
@@ -120,6 +172,7 @@
     try {
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
       var stRes = await fetch(STATUS_URL, { headers: UI.adminHeaders() });
+      var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
       if (!defRes.ok || !stRes.ok) {
         box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
           + esc(defRes.status) + '/' + esc(stRes.status) + '</p>';
@@ -127,19 +180,44 @@
       }
       var def = await defRes.json();
       var st = await stRes.json();
+      var rt = null;
+      if (rtRes.ok) {
+        try { rt = await rtRes.json(); } catch (e) { rt = null; }
+      }
+      _state.def = def;
+      _state.status = st;
+      _state.runtime = rt;
       _revision = def.revision;
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
 
+      // 三态分支（spec §4.3）：
+      // 1) 文件损坏 → 错误横幅（registry 保留最后有效快照继续服务）
+      if (def.load_error) {
+        box.innerHTML = '<div class="mp-error-banner">'
+          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
+          + '<p class="mono">' + esc(def.load_error) + '</p>'
+          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
+          + '</div>';
+        return;
+      }
       var names = Object.keys(def.pools || {});
+      // 2) 从未配置（无文件）→ 初始化向导占位（Task 7 实装向导本体）
+      if (def.configured === false && def.raw == null && !names.length) {
+        box.innerHTML = '<p class="mp-empty">逻辑模型池尚未配置 — '
+          + '使用初始化向导或创建 model_pools.yaml 后热加载</p>';
+        return;
+      }
+      // 3) 配置了零个池 → 普通空态
       if (!names.length) {
         box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
         return;
       }
       var stPools = (st && st.pools) || {};
+      var rtPools = (rt && rt.pools) || {};
       var html = '';
       names.forEach(function (n) {
-        html += poolCard(n, def.pools[n], stPools[n]);
+        html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
       });
       box.innerHTML = html;
     } catch (e) {

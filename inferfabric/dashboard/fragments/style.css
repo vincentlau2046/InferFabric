@@ -1388,3 +1388,18 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .agent-claim-preview{font-size:12px;color:var(--ink-3);min-height:18px}
 .agent-claim-hint{font-size:11px;color:var(--ink-3);padding:4px 0}
 @media (max-width:1100px){.if-agent-body{grid-template-columns:1fr}}
+
+/* ── 模型池运营视图 v7.1.0 ── */
+.mp-lamps { display: inline-flex; gap: 6px; margin-left: 10px; }
+.mp-lamp {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--if-text-dim, #888); vertical-align: middle;
+}
+.mp-lamp-ok { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, .5); }
+.mp-lamp-warn { background: #ffd60a; box-shadow: 0 0 6px rgba(255, 214, 10, .5); }
+.mp-lamp-err { background: #ff453a; box-shadow: 0 0 6px rgba(255, 69, 58, .5); }
+.mp-error-banner {
+  border: 1px solid rgba(255, 69, 58, .4); border-radius: 10px;
+  padding: 12px 16px; background: rgba(255, 69, 58, .08);
+}
+.mp-error-banner p { margin: 4px 0; }
