@@ -103,6 +103,33 @@ class PoolRegistry:
         self._provider_base = provider_base or (lambda provider: "")
         self._provider_route = provider_route
         self.evidence = EvidenceStore(evidence_path)
+        # 运行状态（v7.1.0 三态，供 GET /admin/model-pools）：
+        # configured=True 曾成功加载/写入过有效配置（快照/raw 可用）
+        # configured=False + last_load_error=None → 从未配置（前端出初始化向导）
+        # last_load_error≠None → 最近一次加载失败（前端错误横幅；registry
+        #   保留最后有效快照继续服务）
+        self._configured = False
+        self._load_error: str | None = None
+
+    # ── 运行状态（只读属性） ──
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
+
+    @property
+    def last_load_error(self) -> str | None:
+        return self._load_error
+
+    def raw_config(self) -> dict | None:
+        """最后成功加载/写入的原始配置深拷贝（编辑器读-改-写基底）。
+
+        GET 视图是有损的（悬空候选被剔除、部分字段不回传）——全量 CAS
+        更新必须以 raw 为基底，否则一次编辑即丢数据。
+        """
+        import copy
+        with self._lock:
+            return copy.deepcopy(self._raw) if self._raw is not None else None
 
     # ── 快照 ──
 
@@ -123,13 +150,18 @@ class PoolRegistry:
         reload_all 里上报失败，后者是正常空转（终审 #19）。"""
         import yaml as _yaml
         if not self._config_path.exists():
+            # 文件消失 ≠ 文件损坏：清除陈旧 load_error，前端回到
+            # 「从未配置」向导态而非卡在错误横幅（终审 M7，升级 Important）
+            self._load_error = None
             return None
         try:
             raw = _yaml.safe_load(self._config_path.read_text(encoding="utf-8"))
         except Exception as e:
             log.error("model_pools.yaml unreadable (%s) — pools disabled", e)
+            self._load_error = f"model_pools.yaml unreadable: {e}"
             return False
         if not isinstance(raw, dict) or not raw:
+            self._load_error = "model_pools.yaml is empty or not a mapping"
             return False
         unchanged = raw == self._raw
         file_revision = raw.get("revision")
@@ -152,13 +184,17 @@ class PoolRegistry:
             # 解析崩溃（畸形类型逃逸静态校验等）→ 保留最后有效快照，不抛出
             log.error("model_pools.yaml parse crashed (%s) — keeping last good snapshot",
                       type(e).__name__)
+            self._load_error = f"model_pools.yaml parse crashed: {type(e).__name__}: {e}"
             return False
         if parsed is None:
             log.error("model_pools.yaml invalid — keeping last good snapshot: %s",
                       "; ".join(issues))
+            self._load_error = "model_pools.yaml invalid: " + "; ".join(issues)
             return False
         self._raw = raw
         self._publish_locked(parsed)
+        self._configured = True
+        self._load_error = None
         return None if unchanged else True
 
     def reload_from_disk(self) -> bool | None:
@@ -191,7 +227,26 @@ class PoolRegistry:
             self._write_atomic(raw)
             self._raw = raw
             self._publish_locked(parsed)
+            self._configured = True
+            self._load_error = None
             return self._snapshot
+
+    def compile_pool(self, config: dict, pool_name: str) -> PoolSnapshot:
+        """dry-run 编辑态预览：把传入配置编译为单池快照（只读，不发布）。
+
+        Raises:
+            ValueError: 配置非法（静态校验问题 join 在 message）。
+            KeyError: 池不存在。
+        """
+        parsed, issues = load_pools_dict(config or {},
+                                         current_revision=self._snapshot.revision)
+        if parsed is None:
+            raise ValueError("; ".join(issues))
+        with self._lock:
+            snap = self._compile(parsed)
+        if pool_name not in snap.pools:
+            raise KeyError(pool_name)
+        return snap.pools[pool_name]
 
     def flip_pool_enabled(self, pool_name: str, enabled: bool,
                           expected_revision: int) -> RegistrySnapshot:
@@ -227,6 +282,8 @@ class PoolRegistry:
             self._write_atomic(raw)
             self._raw = raw
             self._publish_locked(parsed)
+            self._configured = True
+            self._load_error = None
             return self._snapshot
 
     # ── 内部 ──

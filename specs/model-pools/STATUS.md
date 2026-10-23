@@ -29,3 +29,28 @@
 提交链（sandbox main）：aa7e11c → e536a6a → 6499430 → 886ecba → 9f87b89 →
 2db6790 → 0d6b565 → 63146c7 → d2f702c → b792599 → d74d769 → 8a581f9 →
 96cfee5 → 468d006（评审修复）→ b9beb9f（提交卫生修复）→ 5e7ff7f（提交卫生记录）→ 终审修复 pass（本次）
+
+
+## 运营视图 Phase 1（v7.1.0，2026-10-23）
+
+日期：2026-10-23（sandbox 完成，生产未改动）；设计：
+`docs/superpowers/specs/2026-10-23-model-pool-dashboard-ops-design.md`；
+计划：`docs/superpowers/plans/2026-10-23-model-pool-dashboard-ops-phase1.md`
+
+| 项目 | 状态 | 证据 |
+|---|---|---|
+| T1 冷却原因/最近尝试（CooldownStore 扩展） | 完成 | entries()/record_attempt()/last_attempts() + reason 传递；test_cooldown_runtime.py 16 例 |
+| T2 run_attempts 尝试记录 | 完成 | admitted 传输后 record_attempt；401/403 带 cooldown_<status>；404 quarantine_404 |
+| T3 registry 三态 + raw 基底 | 完成 | configured/last_load_error/raw_config()/compile_pool()；test_registry_runtime_state.py 12 例 |
+| T4 管理端点扩展 | 完成 | GET /admin/model-pools 增 configured/load_error/raw；GET /admin/model-pools/runtime；dry-run 增 config 编辑态预览；test_admin.py +11 例 |
+| T5 运营视图渲染（健康灯/运行态/三态分支） | 完成 | model-pools.js lampForProtocol/runtimeBadge；test_model_pools_panel.py TestOpsRender 6 例 |
+| T6 三段式编辑器 | 完成 | raw 基底防丢数据；替换继承优先级（D4）；validate+dry-run 预览门禁；CAS 应用基点固定为打开时 revision；会话内回滚；TestEditor 7 例 |
+| T7 空态初始化向导 | 完成 | 四角色卡（可移除/恢复）+ 预填启发式；CAS expected_revision=0；损坏文件只出横幅零 POST；TestWizard 5 例 |
+| T8 接入片段 | 完成 | OpenAI/Anthropic 复制即用；ACL 与 /v1 陷阱提示；字面量 JSON.stringify 注入免疫；协议跟随 dashboard 源；TestSnippet 4 例 |
+| T9 版本/文档/门禁 | 完成 | __init__ 7.1.0；README（运营视图/runtime 端点/dry-run config/版本历史）|
+| 安全评审修复（commit 后台扫描 ×2 轮） | 完成 | #1 编辑器 CAS 旁路（后台刷新推进 revision → 打开时基点固定 + 409 后预览失效）；#2 片段池名注入 + http 降级（JSON.stringify 字面量 + location.protocol）|
+| 全量回归 / 提交树复验 | 见提交 | 面板+池 28+…；全量见 quality gates |
+| 一次性回滚语义 | 裁决 | doMpUndo 重取最新 revision 后回 POST 编辑前配置 — 用户显式回滚（先见最新状态再主动撤销），非旁路 |
+| 配置历史/多版本回滚（跨会话） | 留白 Phase 2 | 本期为会话内单步回滚 |
+| 延迟迷你图（候选行 TTFT/TPOT 趋势） | 留白 Phase 2 | 用户决策：内嵌候选行 |
+| 真实探测（PROBED 证据）出网授权 | 留白 | 独立任务（同 v7.0.0 STATUS） |

@@ -13,6 +13,7 @@
 （spec §5.1），推迟到独立任务。
 """
 
+import datetime
 import logging
 
 from inferfabric.model_pool.config import load_pools_dict
@@ -35,8 +36,30 @@ def _candidate_view(rc) -> dict:
     }
 
 
+def _json_safe(value):
+    """管理端点边界 JSON 安全化（终审 I4）。
+
+    YAML safe_load 会把 ISO 日期解析成 datetime.date；raw 原样透传时
+    _send_json 内 json.dumps 直接 TypeError，GET /admin/model-pools 整个
+    500。此处递归归一：date/datetime → isoformat，set → 排序列表，
+    其余不可序列化类型 → str()。
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(v) for v in value)
+    return str(value)
+
+
 def handle_get_model_pools(handler, pm):
-    snap = pm.pool_registry.snapshot()
+    reg = pm.pool_registry
+    snap = reg.snapshot()
     pools = {}
     for name, ps in snap.pools.items():
         pools[name] = {
@@ -50,7 +73,15 @@ def handle_get_model_pools(handler, pm):
             "issues": list(ps.issues),
             "candidates": [_candidate_view(rc) for rc in ps.candidates],
         }
-    handler._send_json({"revision": snap.revision, "pools": pools})
+    # v7.1.0 运行状态三态 + raw 编辑基底（GET 视图有损，编辑器读-改-写
+    # 必须以 raw 为基底防丢数据 — 见 registry.raw_config 文档）
+    handler._send_json(_json_safe({
+        "revision": snap.revision,
+        "pools": pools,
+        "configured": reg.configured,
+        "load_error": reg.last_load_error,
+        "raw": reg.raw_config(),
+    }))
 
 
 def handle_put_model_pools(handler, pm):
@@ -125,8 +156,24 @@ def handle_post_model_pools_dry_run(handler, pm):
             {"error": "protocol must be 'openai' or 'anthropic'",
              "status": "bad_request"}, 400)
         return
-    snap = pm.pool_registry.snapshot()
-    ps = snap.pools.get(pool_name)
+    # v7.1.0 编辑态预览：可选 config（完整池配置 dict）→ 预览编辑后而非
+    # 已发布快照；不传时行为不变（向后兼容）
+    config = data.get("config")
+    if config is not None:
+        try:
+            ps = pm.pool_registry.compile_pool(config, pool_name)
+        except ValueError as e:
+            handler._send_json({"error": str(e), "status": "invalid_config",
+                                "issues": str(e).split("; ")}, 400)
+            return
+        except KeyError:
+            handler._send_json(
+                {"error": f"Unknown pool: {pool_name}",
+                 "status": "unknown_pool"}, 404)
+            return
+    else:
+        snap = pm.pool_registry.snapshot()
+        ps = snap.pools.get(pool_name)
     if ps is None:
         handler._send_json(
             {"error": f"Unknown pool: {pool_name}", "status": "unknown_pool"}, 404)
@@ -185,3 +232,46 @@ def handle_post_model_pools_toggle(handler, pm):
         return
     handler._send_json({"status": "updated", "revision": snap.revision,
                         "pool": pool_name, "enabled": enabled})
+
+
+def handle_get_model_pools_runtime(handler, pm):
+    """GET /admin/model-pools/runtime — 每池每候选运行态（v7.1.0，只读）。
+
+    候选链实时视图数据源：active（本地=已启动/云=已发现）、cooling（冷却/
+    隔离剩余与原因、半开探测在途）、last_attempt（最近一次真实传输尝试）。
+    前端 5s 轮询；registry 未配置时返回空 pools（200，不 500）。
+    """
+    reg = pm.pool_registry
+    snap = reg.snapshot()
+    runtime = runtime_view(pm)
+    cooldowns = getattr(pm, "pool_cooldowns", None)
+    entries = cooldowns.entries() if cooldowns is not None else {}
+    lasts = cooldowns.last_attempts() if cooldowns is not None else {}
+    pools = {}
+    for name, ps in snap.pools.items():
+        cands = []
+        for rc in ps.candidates:
+            c = rc.candidate
+            if c.kind == "local":
+                active = c.model_name in runtime.active_services
+            else:
+                active = f"{c.provider}/{c.model_id}" in runtime.cloud_models
+            cooling = entries.get(rc.endpoint_fingerprint)
+            last = lasts.get(rc.endpoint_fingerprint)
+            cands.append({
+                "id": c.id,
+                "kind": c.kind,
+                "target": c.model_name if c.kind == "local"
+                          else f"{c.provider}/{c.model_id}",
+                "fingerprint": rc.endpoint_fingerprint,
+                "active": active,
+                "cooling": ({"remaining_s": cooling["remaining_s"],
+                             "reason": cooling["reason"],
+                             "probing": cooling["probing"]}
+                            if cooling is not None else None),
+                "last_attempt": ({"ok": last["ok"], "status": last["status"],
+                                  "age_s": last["age_s"]}
+                                 if last is not None else None),
+            })
+        pools[name] = {"candidates": cands}
+    handler._send_json({"revision": snap.revision, "pools": pools})
