@@ -866,19 +866,27 @@
 
   function snippetText(pool, proto) {
     var host = '127.0.0.1';
+    var scheme = 'http:';
     try {
-      if (typeof location !== 'undefined' && location && location.hostname) {
-        host = location.hostname;
+      if (typeof location !== 'undefined' && location) {
+        if (location.hostname) host = location.hostname;
+        // 协议跟随 dashboard 自身来源：反代 TLS 终结时片段保持 https，
+        // 不把已加密的管理面降级成明文 http
+        if (location.protocol) scheme = location.protocol;
       }
-    } catch (e) { /* 非浏览器环境 → 缺省本机 */ }
+    } catch (e) { /* 非浏览器环境 → 缺省本机 http */ }
+    var base = scheme + '//' + host + ':8999';
+    // model 字面量用 JSON.stringify 生成（Python 兼容转义）：池名含引号/
+    // 反斜杠/换行也只是一个完整字符串参数，无法注入到复制的代码（安全评审）
+    var modelLit = JSON.stringify('iff/' + pool);
     if (proto === 'anthropic') {
       return 'from anthropic import Anthropic\n\n'
         + 'client = Anthropic(\n'
-        + '    base_url="http://' + host + ':8999",   # 裸端口，不要加 /v1\n'
+        + '    base_url=' + JSON.stringify(base) + ',   # 裸端口，不要加 /v1\n'
         + '    api_key="<你的 IFF API key>",\n'
         + ')\n'
         + 'resp = client.messages.create(\n'
-        + '    model="iff/' + pool + '",\n'
+        + '    model=' + modelLit + ',\n'
         + '    max_tokens=1024,\n'
         + '    messages=[{"role": "user", "content": "你好"}],\n'
         + ')\n'
@@ -886,11 +894,11 @@
     }
     return 'from openai import OpenAI\n\n'
       + 'client = OpenAI(\n'
-      + '    base_url="http://' + host + ':8999/v1",\n'
+      + '    base_url=' + JSON.stringify(base + '/v1') + ',\n'
       + '    api_key="<你的 IFF API key>",\n'
       + ')\n'
       + 'resp = client.chat.completions.create(\n'
-      + '    model="iff/' + pool + '",\n'
+      + '    model=' + modelLit + ',\n'
       + '    messages=[{"role": "user", "content": "你好"}],\n'
       + ')\n'
       + 'print(resp.choices[0].message.content)';

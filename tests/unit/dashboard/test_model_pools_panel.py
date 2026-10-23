@@ -8,6 +8,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -137,6 +138,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   document: {getElementById: el},
   fetch,
   navigator,
+  location: input.location || {protocol: 'http:', hostname: '127.0.0.1'},
   console,
 });
 (async () => {
@@ -174,11 +176,12 @@ def run_panel(tmp_path):
     harness = tmp_path / "model_pools_harness.js"
     harness.write_text(_HARNESS, encoding="utf-8")
 
-    def run(routes, toggle=None, actions=None):
+    def run(routes, toggle=None, actions=None, location=None):
         proc = subprocess.run(
             [node, str(harness), str(PANEL_JS)],
             input=json.dumps({"routes": routes, "toggle": toggle,
-                              "actions": actions}),
+                              "actions": actions,
+                              "location": location}),
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0, proc.stderr
@@ -677,3 +680,30 @@ class TestSnippet:
         assert 'base_url="http://127.0.0.1:8999/v1"' in out["clipboardWrites"][0]
         assert 'base_url="http://127.0.0.1:8999"' in out["clipboardWrites"][1]
         assert any("复制" in t["message"] for t in out["toasts"])
+
+    def test_snippet_pool_name_is_safe_literal(self, run_panel):
+        # 敌意池名（含引号/分号/换行类负载）不得逃逸出 model 字面量 —
+        # 复制的 Python 代码必须仍是单个完整字符串参数（安全评审）
+        hostile = 'fast", max_tokens=1); import os; os.system("echo pwn'
+        actions = [
+            {"fn": "doMpSnippet", "args": [hostile]},
+            {"fn": "doMpSnippetCopy", "args": ["openai"]},
+            {"fn": "doMpSnippetCopy", "args": ["anthropic"]},
+        ]
+        out = run_panel(_routes(), actions=actions)
+        assert len(out["clipboardWrites"]) == 2
+        for text in out["clipboardWrites"]:
+            m = re.search(r'^\s*model=(.*),?\s*$', text, re.M)
+            assert m, "snippet missing model arg"
+            lit = m.group(1).rstrip(",")
+            # JSON 字符串字面量（Python 兼容转义）round-trip 回原名 → 无法注入
+            assert json.loads(lit) == "iff/" + hostile
+
+    def test_snippet_scheme_follows_dashboard_origin(self, run_panel):
+        # dashboard 经 https 提供时（反代终结 TLS），片段不得降级成 http
+        out = run_panel(_routes(),
+                        actions=[{"fn": "doMpSnippet", "args": ["fast"]}],
+                        location={"protocol": "https:",
+                                  "hostname": "iff.example.com"})
+        assert "https://iff.example.com:8999" in out["modalHtml"]
+        assert "http://" not in out["modalHtml"].replace("https://", "")
