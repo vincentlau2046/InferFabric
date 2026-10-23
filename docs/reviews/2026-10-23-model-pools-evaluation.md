@@ -189,3 +189,36 @@ systemctl --user restart inferfabric-proxy.service
 # 4. 冒烟（生产）：GET /health；GET /admin/model-pools → {"revision":0,"pools":{}}
 # 5. （可选）配置首个池后 SIGHUP 热加载或 /reload-config
 ```
+
+### 6.2 终审（opus，独立上下文）与终审修复 pass
+
+**终审**（独立上下文，净 diff `a86f5bc..5e7ff7f`，spec/plan/ledger 全量
+提供）：结论 **Not ready to merge — 20 Important + 4 Minor**，多项以
+真实代码路径复现。按影响重评级：**18 项 FIX / 2 项裁决 / 4 项 Minor 记账**。
+
+**终审修复 pass**（单一 pass，全部 TDD RED→GREEN；用户已确认：GLM 云端
+交叉评审改为本地独立交叉审核，锁定模型不可用）：
+
+| 类别 | 修复（编号=终审发现） |
+|---|---|
+| 配置 | #20 字符串 "false" 强转 True → `_strict_bool` 三开关拒非 bool；#19 重载三态（True/None/False，False 报失败域保留最后好快照）+ config_reloader 接线 |
+| registry/选择 | #4 二次不变重载 revision 回滚堵死；#5 双协议路由编译期快照（mid-flight 不受 provider 热更新影响）+ proxy_manager provider_route 接线；#6 依赖指纹覆盖 openai+anthropic 双端点；#2 跨位置开关先于就绪过滤强制（home 位置 = 首个静态兼容候选，本地宕/冷却 → no_ready_target 绝不静默落云）；#3 不可迁移历史守卫改用静态兼容数（冷却中的备用也计入）+ redacted_thinking 补检 |
+| 回退内核 | #17 冷却存储 threading.Lock；#18 半开单飞探测 + 404 隔离（TTL 1800s）；#7 剩余预算传导（gate 等待/传输超时/gate 超时全部受 deadline 约束）；#11 准入失败不耗 POST 预算；#12 Retry-After 绝不截断（超上限/超预算 → 切候选） |
+| 限流/调度 | #8 acquire_target（物理目标门只占 per-model 信号量，不双扣外层 RPM/全局）；#14 门先于端口预留；#13 Ollama 池分支移除（无返回信号不可回退，统一 OpenAI 兼容端点） |
+| 传输契约 | #10 forward_anthropic_local suppress 模式返回 CloudResult（429/5xx/4xx/连接失败 committed=False 不写客户端、429 带 Retry-After；200 非流式先读 body 再 committed）；#12 Retry-After 支持 HTTP-date；#1 PR-14 默认路径恢复与基线逐字节一致（错误体读取硬化收进 suppress 分支） |
+| 观测/费用 | #15 失败尝试只进进程日志（RequestLog 不再被 attempt 行污染成功率）；最终行 model=物理模型 + cloud_provider（云费用归属不再为 0）；#16 RequestLog 固定错误码 upstream_http_<status>（上游错误体含凭证不入持久日志） |
+
+终审裁决（维持现状，理由见 ledger）：
+- **#9 直连云路径不共享物理 gate** — 共享需改既有直连路径行为（兼容性
+  变更），契约收窄为「池间 + 本地直连共享」；直连云统一归 P3 单独授权。
+- **#6 部分** — 依赖变化经指纹使证据失效，但不推进 pool 快照 revision
+  （revision 语义 = 池配置版本，非依赖版本）。
+
+Minor（记账不修）：M1 dashboard toggle 失败态展示；M2 池预算/策略组合
+校验（max_attempts vs 候选深度）；M3 快照浅不可变（当前无外部可变引用）。
+
+**修复后回归**：工作区全量 **1543 passed / 0 failed**（unit+integration，
+较终审前 +59 例），import 冒烟通过；既有 forwarder 36 例作为 PR-14 默认
+路径回归锚点全绿。新增测试文件：
+`tests/unit/model_pool/test_final_fixes.py`（43 例）、
+`tests/unit/model_pool/test_forwarder_pool_contract.py`（15 例）。

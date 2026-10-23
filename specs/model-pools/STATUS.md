@@ -18,12 +18,14 @@
 | 提交卫生修复 | 完成 | 0d6b565 误扫入 handler.py 的 cloud-test WIP（=生产 f0c642e/48c5745 内容）经三方合并剥离（commit b9beb9f，提交树 13 例 RED → 全绿）；工作区 WIP 原样保留未提交；合入审查看净 diff `git diff a86f5bc..b9beb9f` |
 | import 冒烟 | 通过 | `python3 -c "import inferfabric"` → 6.1.6 |
 | 隔离 HTTP 冒烟 | 通过 | 生产 --async 同款 build_app + 假 vLLM 双协议上游：OpenAI/Anthropic iff/fast 200 且内容来自选定候选；unknown_pool 404；no_compatible_target 400；admin GET/PUT/dry-run 全链路；全程零 ensure_service（评审修复后复验 10/10） |
+| 终审（opus 独立上下文，净 diff a86f5bc..5e7ff7f） | 完成 | Not ready to merge — 20 Important + 4 Minor；18 项进修复 pass / 2 项裁决 / 4 项 Minor 记账；见评估报告 §6.2 |
+| 终审修复 pass | 完成 | 18 项全部 TDD RED→GREEN（test_final_fixes.py 43 例 + test_forwarder_pool_contract.py 15 例 + ratelimit/model_pool 既有用例更新）；工作区全量 1543 passed / 0 failed；GLM 云交叉评审经用户确认改为本地独立交叉审核 |
 | 独立代码评审 | 完成 | 20 Important + 3 Minor → 19 项 TDD 修复 / 6 项裁决 / 3 项 Minor 记账；见评估报告 §6 |
-| 指定云端 GLM 交叉评审 | 未执行 | 沿用 ui-switch-result 先例：交叉门需生产 :8999 云路由出网，本任务全程沙箱零出网；合入前与生产合入一并申请 |
+| 交叉审核（原 GLM 云交叉评审） | 完成 | 用户决策（2026-10-23）：GLM 锁定不可用，云交叉评审改为本地独立交叉审核 = 终审（opus 独立上下文，评估报告 §6.2） |
 | 生产合入 / 部署 | 未执行 | 需用户单独批准：forwarder.py 增量参数涉 PR-14 冻结边界（见评估报告 §7） |
 | P3 会话粘性 / P4 跨协议转换 | 留白 | 显式不做；保守拒绝迁移（spec §7/§14-P3） |
 | 真实探测（PROBED 证据）/ 预算硬顶 | 留白 | 需管理员显式出网授权 / 独立任务 |
 
 提交链（sandbox main）：aa7e11c → e536a6a → 6499430 → 886ecba → 9f87b89 →
 2db6790 → 0d6b565 → 63146c7 → d2f702c → b792599 → d74d769 → 8a581f9 →
-96cfee5 → 468d006（评审修复）→ b9beb9f（提交卫生修复）
+96cfee5 → 468d006（评审修复）→ b9beb9f（提交卫生修复）→ 5e7ff7f（提交卫生记录）→ 终审修复 pass（本次）
