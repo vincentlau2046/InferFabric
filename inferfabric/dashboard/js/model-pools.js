@@ -418,7 +418,11 @@
     if (!Array.isArray(base.pools[pool].candidates)) {
       base.pools[pool].candidates = [];
     }
-    _edit = { pool: pool, base: base, work: deepCopy(base), catalog: null };
+    // CAS 基点在打开时捕获：后台刷新推进 _revision 不得让陈旧工作副本
+    // 借新 revision 通过 CAS 覆盖他人修改（安全评审 — 固定基点，
+    // 他人改动后 apply 只会 409，需重开编辑器取新基底）
+    _edit = { pool: pool, base: base, work: deepCopy(base), catalog: null,
+              base_revision: _state.def.revision, validated: false };
     renderEditor();
     try { _edit.catalog = await fetchCandidateCatalog(); }
     catch (e) { _edit.catalog = null; }
@@ -537,7 +541,7 @@
       return;
     }
     var body = deepCopy(_edit.work);
-    body.expected_revision = _revision;
+    body.expected_revision = _edit.base_revision;   // 打开时的基点，不被后台刷新推进
     try {
       var res = await fetch(UPDATE_URL, {
         method: 'POST', headers: UI.adminHeaders(),
@@ -556,7 +560,9 @@
         return;
       }
       if (res.status === 409) {
-        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        // 基点已过期：本工作副本不可再应用（重试仍会 409）— 引导重开编辑器
+        _edit.validated = false;
+        UI.toast('配置已被其他修改更新（冲突）。请关闭编辑器后重新打开，基于最新配置再编辑', 'error');
         await renderModelPools();
         return;
       }

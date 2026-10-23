@@ -515,6 +515,22 @@ class TestEditor:
         # 视图独有、raw 没有的候选不得经编辑混入
         assert "cld" not in ids
 
+    def test_editor_apply_pins_open_revision(self, run_panel):
+        # 打开编辑器时 revision=3；随后后台刷新看到 revision=4（他人已更新）
+        pools_bodies = [_editor_pools_body(), _editor_pools_body(revision=4)]
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "renderModelPools", "args": []},   # 模拟后台轮询刷新
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(pools_bodies=pools_bodies), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        # apply 必须用编辑器打开时捕获的 revision；后台刷新推进 _revision
+        # 不得让陈旧工作副本借新 revision 通过 CAS 覆盖他人修改（安全评审）
+        assert body["expected_revision"] == 3
+
     def test_editor_unconfigured_empty_base(self, run_panel):
         pools = {"revision": 0, "pools": {}, "configured": False,
                  "load_error": None, "raw": None}
