@@ -35,12 +35,20 @@
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
   var TOGGLE_URL = '/admin/model-pools/toggle';
+  var VALIDATE_URL = '/admin/model-pools/validate';
+  var DRYRUN_URL = '/admin/model-pools/dry-run';
+  var UPDATE_URL = '/admin/model-pools';
 
   var _revision = null;   // 最近渲染到的配置 revision（toggle CAS 用）
   var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
   // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
   // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
   var _state = { def: null, status: null, runtime: null };
+  // v7.1.0 三段式编辑器（Task 6）：
+  //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
+  //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
+  var _edit = null;
+  var _undo = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -263,6 +271,376 @@
     }
   }
 
+  /* ── 三段式编辑器（Task 6）：编辑 → 预览 → 应用/回滚 ── */
+
+  function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+
+  // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
+  async function fetchCandidateCatalog() {
+    var out = { local: [], cloud: [] };
+    try {
+      var r = await fetch('/models', { headers: UI.adminHeaders() });
+      if (r.ok) {
+        var d = await r.json();
+        var list = Array.isArray(d) ? d : (d.models || []);
+        (Array.isArray(list) ? list : []).forEach(function (m) {
+          var name = (m && (m.name || m.served_name || m.model)) || null;
+          if (name) out.local.push(String(name));
+        });
+      }
+    } catch (e) { /* 目录降级 */ }
+    try {
+      var r2 = await fetch('/admin/cloud/providers', { headers: UI.adminHeaders() });
+      if (r2.ok) {
+        var d2 = await r2.json();
+        var provs = (d2 && (d2.providers || [])) || [];
+        provs.forEach(function (pv) {
+          var pname = pv && (pv.name || pv.provider);
+          var models = (pv && (pv.models || [])) || [];
+          models.forEach(function (mid) {
+            out.cloud.push(pname + '/' + mid);
+          });
+        });
+      }
+    } catch (e) { /* 目录降级 */ }
+    return out;
+  }
+
+  // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
+  function candFromCatalogValue(spec, id) {
+    var i = spec.indexOf(':');
+    var kind = spec.slice(0, i);
+    var target = spec.slice(i + 1);
+    if (kind === 'cloud') {
+      var j = target.indexOf('/');
+      return { id: id, kind: 'cloud', provider: target.slice(0, j),
+               model_id: target.slice(j + 1),
+               declared_protocols: ['openai'], features: [] };
+    }
+    return { id: id, kind: 'local', model_name: target,
+             declared_protocols: ['openai'], features: [] };
+  }
+
+  // 编辑器渲染：#mpModal（候选链操作 + 池参数 + 预览/应用/回滚）
+  function renderEditor() {
+    var modal = $('mpModal');
+    if (!modal || !_edit) return;
+    var wp = _edit.work.pools[_edit.pool];
+    var rtById = {};
+    ((((_state.runtime || {}).pools || {})[_edit.pool] || {}).candidates || [])
+      .forEach(function (rc) { rtById[rc.id] = rc; });
+
+    var html = '<div class="mp-editor" data-mp-editor="' + esc(_edit.pool) + '">'
+      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(_edit.pool)
+      + '</b><span>编辑候选链（改完先预览，再应用）</span></div>';
+
+    // 候选链：id / 优先级 / 目标 / 运行态 / 操作（替换=行内下拉选中即换）
+    var cands = wp.candidates || [];
+    var opts = function (sel) {
+      var local = ((_edit.catalog || {}).local || []);
+      var cloud = ((_edit.catalog || {}).cloud || []);
+      var o = '';
+      local.forEach(function (n) {
+        o += '<option value="local:' + esc(n) + '"' + (sel === 'local:' + n ? ' selected' : '')
+          + '>本地 · ' + esc(n) + '</option>';
+      });
+      cloud.forEach(function (n) {
+        o += '<option value="cloud:' + esc(n) + '"' + (sel === 'cloud:' + n ? ' selected' : '')
+          + '>云 · ' + esc(n) + '</option>';
+      });
+      if (!o) o = '<option value="">（目录不可用 — 请用下方新增候选）</option>';
+      return o;
+    };
+    html += '<div class="cp-table-wrap"><table class="if-table">'
+      + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th>'
+      + '<th>运行态</th><th>操作</th></tr></thead><tbody>';
+    cands.forEach(function (c, idx) {
+      var target = c.kind === 'local' ? c.model_name
+        : (c.provider + '/' + c.model_id);
+      var sel = c.kind + ':' + target;
+      html += '<tr><td class="mono">' + esc(c.id) + '</td>'
+        + '<td class="mono">' + esc(c.priority) + '</td>'
+        + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
+        + '<td class="mono">' + esc(target) + '</td>'
+        + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td>'
+        + '<td class="mp-edit-ops">'
+        + '<select data-mp-replace="' + esc(c.id) + '">'
+        + '<option value="">替换为…</option>' + opts(sel) + '</select>'
+        + '<button type="button" data-mp-act="up" data-mp-cand="' + esc(c.id) + '">上移</button>'
+        + '<button type="button" data-mp-act="down" data-mp-cand="' + esc(c.id) + '">下移</button>'
+        + '<button type="button" data-mp-act="del" data-mp-cand="' + esc(c.id) + '">删除</button>'
+        + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+
+    // 新增候选（目录下拉；空目录时提示手填 YAML）
+    html += '<div class="mp-edit-add"><select data-mp-add="1">'
+      + '<option value="">新增候选…</option>' + opts('') + '</select>'
+      + '<span class="mp-hint">新增的候选排在链尾（优先级最低）</span></div>';
+
+    // 池参数
+    html += '<div class="mp-edit-params">'
+      + '<label>max_attempts <input type="number" data-mp-param="max_attempts" value="'
+      + esc(wp.max_attempts) + '"></label>'
+      + '<label>deadline_ms <input type="number" data-mp-param="deadline_ms" value="'
+      + esc(wp.deadline_ms) + '"></label>'
+      + '<label>accept_declared <input type="checkbox" data-mp-param="accept_declared"'
+      + (wp.accept_declared ? ' checked' : '') + '></label>'
+      + '</div>';
+
+    // 预览区 + 动作按钮
+    html += '<div id="mpPreview" class="mp-preview"></div>'
+      + '<div class="mp-edit-actions">'
+      + '<button type="button" data-mp-act="preview">预览</button>'
+      + '<button type="button" data-mp-act="apply">应用</button>'
+      + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
+      + '</div></div>';
+    modal.innerHTML = html;
+  }
+
+  // 打开编辑器：基底 = raw（视图有损，防丢数据 — spec §4.3）；池不存在 → 新建骨架
+  async function doMpEdit(pool) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool]) {
+      base.pools[pool] = {
+        enabled: true, strategy: 'priority',
+        allowed_locations: ['local', 'cloud'],
+        accept_declared: true, allow_cross_location: false,
+        max_attempts: 2, deadline_ms: 60000, candidates: [],
+      };
+    }
+    if (!Array.isArray(base.pools[pool].candidates)) {
+      base.pools[pool].candidates = [];
+    }
+    _edit = { pool: pool, base: base, work: deepCopy(base), catalog: null };
+    renderEditor();
+    try { _edit.catalog = await fetchCandidateCatalog(); }
+    catch (e) { _edit.catalog = null; }
+    renderEditor();
+  }
+
+  // 候选操作（无 inline onclick；模态内事件委托调用这些函数）
+
+  function mpEditReplace(candidateId, newCand) {
+    if (!_edit) return;
+    var cands = _edit.work.pools[_edit.pool].candidates;
+    var i = cands.findIndex(function (c) { return c.id === candidateId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candidateId, 'error');
+      return;
+    }
+    var c = deepCopy(newCand);
+    // D4 一键换模语义：直接替换候选，继承原优先级（不做优先级重排）
+    c.priority = cands[i].priority;
+    cands[i] = c;
+    renderEditor();
+  }
+
+  function mpEditAddCandidate(newCand) {
+    if (!_edit) return;
+    var cands = _edit.work.pools[_edit.pool].candidates;
+    var maxP = cands.reduce(function (m, c) { return Math.max(m, c.priority || 0); }, 0);
+    var c = deepCopy(newCand);
+    c.priority = maxP + 1;   // 链尾 = 最低优先级
+    cands.push(c);
+    renderEditor();
+  }
+
+  function mpEditRemove(candidateId) {
+    if (!_edit) return;
+    var cands = _edit.work.pools[_edit.pool].candidates;
+    var i = cands.findIndex(function (c) { return c.id === candidateId; });
+    if (i >= 0) cands.splice(i, 1);
+    renderEditor();
+  }
+
+  function mpEditMove(candidateId, dir) {
+    if (!_edit) return;
+    var cands = _edit.work.pools[_edit.pool].candidates;
+    var i = cands.findIndex(function (c) { return c.id === candidateId; });
+    var j = dir === 'up' ? i - 1 : i + 1;
+    if (i < 0 || j < 0 || j >= cands.length) return;
+    var tmp = cands[i]; cands[i] = cands[j]; cands[j] = tmp;
+    // 交换优先级，保持链序与优先级一致
+    var p = cands[i].priority; cands[i].priority = cands[j].priority; cands[j].priority = p;
+    renderEditor();
+  }
+
+  function mpEditPoolParam(key, value) {
+    if (!_edit) return;
+    _edit.work.pools[_edit.pool][key] = value;
+  }
+
+  // 预览：validate（静态）→ 不通过阻止一切；通过 → dry-run×2 携带编辑态 config
+  async function mpEditPreview() {
+    if (!_edit) return;
+    var pv = $('mpPreview');
+    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+    try {
+      var res = await fetch(VALIDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(_edit.work),
+      });
+      var d = await res.json();
+      if (!d.valid) {
+        if (pv) {
+          pv.innerHTML = '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
+            + '<ul class="mp-decisions">'
+            + (d.issues || []).map(function (i) {
+                return '<li class="mono">' + esc(i) + '</li>';
+              }).join('')
+            + '</ul>';
+        }
+        UI.toast('校验未通过 — 请按问题列表修正', 'error');
+        return;
+      }
+      var outs = [];
+      for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
+        var proto = ['openai', 'anthropic'][k];
+        var r = await fetch(DRYRUN_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify({ pool: _edit.pool, protocol: proto,
+                                 config: _edit.work }),
+        });
+        outs.push({ proto: proto, ok: r.ok, body: await r.json() });
+      }
+      if (pv) {
+        var html = '<p>预览（编辑态，未应用）：</p>';
+        outs.forEach(function (o) {
+          var b = o.body || {};
+          html += '<p class="mono">' + esc(o.proto) + ' → '
+            + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
+               : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选') + '</span>'))
+            + '</p>';
+        });
+        pv.innerHTML = html;
+      }
+      _edit.validated = true;
+      UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
+    } catch (e) {
+      UI.toast('预览请求异常：' + (e && e.message), 'error');
+    }
+  }
+
+  // 应用：CAS POST；成功 → 记录 _undo；409 → 冲突 toast + 重新拉取。
+  // 三段式纪律：必须先通过预览（validate+dry-run）才能应用。
+  async function mpEditApply() {
+    if (!_edit) return;
+    if (!_edit.validated) {
+      UI.toast('请先点「预览」并通过校验，再应用', 'error');
+      return;
+    }
+    var body = deepCopy(_edit.work);
+    body.expected_revision = _revision;
+    try {
+      var res = await fetch(UPDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(body),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (res.ok) {
+        var poolName = _edit.pool;
+        _undo = _edit.base;
+        _edit = null;
+        var modal = $('mpModal');
+        if (modal) modal.innerHTML = '';
+        UI.toast('已更新 iff/' + poolName, 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        await renderModelPools();
+        return;
+      }
+      UI.toast((d && d.error) || ('更新失败 · HTTP ' + res.status), 'error');
+    } catch (e) {
+      UI.toast('更新请求异常：' + (e && e.message), 'error');
+    }
+  }
+
+  // 回滚：以重新拉取到的最新 revision 重新 POST 编辑前配置
+  async function doMpUndo() {
+    if (!_undo) {
+      UI.toast('没有可回滚的编辑', 'error');
+      return;
+    }
+    try {
+      await renderModelPools();   // 先取最新 revision（CAS 基点）
+      var body = deepCopy(_undo);
+      body.expected_revision = _revision;
+      var res = await fetch(UPDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(body),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (res.ok) {
+        _undo = null;
+        UI.toast('已回滚到上次编辑前的配置', 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        UI.toast('回滚遇到冲突（配置又有新修改），已刷新，请重试', 'error');
+        await renderModelPools();
+        return;
+      }
+      UI.toast((d && d.error) || ('回滚失败 · HTTP ' + res.status), 'error');
+    } catch (e) {
+      UI.toast('回滚请求异常：' + (e && e.message), 'error');
+    }
+  }
+
+  // 模态内事件委托：下拉选中即换/即增；按钮 → 操作函数
+  function onModalChange(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var repId = t.getAttribute('data-mp-replace');
+    if (repId && t.value) {
+      mpEditReplace(repId, candFromCatalogValue(t.value, repId));
+      return;
+    }
+    if (t.getAttribute('data-mp-add') && t.value) {
+      var id = 'cand-' + Date.now().toString(36);
+      mpEditAddCandidate(candFromCatalogValue(t.value, id));
+      return;
+    }
+    var param = t.getAttribute('data-mp-param');
+    if (param) {
+      var v = t.type === 'checkbox' ? !!t.checked : t.value;
+      if (t.type === 'number') v = Number(v);
+      mpEditPoolParam(param, v);
+    }
+  }
+
+  function onModalClick(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var act = t.getAttribute('data-mp-act');
+    if (!act) return;
+    var cand = t.getAttribute('data-mp-cand');
+    if (act === 'preview') mpEditPreview();
+    else if (act === 'apply') mpEditApply();
+    else if (act === 'undo') doMpUndo();
+    else if (act === 'del' && cand) mpEditRemove(cand);
+    else if (act === 'up' && cand) mpEditMove(cand, 'up');
+    else if (act === 'down' && cand) mpEditMove(cand, 'down');
+  }
+
+  var modal = $('mpModal');
+  if (modal && typeof modal.addEventListener === 'function') {
+    modal.addEventListener('change', onModalChange);
+    modal.addEventListener('click', onModalClick);
+  }
+
   /* ── 事件委托：mpPools 上 checkbox change → doMpToggle（无 inline onclick） ── */
   function onBoxChange(ev) {
     var t = ev.target;
@@ -281,4 +659,10 @@
   window.tabRenderers['tab-model-pools'] = renderModelPools;
   window.renderModelPools = renderModelPools;
   window.doMpToggle = doMpToggle;
+  window.doMpEdit = doMpEdit;
+  window.doMpUndo = doMpUndo;
+  window.mpEditReplace = mpEditReplace;
+  window.mpEditAddCandidate = mpEditAddCandidate;
+  window.mpEditPreview = mpEditPreview;
+  window.mpEditApply = mpEditApply;
 })();

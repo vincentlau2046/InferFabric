@@ -100,12 +100,25 @@ const window = {
   store: {on: () => {}},
 };
 const calls = [];
+const seen = {};
 const fetch = async (url, options) => {
   options = options || {};
   calls.push({url, method: options.method || 'GET',
               body: options.body ? JSON.parse(options.body) : null});
-  const route = input.routes[url];
-  const r = (typeof route === 'function') ? route(calls.length) : route;
+  const method = options.method || 'GET';
+  const mkey = method + ' ' + url;
+  seen[mkey] = (seen[mkey] || 0) + 1;
+  const route = input.routes[mkey] || input.routes[url];
+  let r;
+  if (typeof route === 'function') {
+    r = route(seen[mkey]);           // 第 N 次命中该 METHOD+URL
+  } else if (route && Array.isArray(route.bodies)) {
+    // 时序路由：按命中次序取 body（越界取最后一个）
+    r = {status: route.status || 200,
+         body: route.bodies[Math.min(seen[mkey] - 1, route.bodies.length - 1)]};
+  } else {
+    r = route;
+  }
   const status = r.status;
   return {
     ok: status >= 200 && status < 300,
@@ -127,7 +140,17 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   if (input.toggle) {
     await window.doMpToggle(input.toggle.pool, input.toggle.enable);
   }
-  console.log(JSON.stringify({html, toasts, calls}));
+  // v7.1.0 编辑器：任意 window 函数动作序列（模拟用户在模态内的操作流）
+  for (const act of (input.actions || [])) {
+    const fn = window[act.fn];
+    if (typeof fn !== 'function') {
+      throw new Error('unknown action: ' + act.fn);
+    }
+    await fn.apply(window, act.args || []);
+  }
+  const modalHtml = elements['mpModal'] ? elements['mpModal'].innerHTML : '';
+  const previewHtml = elements['mpPreview'] ? elements['mpPreview'].innerHTML : '';
+  console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -143,10 +166,11 @@ def run_panel(tmp_path):
     harness = tmp_path / "model_pools_harness.js"
     harness.write_text(_HARNESS, encoding="utf-8")
 
-    def run(routes, toggle=None):
+    def run(routes, toggle=None, actions=None):
         proc = subprocess.run(
             [node, str(harness), str(PANEL_JS)],
-            input=json.dumps({"routes": routes, "toggle": toggle}),
+            input=json.dumps({"routes": routes, "toggle": toggle,
+                              "actions": actions}),
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0, proc.stderr
@@ -308,3 +332,204 @@ class TestOpsRender:
         # loc 本地 active=True → 服务中；cld 云 active=False → 未发现
         assert "服务中" in html
         assert "未发现" in html
+
+
+# ── Task 6：三段式编辑器（编辑 → 预览 → 应用/回滚）──
+# 契约：
+# - 编辑基底 = _state.def.raw（GET 视图有损，经视图重建丢数据 — spec §4.3）
+# - 替换候选 = 直接替换并继承优先级（D4：宁可丢回退，不做优先级重排）
+# - 预览：validate 不通过 → 阻止 dry-run 与应用；通过 → dry-run×2 携带编辑态 config
+# - 应用：POST /admin/model-pools {...work, expected_revision}（CAS）
+# - 409 → 冲突 toast + 重新拉取；成功 → 记录 _undo（编辑前 raw）
+# - 回滚：以最新 revision 重新 POST 编辑前配置
+# - 从未配置（raw=null）→ 空基底 + 新建池骨架，expected_revision=0
+
+_EDITOR_RAW = {
+    "schema_version": 1,
+    "revision": 3,
+    "pools": {
+        "fast": {
+            "enabled": True,
+            "strategy": "priority",
+            "allowed_locations": ["local", "cloud"],
+            "accept_declared": True,
+            "allow_cross_location": False,
+            "max_attempts": 2,
+            "deadline_ms": 60000,
+            "candidates": [
+                {"id": "loc", "priority": 1, "kind": "local",
+                 "model_name": "qwen-small",
+                 "declared_protocols": ["openai", "anthropic"],
+                 "features": ["tools"]},
+                # 悬空候选：视图剔除、raw 保留 — 编辑必须原样带回
+                {"id": "dang", "priority": 2, "kind": "local",
+                 "model_name": "gone-model",
+                 "declared_protocols": ["openai"], "features": []},
+            ],
+        }
+    },
+}
+
+_NEW_CAND = {"id": "newloc", "kind": "local", "model_name": "qwen3-32b",
+             "declared_protocols": ["openai", "anthropic"],
+             "features": ["tools"]}
+
+
+def _editor_pools_body(revision=3):
+    body = json.loads(json.dumps(_POOLS_BODY))
+    body["revision"] = revision
+    body["configured"] = True
+    body["load_error"] = None
+    body["raw"] = json.loads(json.dumps(_EDITOR_RAW))
+    return body
+
+
+def _editor_routes(pools_body=None, pools_bodies=None, validate=None,
+                   apply_status=200, apply_body=None, status_body=None):
+    """编辑器路由。pools_bodies：时序路由（GET 第 N 次返回第 N 个 body）。"""
+    pools_route = ({"status": 200, "bodies": pools_bodies}
+                   if pools_bodies else None)
+    return {
+        "/admin/model-pools": pools_route or {
+            "status": 200, "body": pools_body or _editor_pools_body()},
+        "/admin/model-pools/status": {
+            "status": 200, "body": status_body or {"revision": 3, "pools": {}}},
+        "/admin/model-pools/runtime": {"status": 200,
+                                       "body": {"revision": 3, "pools": {}}},
+        "POST /admin/model-pools/validate": {
+            "status": 200,
+            "body": validate or {"valid": True, "issues": []}},
+        "POST /admin/model-pools/dry-run": {
+            "status": 200,
+            "body": {"chosen": "newloc", "error": None, "decisions": [],
+                     "pool": "fast", "protocol": "openai"}},
+        "POST /admin/model-pools": {
+            "status": apply_status,
+            "body": apply_body or {"status": "updated", "revision": 4}},
+    }
+
+
+def _last_update_post(out):
+    posts = [c for c in out["calls"]
+             if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+    assert posts, "editor must POST /admin/model-pools"
+    return posts
+
+
+class TestEditor:
+    def test_editor_replace_candidate_sends_new_config(self, run_panel):
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        cands = body["pools"]["fast"]["candidates"]
+        ids = [c["id"] for c in cands]
+        assert "newloc" in ids and "loc" not in ids
+        # D4 一键换模：直接替换，继承原优先级
+        new = next(c for c in cands if c["id"] == "newloc")
+        assert new["priority"] == 1
+        assert new["model_name"] == "qwen3-32b"
+        assert body["expected_revision"] == 3
+        # 预览阶段 dry-run×2（openai + anthropic）携带编辑态 config
+        drys = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/dry-run"]
+        assert len(drys) == 2
+        assert sorted(c["body"]["protocol"] for c in drys) == \
+            ["anthropic", "openai"]
+        for c in drys:
+            assert c["body"]["pool"] == "fast"
+            assert c["body"]["config"]["pools"]["fast"]["candidates"][0]["id"] \
+                == "newloc"
+
+    def test_editor_preview_blocked_on_issues(self, run_panel):
+        validate = {"valid": False, "issues": ["duplicate candidate id 'x'"]}
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(validate=validate), actions=actions)
+        # 校验未通过 → 不发 dry-run、不发更新
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools/dry-run"]
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        # 问题在预览区可见
+        assert "duplicate candidate id" in out["previewHtml"]
+        assert any("校验" in t["message"] for t in out["toasts"])
+
+    def test_editor_apply_409_prompts_reload(self, run_panel):
+        routes = _editor_routes(
+            apply_status=409,
+            apply_body={"status": "revision_conflict", "current_revision": 5})
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert any("冲突" in t["message"] for t in out["toasts"])
+        # 冲突 → 重新拉取让用户看到最新状态
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools" and c["method"] == "GET"]
+        assert len(gets) >= 2
+
+    def test_editor_undo_reposts_previous_config(self, run_panel):
+        # 时序路由：首屏 GET revision=3；apply 成功后的重取 revision=4
+        pools_bodies = [_editor_pools_body(), _editor_pools_body(revision=4)]
+
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+            {"fn": "doMpUndo", "args": []},
+        ]
+        out = run_panel(_editor_routes(pools_bodies=pools_bodies), actions=actions)
+        posts = _last_update_post(out)
+        assert len(posts) == 2          # apply + undo
+        undo_body = posts[1]["body"]
+        ids = [c["id"] for c in undo_body["pools"]["fast"]["candidates"]]
+        assert "loc" in ids and "newloc" not in ids   # 回滚到编辑前
+        # undo 以重新拉取到的最新 revision 做 CAS（不是 apply 时的旧值）
+        assert undo_body["expected_revision"] == 4
+
+    def test_editor_base_is_raw_not_view(self, run_panel):
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        ids = [c["id"] for c in body["pools"]["fast"]["candidates"]]
+        # raw 基底：视图剔除的悬空候选必须保留（防丢数据）
+        assert "dang" in ids
+        # 视图独有、raw 没有的候选不得经编辑混入
+        assert "cld" not in ids
+
+    def test_editor_unconfigured_empty_base(self, run_panel):
+        pools = {"revision": 0, "pools": {}, "configured": False,
+                 "load_error": None, "raw": None}
+        add_cand = {"id": "c1", "kind": "local", "model_name": "qwen-small",
+                    "declared_protocols": ["openai"], "features": []}
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditAddCandidate", "args": [add_cand]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(pools_body=pools), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        assert body["schema_version"] == 1
+        cands = body["pools"]["fast"]["candidates"]
+        assert [c["id"] for c in cands] == ["c1"]
+        assert cands[0]["priority"] == 1
+        assert body["expected_revision"] == 0   # 从未配置 → revision 0
