@@ -17,7 +17,7 @@ _cached_html: str | None = None
 # Dashboard v2 JS 模块加载顺序（缺失文件 graceful 跳过 + warning）。
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
 JS_MODULES = ["ui", "store", "charts", "overview", "inference",
-              "monitor", "deploy", "cloud", "anomaly"]
+              "monitor", "deploy", "cloud", "model-pools", "anomaly"]
 
 
 def get_html() -> str:
@@ -28,7 +28,8 @@ def get_html() -> str:
     try:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
         # 替换 fragment 占位符
-        for frag_name in ("overview", "inference", "monitor", "deploy", "cloud", "anomaly"):
+        for frag_name in ("overview", "inference", "monitor", "deploy", "cloud",
+                          "model-pools", "anomaly"):
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"
             try:
                 frag = frag_path.read_text(encoding="utf-8")

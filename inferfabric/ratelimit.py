@@ -296,6 +296,32 @@ class DualGateLimiter:
         return GateResult(self, model, ok=True, reason="", rpm_held=rpm_held,
                           model_sem_held=True, global_held=global_held)
 
+    def acquire_target(self, model: str, timeout: float | None = None) -> 'GateResult':
+        """物理目标容量门（池路径专用，终审 #8）：只占 per-model 并发信号量。
+
+        池调度在逻辑名 gate（acquire）之内按物理目标再加一层并发门 —
+        RPM 与全局并发已由外层计费，这里重复 acquire 会双扣 server RPM
+        并占用双份全局并发。仅 Gate 2b，release 也只还 per-model 信号量。
+        """
+        effective_timeout = timeout if timeout is not None else self._timeout
+        sem = self._get_or_create_sem(model)
+        if self._mode == "observe":
+            acquired = sem.acquire(timeout=300)
+            if not acquired:
+                log.error("Target concurrency observe: %s waited 300s — bug?", model)
+                return GateResult(self, model, ok=True, reason="",
+                                  rpm_held=False, model_sem_held=False,
+                                  global_held=False)
+        else:
+            acquired = sem.acquire(timeout=effective_timeout)
+            if not acquired:
+                return GateResult(self, model, ok=False,
+                                  reason=f"model_concurrency_limit:{model}",
+                                  rpm_held=False, model_sem_held=False,
+                                  global_held=False)
+        return GateResult(self, model, ok=True, reason="",
+                          rpm_held=False, model_sem_held=True, global_held=False)
+
     def _release(self, model: str, rpm_held: bool, model_sem_held: bool = True, global_held: bool = False):
         if model_sem_held:
             sem = self._per_model.get(model)

@@ -1,0 +1,15 @@
+<div class="tab-content" id="tab-model-pools">
+  <!-- 逻辑模型池：只读面板 + 单池 enabled 原子开关（model-pools.js 渲染，无 inline onclick） -->
+  <div class="if-card" id="mpCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">模型池</span>
+      <span class="if-card-sub">逻辑名 iff/&lt;pool&gt; · 优先级候选 · 双协议视图 · revision <span class="mono" id="mpRevision">—</span></span>
+    </div>
+    <div class="if-card-body">
+      <!-- 池卡片列表（model-pools.js 注入；开关走 POST /admin/model-pools/toggle） -->
+      <div id="mpPools">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+    </div>
+  </div>
+</div>

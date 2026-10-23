@@ -185,6 +185,10 @@ def _serve_api_spec(handler, pm):
     from inferfabric.api_spec import get_openapi_spec
     handler._send_json(get_openapi_spec())
 
+
+# 逻辑模型池管理接口（admin 路由表引用；零协议转换、零出网校验）
+from inferfabric.model_pool import admin as mp_admin  # noqa: E402
+
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
     "/health":                  lambda h, pm: h._send_json({"status": "ok", "gpu_mode": pm.mgr.gpu_mode}),
@@ -216,6 +220,9 @@ _GET_ROUTES = {
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
+    # ─── Admin: Logical Model Pools ─────────────────────────────────
+    "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
+    "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
     "/api/openapi.json":        _serve_api_spec,
 }
 
@@ -248,6 +255,13 @@ _POST_ROUTES = {
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
     "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
+    # ─── Admin: Logical Model Pools ─────────────────────────────────
+    # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
+    "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_put_model_pools(h, pm)),
+    "/admin/model-pools/validate": _admin(lambda h, pm: mp_admin.handle_validate_model_pools(h, pm)),
+    "/admin/model-pools/dry-run": _admin(lambda h, pm: mp_admin.handle_post_model_pools_dry_run(h, pm)),
+    # 单池 enabled 原子开关（服务端字段级修改，CAS；非客户端读-改-写）
+    "/admin/model-pools/toggle": _admin(lambda h, pm: mp_admin.handle_post_model_pools_toggle(h, pm)),
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
 }
@@ -433,6 +447,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         req_error = None
         req_route = "local"
         req_cloud_provider = None
+
+        # 逻辑模型池（iff/*）：完整名鉴权 + 池选择，先于直连鉴权/缓存/
+        # SWITCHING guard（池调度不切换本地模型，guard 不适用；spec §13）
+        # 函数内 import 避免 handler ↔ model_pool.dispatch 循环依赖
+        if req_model.startswith("iff/") and getattr(pm, "pool_registry", None) is not None:
+            from inferfabric.model_pool.dispatch import handle_pool_messages
+            if handle_pool_messages(self, pm, data, req_model):
+                return
 
         # PR-A: Auth check
         if pm.auth.enabled:
@@ -777,6 +799,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if model_id not in existing_ids and model_id not in seen_cloud_ids:
                 seen_cloud_ids.add(model_id)
                 all_models.append(cm.to_api_dict())
+
+        # 逻辑模型池：启用且有可解析候选的池以逻辑名列出（Task 10）。
+        # 不合并候选能力（无 capability union）— 池是路由目标，非能力聚合。
+        pool_reg = getattr(pm, "pool_registry", None)
+        if pool_reg is not None:
+            snap = pool_reg.snapshot()
+            existing_ids = {m.get("id") for m in all_models}
+            for name, ps in snap.pools.items():
+                logical = f"iff/{name}"
+                if (ps.pool.enabled and ps.candidates
+                        and logical not in existing_ids):
+                    all_models.append({"id": logical, "object": "model",
+                                       "owned_by": "iff-pool"})
 
         if all_models:
             self._send_json({"object": "list", "data": all_models})
@@ -1497,21 +1532,32 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_reload_config(self, pm):
         """POST /reload-config — 热加载 models.d/*.yaml 并刷新 dashboard 缓存。"""
         if hasattr(pm, 'config_reloader') and pm.config_reloader:
+            # 池重载已并入 reload_all（依赖域 models/auth/cloud 之后执行，
+            # 评审 #20）；失败域如实回报（B2）
             failed = pm.config_reloader.reload_all() or []
             body = {"status": "reloaded"}
             if failed:
-                # B2: 如实回报失败域，不再无条件声称成功
                 body["failed"] = failed
             self._send_json(body)
         else:
             # Fallback: direct reload if ConfigReloader not available
             pm.mgr.reload_models()
+            # 池重载在依赖（models）之后（评审 #20）
+            pool_reload_note = None
+            if hasattr(pm, 'pool_registry') and pm.pool_registry is not None:
+                try:
+                    pm.pool_registry.reload_from_disk()
+                except Exception as e:
+                    pool_reload_note = f"model_pools reload failed: {e}"
             try:
                 from inferfabric.dashboard import invalidate_cache
                 invalidate_cache()
             except Exception:
                 pass
-            self._send_json({"status": "reloaded"})
+            body = {"status": "reloaded"}
+            if pool_reload_note:
+                body.setdefault("failed", []).append(pool_reload_note)
+            self._send_json(body)
 
     def _handle_deploy(self, pm):
         data = self._read_body()

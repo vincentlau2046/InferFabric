@@ -19,13 +19,15 @@ log = logging.getLogger("inferfabric.config_reloader")
 
 
 def build_config_reloader(mgr, auth=None, cloud=None) -> "ConfigReloader":
-    """装配 ConfigReloader（含 agents 域 registry）。threaded main() 与 async
-    start_async() 两条服务路径共用，防止任一路径漏接 agent_registry 而分叉。
+    """装配 ConfigReloader（含 agents / model_pools 域 registry）。threaded
+    main() 与 async start_async() 两条服务路径共用，防止任一路径漏接
+    agent_registry / pool_registry 而分叉。
 
-    mgr: ProxyManager（.mgr/.auth/.cloud/.agent_registry 属性）。
+    mgr: ProxyManager（.mgr/.auth/.cloud/.agent_registry/.pool_registry 属性）。
     """
     return ConfigReloader(mgr.mgr, auth=auth, cloud=cloud,
-                          registry=getattr(mgr, "agent_registry", None))
+                          registry=getattr(mgr, "agent_registry", None),
+                          pool_registry=getattr(mgr, "pool_registry", None))
 
 
 class ConfigReloader:
@@ -37,11 +39,13 @@ class ConfigReloader:
     """
 
     def __init__(self, mgr: "ModelManager", auth: "AuthManager" = None,
-                 cloud: "CloudDiscovery" = None, registry=None):
+                 cloud: "CloudDiscovery" = None, registry=None,
+                 pool_registry=None):
         self._mgr = mgr
         self._auth = auth
         self._cloud = cloud
         self._registry = registry
+        self._pool_registry = pool_registry
         self._last_reload = 0.0
         self._cooldown = 5.0  # seconds
 
@@ -100,6 +104,21 @@ class ConfigReloader:
             except Exception as e:
                 failed.append("agents")
                 log.error("ConfigReloader: agent registry reload failed: %s", e)
+        # 池重载最后执行（评审 #20）：候选解析依赖 models.d 与 cloud provider
+        # 的最新状态（known_local / known_providers / provider base），先重载
+        # 依赖域再编译池快照，否则外部编辑会被旧的依赖视图拒绝或错判
+        if self._pool_registry:
+            try:
+                # 三态（终审 #19）：True=已应用；None=无文件/未变化（正常）；
+                # False=文件损坏/不可读 → 报告失败域，保留上一份好快照
+                result = self._pool_registry.reload_from_disk()
+                if result is False:
+                    failed.append("model_pools")
+                    log.error("ConfigReloader: model_pools reload rejected "
+                              "invalid file — keeping last good snapshot")
+            except Exception as e:
+                failed.append("model_pools")
+                log.error("ConfigReloader: model_pools reload failed: %s", e)
         # Invalidate dashboard cache
         try:
             from inferfabric.dashboard import invalidate_cache
