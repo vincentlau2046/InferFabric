@@ -433,7 +433,7 @@ pools:
 
 ### 管理
 
-管理面端点见 [Model Pools (admin)](#model-pools-admin)；Dashboard「模型池」TAB 可视化同一能力（只读视图 + 单池 enabled 原子开关，CAS 409 冲突提示刷新）。`/v1/models` 列出启用池为 `{"id":"iff/fast","owned_by":"iff-pool"}`。
+管理面端点见 [Model Pools (admin)](#model-pools-admin)；Dashboard「模型池」TAB 可视化同一能力，v7.1.0 起为运营视图：每池双协议健康灯（绿=首选服务中/黄=回退中/红=无可用候选）、候选链运行态（服务中/未启动/冷却/隔离倒计时/最近失败）、三段式编辑器（raw 基底防丢数据，编辑→预览→CAS 应用，会话内回滚）、空态初始化向导（fast/premium/small/classifier 四角色引导创建）与接入片段（OpenAI/Anthropic 复制即用代码）。`/v1/models` 列出启用池为 `{"id":"iff/fast","owned_by":"iff-pool"}`。
 
 ---
 
@@ -481,7 +481,7 @@ A macOS-inspired sidebar dashboard for model management, monitoring, and multi-e
 - **Two-scope token charts**: local engine vs. cloud provider consumption split side-by-side
 - Inference model card **⚙ 场景** control: three-phase modal — pick scenario (`GET /admin/tune/scenarios`) → diff/warning preview (`/admin/tune/preview`) → apply (`POST /admin/tune`, in-process + file lock); card badge shows the live scenario read straight from the applied-layer file
 - Cloud provider management: CRUD, auto-discover, connection test, API key masked-then-expanded forwarding
-- 模型池 TAB（v7.0.0）：`iff/<pool>` 只读视图（候选优先级表、每协议选择结果与排除原因、证据新鲜度）+ 单池 enabled 原子开关（CAS 冲突 409 → 提示刷新）
+- 模型池 TAB（v7.1.0 运营视图）：双协议健康灯 + 候选链运行态（服务中/未启动/冷却/隔离/最近失败）；三段式编辑器（raw 基底、替换候选继承优先级、validate 预览门禁、CAS 应用 + 会话内回滚）；空态四角色初始化向导；接入片段（OpenAI/Anthropic 复制即用，含 ACL 与 /v1 提示）；单池 enabled 原子开关（CAS 冲突 409 → 提示刷新）
 - Anomaly detection: top-N anomalies with severity classification
 - Dual-protocol routing: local vLLM/sglang + cloud OpenAI-compatible, unified via YAML engine-type aliases
 - Dark mode (default) + light mode, typography hierarchy, WCAG AA contrast
@@ -602,11 +602,12 @@ python3 -m inferfabric.proxy.handler --async
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/admin/model-pools` | 池定义 + revision + 证据态 + 校验问题 |
+| `GET` | `/admin/model-pools` | 池定义 + revision + 证据态 + 校验问题 + 三态运行状态（`configured`/`load_error`）+ `raw`（编辑器读-改-写基底，防丢数据） |
 | `POST` | `/admin/model-pools` | 原子更新（CAS，body 携带 `expected_revision`） |
 | `POST` | `/admin/model-pools/validate` | 静态校验（零出网、零副作用） |
 | `GET` | `/admin/model-pools/status` | 每池双协议当前选择视图（含排除原因） |
-| `POST` | `/admin/model-pools/dry-run` | 给定协议/能力 → 候选选择/排除原因（零副作用） |
+| `GET` | `/admin/model-pools/runtime` | 每池每候选运行态：active（本地=已启动/云=已发现）、cooling（冷却/隔离剩余与原因、半开探测）、last_attempt（v7.1.0） |
+| `POST` | `/admin/model-pools/dry-run` | 给定协议/能力 → 候选选择/排除原因（零副作用）；v7.1.0 起支持 `config` 参数预览编辑态而非已发布快照 |
 | `POST` | `/admin/model-pools/toggle` | 服务端原子翻转单池 `enabled`（CAS） |
 
 ### Cloud Admin (admin)
@@ -707,6 +708,7 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 | **v5.8.0** | **2026-09** | **PR-19: Production-grade aiohttp async edge (`--async`)** — hybrid executor model, 7 stream routes with incremental SSE pump, 30+ buffered routes with full header propagation, chunked request body support, 100MB client_max_size, EADDRINUSE retry, systemd sd_notify, C extension wheel rebuild (2.7x perf), dead route cleanup, **path normalization fix**: `/v1/completions`/`/api/chat`/`/api/generate` aliased to `/v1/chat/completions` (engine-type-driven via YAML). |
 | **v6.0.0** | **2026-09** | **Dashboard data-chain engine-agnostic + two-scope** — token stats DB-sourced (no longer vLLM Prometheus-only, works across vLLM/sglang/ninfer); local vs. cloud two-scope token charts; `/api/engine_metrics` route (KV cache / batch size / seq length / TPOT / TTFT / throughput); **6-KPI 2×3 panel** with Batch Size + unified TPOT(ms, 2dp)/TTFT(s, 2dp) units; 30-day standardized bar charts; live snapshot freshness (ETag/304 + TTL single-flight cache); AnomalyCollector tab. |
 | **v6.0.1** | **2026-09** | **统一 Monitor 三卡时间档位单位语义（分钟/小时/天/周，整体弃用 月）** — 功耗/电费 小时/天/周（周 = 近 90 天 · 7 天周桶，双轴单网格 W 0–600 + 温度 nice 刻度）；Token 用量 分钟/小时/天/周（60min·12×5min / 24h·24×1h / 30d·30×1d / 90d·13×1周，双 scope + Cache Hit Rate）；模型延迟趋势 分钟/小时/天（相对年龄对齐、严格 12/24/30 桶）；`/api/token-curve` 档位重定义，`/api/latency`、`/api/power` 端点就位。 |
+| **v7.1.0** | **2026-10** | **模型池运营视图（Dashboard ops）** — 三态配置视图（已配置/从未配置→初始化向导/文件损坏→错误横幅且保留最后有效快照）；每池双协议健康灯（首选服务中/回退中/无可用候选）；候选链实时运行态（服务中/未启动/冷却与隔离倒计时+原因、半开探测中、最近一次尝试结果）；三段式编辑器（raw 基底防丢数据、一键换模=直接替换并继承优先级、validate+dry-run 编辑态预览门禁、CAS 应用基点固定为打开时 revision 堵后台刷新旁路、会话内一键回滚）；空态四角色向导（fast/premium/small/classifier 预填启发式，CAS expected_revision=0）；接入片段（OpenAI/Anthropic 复制即用，含 ACL/`/v1` 陷阱提示）。新增 `GET /admin/model-pools/runtime`；dry-run 支持 `config` 编辑态预览。 |
 | **v7.0.0** | **2026-10** | **逻辑模型池（iff/ 统一逻辑名 + P2 预算内故障回退）** — OpenAI/Anthropic 双协议同一逻辑名 `iff/<pool>` 调度（协议兼容矩阵过滤，零协议转换）；热映射 registry（不可变快照 + revision CAS + SIGHUP 三态重载）；P2 固定错误动作表回退（max_attempts/deadline 统一预算、429 Retry-After 预算内等待、401/403 端点冷却、404 隔离、半开单飞探测、提交后永不重放）；物理目标容量门 `acquire_target`（跨池/本地直连共享，不双扣 RPM/全局）；跨位置回退默认关闭逐池显式开启，本地候选 ready_only 绝不自动启动模型；RequestLog 按物理模型归属费用 + attempt 失败只进进程日志；dashboard 池面板 + admin API + dry-run；`/v1/models` 逻辑名 owned_by=iff-pool。无 `model_pools.yaml` 时全惰性，行为与现状一致。单元+集成 1543 例全绿（提交树 1502），终审（独立上下文）20 项发现全部闭环。 |
 | **v6.1.2** | **2026-09** | **四卡统一墙钟对齐固定窗分桶 + Chart 5min 节流** — Dashboard 四张统计卡统一按墙钟对齐固定窗口分桶；图表数据 5 分钟节流刷新。 |
 | **v6.1.4** | **2026-10** | **健壮性审计 5 项代码修复 + 仓库卫生** — H2 多副本端口竞态（副本改用请求局部 `dataclasses.replace`，不再改写共享 `model_obj.port`）；M1/M2 forwarder socket 泄漏（`conn.close()` 下沉 `finally` 三路径统一关闭 + header 发送段 try/except 早断关上游 `resp`）；M3 proxy_manager `switch` 异常时清空 `switching_target` 防 503 卡死至 reconcile；M7 gpu_state 孤儿存活探测 `os.killpg`→`os.kill`（fuser 恢复的非 leader 活 PID 不再误判 dead）。`.gitignore` 补 `_deps/`·`.playwright-mcp/`·`vault/`·`/*.png`；`scenarios.yaml` 去注释化 + kv_capacity 重校准。unit 1154 + integration 109 全绿。 |
