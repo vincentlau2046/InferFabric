@@ -110,6 +110,8 @@
         }).join('')
       + '</span>'
       + '<span class="mp-toggle-wrap">'
+      + '<button type="button" class="mp-edit-btn" data-mp-edit="' + esc(name)
+      + '">编辑</button>'
       + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
       + '"' + checked + '><span>启用</span></label>'
       + '</span>'
@@ -210,10 +212,9 @@
         return;
       }
       var names = Object.keys(def.pools || {});
-      // 2) 从未配置（无文件）→ 初始化向导占位（Task 7 实装向导本体）
+      // 2) 从未配置（无文件）→ 初始化向导（Task 7）
       if (def.configured === false && def.raw == null && !names.length) {
-        box.innerHTML = '<p class="mp-empty">逻辑模型池尚未配置 — '
-          + '使用初始化向导或创建 model_pools.yaml 后热加载</p>';
+        await renderWizard();
         return;
       }
       // 3) 配置了零个池 → 普通空态
@@ -274,6 +275,207 @@
   /* ── 三段式编辑器（Task 6）：编辑 → 预览 → 应用/回滚 ── */
 
   function deepCopy(o) { return JSON.parse(JSON.stringify(o)); }
+
+  // 默认池骨架（编辑器新建池 / 向导创建共用）
+  function newPoolSkeleton() {
+    return {
+      enabled: true, strategy: 'priority',
+      allowed_locations: ['local', 'cloud'],
+      accept_declared: true, allow_cross_location: false,
+      max_attempts: 2, deadline_ms: 60000, candidates: [],
+    };
+  }
+
+  /* ── 空态初始化向导（Task 7）：从未配置 → 四角色引导创建 ── */
+
+  var _wizard = null;   // {roles:{name:{desc,selected}}, removed:{}, catalog}
+
+  var _ROLE_DEFS = [
+    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
+  ];
+
+  // 模型目录（/models 全量条目 + 云 provider 模型，best-effort）
+  async function fetchWizardModels() {
+    var entries = [];
+    try {
+      var r = await fetch('/models', { headers: UI.adminHeaders() });
+      if (r.ok) {
+        var d = await r.json();
+        entries = Array.isArray(d) ? d : (d.models || []);
+      }
+    } catch (e) { /* 目录降级 → 手填 */ }
+    if (!Array.isArray(entries)) entries = [];
+    var catalog = { local: [], cloud: [] };
+    entries.forEach(function (m) {
+      if (m && m.name && m.model_type === 'llm') catalog.local.push(m);
+    });
+    try {
+      var r2 = await fetch('/admin/cloud/providers', { headers: UI.adminHeaders() });
+      if (r2.ok) {
+        var d2 = await r2.json();
+        (((d2 && d2.providers) || [])).forEach(function (pv) {
+          var pname = pv && (pv.name || pv.provider);
+          var models = (pv && (pv.models || [])) || [];
+          models.forEach(function (mid) {
+            catalog.cloud.push(pname + '/' + mid);
+          });
+        });
+      }
+    } catch (e) { /* 目录降级 */ }
+    return catalog;
+  }
+
+  // 预填启发式（可改；仅建议值）：fast=活跃小模型 / premium=大上下文本地，
+  // 无本地则首个云 / small=最小 / classifier=首个活跃
+  function _prefill(catalog) {
+    var llms = catalog.local;
+    var act = llms.filter(function (m) { return !!m.active; });
+    function pick(list, wantMax) {
+      if (!list.length) {
+        return catalog.cloud.length ? 'cloud:' + catalog.cloud[0] : null;
+      }
+      var sorted = list.slice();
+      var allSized = sorted.every(function (m) {
+        return typeof m.context_window === 'number';
+      });
+      if (allSized) {
+        sorted.sort(function (a, b) {
+          return wantMax ? b.context_window - a.context_window
+            : a.context_window - b.context_window;
+        });
+      } else if (!wantMax) {
+        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
+      }
+      return 'local:' + sorted[0].name;
+    }
+    return {
+      fast: pick(act.length ? act : llms, false),
+      premium: pick(llms, true),
+      small: pick(llms, false),
+      classifier: act.length ? 'local:' + act[0].name : pick(llms, false),
+    };
+  }
+
+  async function renderWizard() {
+    var catalog = await fetchWizardModels();
+    var pre = _prefill(catalog);
+    var roles = {};
+    _ROLE_DEFS.forEach(function (rd) {
+      roles[rd.name] = { desc: rd.desc, selected: pre[rd.name] };
+    });
+    _wizard = { roles: roles, removed: {}, catalog: catalog };
+    renderWizardHtml();
+  }
+
+  function renderWizardHtml() {
+    var box = $('mpPools');
+    if (!box || !_wizard) return;
+    var html = '<div class="mp-wizard">'
+      + '<p class="mp-wizard-intro">逻辑模型池尚未配置。为常用角色创建池后，'
+      + 'agent 产品只需配置一次 <span class="mono">iff/&lt;角色&gt;</span>，'
+      + '日后换模型在这里改，客户端零改动。</p>';
+    _ROLE_DEFS.forEach(function (rd) {
+      var st = _wizard.roles[rd.name];
+      if (!st) return;   // 已移除
+      var opts = '<option value="">（不创建）</option>';
+      _wizard.catalog.local.forEach(function (m) {
+        var v = 'local:' + m.name;
+        opts += '<option value="' + esc(v) + '"'
+          + (st.selected === v ? ' selected' : '')
+          + '>本地 · ' + esc(m.name) + (m.active ? '（服务中）' : '')
+          + '</option>';
+      });
+      _wizard.catalog.cloud.forEach(function (n) {
+        var v = 'cloud:' + n;
+        opts += '<option value="' + esc(v) + '"'
+          + (st.selected === v ? ' selected' : '')
+          + '>云 · ' + esc(n) + '</option>';
+      });
+      html += '<div class="mp-wizard-role" data-mp-role="' + esc(rd.name) + '">'
+        + '<span class="mono"><b>iff/' + esc(rd.name) + '</b></span>'
+        + '<span class="mp-wizard-desc">' + esc(st.desc) + '</span>'
+        + '<select data-mp-wizard-sel="' + esc(rd.name) + '">' + opts + '</select>'
+        + '<button type="button" data-mp-wizard-del="' + esc(rd.name) + '">移除</button>'
+        + '</div>';
+    });
+    var removedNames = Object.keys(_wizard.removed);
+    if (removedNames.length) {
+      html += '<div class="mp-wizard-removed">已移除的角色：';
+      removedNames.forEach(function (n) {
+        html += '<button type="button" data-mp-wizard-add="' + esc(n) + '">恢复 '
+          + esc(n) + '</button>';
+      });
+      html += '</div>';
+    }
+    html += '<div class="mp-edit-actions">'
+      + '<button type="button" data-mp-wizard-submit="1">创建这些池</button>'
+      + '</div></div>';
+    box.innerHTML = html;
+  }
+
+  // 角色移除/恢复（提交只 POST 仍在 roles 里的）
+  function doMpWizardToggle(role) {
+    if (!_wizard) return;
+    if (_wizard.roles[role]) {
+      _wizard.removed[role] = _wizard.roles[role];
+      delete _wizard.roles[role];
+    } else if (_wizard.removed[role]) {
+      _wizard.roles[role] = _wizard.removed[role];
+      delete _wizard.removed[role];
+    }
+    renderWizardHtml();
+  }
+
+  async function doMpWizardSubmit() {
+    if (!_wizard) {
+      UI.toast('向导未初始化（配置文件损坏时不可用向导）', 'error');
+      return;
+    }
+    var pools = {};
+    Object.keys(_wizard.roles).forEach(function (role) {
+      var sel = _wizard.roles[role].selected;
+      if (!sel) return;   // 无候选的角色跳过
+      var c = candFromCatalogValue(sel, role + '-1');
+      c.priority = 1;
+      var sk = newPoolSkeleton();
+      sk.candidates = [c];
+      pools[role] = sk;
+    });
+    if (!Object.keys(pools).length) {
+      UI.toast('请至少为一个角色选择候选模型', 'error');
+      return;
+    }
+    var body = {
+      schema_version: 1,
+      pools: pools,
+      expected_revision: _state.def ? _state.def.revision : 0,
+    };
+    try {
+      var res = await fetch(UPDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(body),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (res.ok) {
+        _wizard = null;
+        UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        await renderModelPools();
+        return;
+      }
+      UI.toast((d && d.error) || ('创建失败 · HTTP ' + res.status), 'error');
+    } catch (e) {
+      UI.toast('创建请求异常：' + (e && e.message), 'error');
+    }
+  }
 
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
   async function fetchCandidateCatalog() {
@@ -408,12 +610,7 @@
       : { schema_version: 1, pools: {} };
     if (!base.pools || typeof base.pools !== 'object') base.pools = {};
     if (!base.pools[pool]) {
-      base.pools[pool] = {
-        enabled: true, strategy: 'priority',
-        allowed_locations: ['local', 'cloud'],
-        accept_declared: true, allow_cross_location: false,
-        max_attempts: 2, deadline_ms: 60000, candidates: [],
-      };
+      base.pools[pool] = newPoolSkeleton();   // 池不存在（含从未配置）→ 新建骨架
     }
     if (!Array.isArray(base.pools[pool].candidates)) {
       base.pools[pool].candidates = [];
@@ -652,12 +849,29 @@
     var t = ev.target;
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
-    if (pool) doMpToggle(pool, !!t.checked);
+    if (pool) { doMpToggle(pool, !!t.checked); return; }
+    var wsel = t.getAttribute('data-mp-wizard-sel');
+    if (wsel && _wizard && _wizard.roles[wsel]) {
+      _wizard.roles[wsel].selected = t.value || null;
+    }
+  }
+
+  function onBoxClick(ev) {
+    var t = ev.target;
+    if (!t || !t.getAttribute) return;
+    var edit = t.getAttribute('data-mp-edit');
+    if (edit) { doMpEdit(edit); return; }
+    var del = t.getAttribute('data-mp-wizard-del');
+    if (del) { doMpWizardToggle(del); return; }
+    var add = t.getAttribute('data-mp-wizard-add');
+    if (add) { doMpWizardToggle(add); return; }
+    if (t.getAttribute('data-mp-wizard-submit')) { doMpWizardSubmit(); }
   }
 
   var box = $('mpPools');
   if (box && typeof box.addEventListener === 'function') {
     box.addEventListener('change', onBoxChange);
+    box.addEventListener('click', onBoxClick);
   }
 
   /* ── 注册 ── */
@@ -671,4 +885,6 @@
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
   window.mpEditApply = mpEditApply;
+  window.doMpWizardToggle = doMpWizardToggle;
+  window.doMpWizardSubmit = doMpWizardSubmit;
 })();

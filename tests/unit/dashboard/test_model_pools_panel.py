@@ -73,6 +73,7 @@ _RENDER_MUST_CONTAIN = [
     "anthropic",
     "no_evidence",          # 排除原因（解释性，非只给结果）
     'type="checkbox"',      # 原生开关（无自制伪 checkbox）
+    'data-mp-edit="fast"',  # 编辑入口（卡片 → 三段式编辑器）
 ]
 
 _HARNESS = r"""
@@ -549,3 +550,89 @@ class TestEditor:
         assert [c["id"] for c in cands] == ["c1"]
         assert cands[0]["priority"] == 1
         assert body["expected_revision"] == 0   # 从未配置 → revision 0
+
+
+# ── Task 7：空态初始化向导（从未配置 → 四角色引导创建）──
+# 契约：
+# - configured=false + raw=null（从未配置）→ 向导：fast/premium/small/classifier
+#   四张角色卡（可移除可恢复），每卡候选下拉带预填启发式
+#   （fast=活跃小模型 / premium=大上下文本地或云 / small=最小 / classifier=活跃）
+# - 提交：CAS POST expected_revision=0；无候选的角色跳过
+# - 文件损坏（load_error≠null）→ 只出错误横幅，不出向导、零 POST
+
+_WIZARD_MODELS = [
+    {"name": "NI-Qwen38-27B", "model_type": "llm", "modality": "text",
+     "active": False, "context_window": 262144},
+    {"name": "qwen3-4b", "model_type": "llm", "modality": "text",
+     "active": True, "context_window": 32768},
+]
+
+_WIZARD_POOLS_BODY = {"revision": 0, "pools": {}, "configured": False,
+                      "load_error": None, "raw": None}
+
+
+def _wizard_routes(pools_body=None, models=None):
+    return {
+        "/admin/model-pools": {
+            "status": 200, "body": pools_body or _WIZARD_POOLS_BODY},
+        "/admin/model-pools/status": {
+            "status": 200, "body": {"revision": 0, "pools": {}}},
+        "/admin/model-pools/runtime": {
+            "status": 200, "body": {"revision": 0, "pools": {}}},
+        "/models": {"status": 200,
+                    "body": _WIZARD_MODELS if models is None else models},
+        "POST /admin/model-pools": {
+            "status": 200, "body": {"status": "updated", "revision": 1}},
+    }
+
+
+class TestWizard:
+    def test_fragment_contains_modal_container(self):
+        frag = (ROOT / "inferfabric" / "dashboard" / "fragments"
+                / "model-pools.html").read_text(encoding="utf-8")
+        assert 'id="mpModal"' in frag   # 编辑器模态容器存在
+
+    def test_wizard_renders_four_roles(self, run_panel):
+        out = run_panel(_wizard_routes())
+        for role in ("fast", "premium", "small", "classifier"):
+            assert 'data-mp-role="' + role + '"' in out["html"], role
+        # 角色中文说明 + 候选下拉 + 引导文案
+        assert "快速" in out["html"]
+        assert "旗舰" in out["html"]
+
+    def test_wizard_submit_posts_expected_revision_zero(self, run_panel):
+        out = run_panel(_wizard_routes(),
+                        actions=[{"fn": "doMpWizardSubmit"}])
+        body = _last_update_post(out)[-1]["body"]
+        assert body["expected_revision"] == 0     # 从未配置 → revision 0
+        assert body["schema_version"] == 1
+        assert sorted(body["pools"].keys()) == \
+            ["classifier", "fast", "premium", "small"]
+        for role, pool in body["pools"].items():
+            assert len(pool["candidates"]) == 1
+            assert pool["candidates"][0]["priority"] == 1
+        # 预填启发式：fast=活跃小模型；premium=大上下文
+        assert body["pools"]["fast"]["candidates"][0]["model_name"] == "qwen3-4b"
+        assert body["pools"]["premium"]["candidates"][0]["model_name"] \
+            == "NI-Qwen38-27B"
+
+    def test_wizard_removed_role_not_posted(self, run_panel):
+        actions = [
+            {"fn": "doMpWizardToggle", "args": ["classifier"]},
+            {"fn": "doMpWizardSubmit"},
+        ]
+        out = run_panel(_wizard_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        assert "classifier" not in body["pools"]
+        assert "fast" in body["pools"]
+
+    def test_broken_file_no_wizard_no_post(self, run_panel):
+        pools = dict(_WIZARD_POOLS_BODY,
+                     load_error="model_pools.yaml invalid: bad")
+        actions = [{"fn": "doMpWizardSubmit"}]
+        out = run_panel(_wizard_routes(pools_body=pools), actions=actions)
+        assert "加载失败" in out["html"]            # 只出错误横幅
+        assert 'data-mp-role=' not in out["html"]  # 不出向导
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools"
+                    and c["method"] == "POST"]     # 零 POST

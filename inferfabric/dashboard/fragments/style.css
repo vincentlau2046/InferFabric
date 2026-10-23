@@ -1403,3 +1403,41 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   padding: 12px 16px; background: rgba(255, 69, 58, .08);
 }
 .mp-error-banner p { margin: 4px 0; }
+
+/* ── 模型池编辑器 + 空态向导 v7.1.0 ── */
+.mp-edit-btn {
+  margin-right: 8px; padding: 2px 10px; font-size: 12px;
+  border: 1px solid var(--if-border, #444); border-radius: 6px;
+  background: transparent; color: var(--if-text, #eee); cursor: pointer;
+}
+.mp-edit-btn:hover { border-color: var(--if-accent, #0a84ff); }
+.mp-editor { border: 1px solid var(--if-border, #444); border-radius: 10px;
+  padding: 14px 16px; margin-top: 12px; }
+.mp-editor-hdr { display: flex; gap: 10px; align-items: baseline;
+  margin-bottom: 10px; }
+.mp-edit-ops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mp-edit-ops button, .mp-edit-actions button {
+  padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--if-border, #444); background: transparent;
+  color: var(--if-text, #eee);
+}
+.mp-edit-actions { margin-top: 12px; display: flex; gap: 8px; }
+.mp-edit-actions button[disabled] { opacity: .4; cursor: default; }
+.mp-edit-add { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
+.mp-edit-params { margin-top: 10px; display: flex; gap: 16px; flex-wrap: wrap;
+  font-size: 12px; color: var(--if-text-dim, #999); }
+.mp-edit-params input[type="number"] { width: 90px; }
+.mp-hint { font-size: 12px; color: var(--if-text-dim, #999); }
+.mp-preview { margin-top: 12px; }
+.mp-wizard { display: flex; flex-direction: column; gap: 10px; }
+.mp-wizard-intro { color: var(--if-text-dim, #999); }
+.mp-wizard-role { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  padding: 10px 14px; }
+.mp-wizard-role select { flex: 1 1 220px; }
+.mp-wizard-desc { color: var(--if-text-dim, #999); font-size: 13px; }
+.mp-wizard-role button { padding: 2px 10px; font-size: 12px;
+  border-radius: 6px; border: 1px solid var(--if-border, #444);
+  background: transparent; color: var(--if-text, #eee); cursor: pointer; }
+.mp-wizard-removed { font-size: 12px; color: var(--if-text-dim, #999);
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
