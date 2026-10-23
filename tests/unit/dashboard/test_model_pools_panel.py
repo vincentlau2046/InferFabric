@@ -18,6 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 PANEL_JS = ROOT / "inferfabric" / "dashboard" / "js" / "model-pools.js"
+DASHBOARD_DIR = ROOT / "inferfabric" / "dashboard"
 
 _POOLS_BODY = {
     "revision": 3,
@@ -100,9 +101,13 @@ const window = {
     toast: (message, kind) => toasts.push({message, kind}),
     adminHeaders: () => ({'Content-Type': 'application/json'}),
   },
-  store: {on: () => {}},
+  store: {
+    on: () => {},
+    get: (k) => (input.storeState || {})[k],
+  },
 };
 const clipboardWrites = [];
+const timers = [];
 const navigator = {
   clipboard: {writeText: async (t) => { clipboardWrites.push(t); }},
 };
@@ -135,10 +140,11 @@ const fetch = async (url, options) => {
 };
 vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   window,
-  document: {getElementById: el},
+  document: {getElementById: el, hidden: !!input.documentHidden},
   fetch,
   navigator,
   location: input.location || {protocol: 'http:', hostname: '127.0.0.1'},
+  setInterval: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
   console,
 });
 (async () => {
@@ -149,13 +155,19 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   if (input.toggle) {
     await window.doMpToggle(input.toggle.pool, input.toggle.enable);
   }
-  // v7.1.0 编辑器：任意 window 函数动作序列（模拟用户在模态内的操作流）
+  // v7.1.0 编辑器：任意 window 函数动作序列（模拟用户在模态内的操作流）。
+  // noAwait: true → 不等待完成（模拟慢网络下并发开第二个编辑会话）
   for (const act of (input.actions || [])) {
     const fn = window[act.fn];
     if (typeof fn !== 'function') {
       throw new Error('unknown action: ' + act.fn);
     }
-    await fn.apply(window, act.args || []);
+    const p = fn.apply(window, act.args || []);
+    if (!act.noAwait) await p;
+  }
+  // 模拟 5s 轮询滴答（每次滴答触发全部已注册 interval）
+  for (let i = 0; i < (input.pollTicks || 0); i++) {
+    for (const t of timers) { await t.fn(); }
   }
   const modalHtml = elements['mpModal'] ? elements['mpModal'].innerHTML : '';
   const previewHtml = elements['mpPreview'] ? elements['mpPreview'].innerHTML : '';
@@ -176,12 +188,16 @@ def run_panel(tmp_path):
     harness = tmp_path / "model_pools_harness.js"
     harness.write_text(_HARNESS, encoding="utf-8")
 
-    def run(routes, toggle=None, actions=None, location=None):
+    def run(routes, toggle=None, actions=None, location=None,
+            poll_ticks=0, store_state=None, document_hidden=False):
         proc = subprocess.run(
             [node, str(harness), str(PANEL_JS)],
             input=json.dumps({"routes": routes, "toggle": toggle,
                               "actions": actions,
-                              "location": location}),
+                              "location": location,
+                              "pollTicks": poll_ticks,
+                              "storeState": store_state,
+                              "documentHidden": document_hidden}),
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0, proc.stderr
@@ -707,3 +723,161 @@ class TestSnippet:
                                   "hostname": "iff.example.com"})
         assert "https://iff.example.com:8999" in out["modalHtml"]
         assert "http://" not in out["modalHtml"].replace("https://", "")
+
+
+# ── 终审修复 pass（评审 f94744b..2e36fdd 后的重要发现，逐条 RED→GREEN）──
+
+
+class TestFixPassEditorGates:
+    """I1 任意变更使预览失效；I2 双协议均无可用候选/HTTP 失败 → 阻止应用。"""
+
+    def test_editor_mutation_after_preview_invalidates_and_blocks_apply(
+            self, run_panel):
+        # 预览通过后再改动 → validated 失效 → apply 必须拒绝（spec §3.2）
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert any("预览" in t["message"] for t in out["toasts"])
+
+    def test_editor_apply_button_disabled_until_validated(self, run_panel):
+        # 未通过预览时应用按钮禁用（防止误点绕过三段式纪律）
+        actions = [{"fn": "doMpEdit", "args": ["fast"]}]
+        out = run_panel(_editor_routes(), actions=actions)
+        m = re.search(r'data-mp-act="apply"([^>]*)>', out["modalHtml"])
+        assert m, "modal must render apply button"
+        assert "disabled" in m.group(1)
+
+    def test_editor_preview_both_protocols_unavailable_blocks_apply(
+            self, run_panel):
+        # spec §3.2：两协议均无可用候选 → 阻止应用（黄灯单协议缺失仍允许）
+        routes = _editor_routes()
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200,
+            "body": {"chosen": None, "error": "no_compatible_target",
+                     "decisions": [], "pool": "fast", "protocol": "openai"},
+        }
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert "无可用候选" in out["previewHtml"]
+        assert any("候选" in t["message"] for t in out["toasts"])
+
+    def test_editor_preview_dryrun_http_error_blocks_apply(self, run_panel):
+        # dry-run 请求 HTTP 失败 ≠ 预览通过 — 不得置 validated
+        routes = _editor_routes()
+        routes["POST /admin/model-pools/dry-run"] = {"status": 500, "body": {}}
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+
+    def test_stale_apply_completion_preserves_second_session(self, run_panel):
+        # I3 会话令牌：慢 apply 完成时编辑器已被重开 → 陈旧完成不得清空
+        # 第二会话（toast 用捕获的池名；不碰 _edit/_undo）
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": [], "noAwait": True},
+            {"fn": "doMpEdit", "args": ["fast"]},      # 第二编辑会话
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},          # 第二会话必须能正常应用
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        validates = [c for c in out["calls"]
+                     if c["url"] == "/admin/model-pools/validate"]
+        # 第二会话的预览与应用都必须真实发出（陈旧完成未清空 _edit）
+        assert len(validates) == 2, "second session preview must run"
+        assert len(posts) == 2, "second session apply must reach POST"
+        assert sum("已更新 iff/fast" in t["message"] for t in out["toasts"]) == 2
+
+
+class TestFixPassRuntimePolling:
+    """I5 base.html 缺 <!-- JS:model-pools --> 占位符 + spec §6 5s 轮询。"""
+
+    def test_all_js_modules_have_placeholders(self):
+        # JS_MODULES 列出的模块必须在 base.html 有对应占位符，否则
+        # get_html 静默不内联（本次 model-pools 即漏 — 功能整页不可用）
+        import re as _re
+        from inferfabric.dashboard import JS_MODULES
+        base = (DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
+        for name in JS_MODULES:
+            assert _re.search(
+                r"<!--\s*JS:" + _re.escape(name) + r"\s*-->", base), \
+                f"base.html missing <!-- JS:{name} --> placeholder"
+
+    def test_runtime_polling_refreshes_when_tab_active(self, run_panel):
+        out = run_panel(_routes(), poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"})
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/runtime"]
+        assert len(gets) == 3   # 首屏 1 + 2 次滴答
+
+    def test_runtime_polling_skips_other_tabs(self, run_panel):
+        out = run_panel(_routes(), poll_ticks=2,
+                        store_state={"tab_active": "tab-overview"})
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/runtime"]
+        assert len(gets) == 1   # 仅首屏
+
+    def test_runtime_polling_skips_when_document_hidden(self, run_panel):
+        out = run_panel(_routes(), poll_ticks=2, document_hidden=True,
+                        store_state={"tab_active": "tab-model-pools"})
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/runtime"]
+        assert len(gets) == 1   # 页面隐藏 → 暂停（spec §6）
+
+    def test_runtime_polling_skips_while_wizard_open(self, run_panel):
+        # 向导开着时轮询不得重渲染列表（会清掉向导的选择框）
+        out = run_panel(_wizard_routes(), poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"})
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/runtime"]
+        assert len(gets) == 1
+        assert "mp-wizard" in out["html"]   # 向导仍在
+
+
+class TestFixPassWizard:
+    """向导 expected_revision 固定 0 + 离开向导态时清 _wizard。"""
+
+    def test_wizard_pins_expected_revision_zero_even_with_stale_revision(
+            self, run_panel):
+        # 向导只在从未配置时出现；即便快照 revision 非 0（异常残留），
+        # 创建语义 = 从零建立，固定 expected_revision=0（错则 409，可重试）
+        pools = dict(_WIZARD_POOLS_BODY, revision=7)
+        out = run_panel(_wizard_routes(pools_body=pools),
+                        actions=[{"fn": "doMpWizardSubmit", "args": []}])
+        body = _last_update_post(out)[-1]["body"]
+        assert body["expected_revision"] == 0
+
+    def test_wizard_state_cleared_once_configured(self, run_panel):
+        # 时序：首屏未配置（向导）→ 外部配置出现 → 重渲染池卡片后，
+        # 陈旧 _wizard 必须清除 — 再点提交只提示未初始化，不发 POST
+        configured = _editor_pools_body(revision=1)
+        pools_bodies = [_WIZARD_POOLS_BODY, configured]
+        actions = [
+            {"fn": "renderModelPools", "args": []},
+            {"fn": "doMpWizardSubmit", "args": []},
+        ]
+        routes = _wizard_routes(pools_body=None)
+        routes["/admin/model-pools"] = {"status": 200, "bodies": pools_bodies}
+        out = run_panel(routes, actions=actions)
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert any("向导未初始化" in t["message"] for t in out["toasts"])

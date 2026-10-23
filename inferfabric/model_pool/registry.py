@@ -150,6 +150,9 @@ class PoolRegistry:
         reload_all 里上报失败，后者是正常空转（终审 #19）。"""
         import yaml as _yaml
         if not self._config_path.exists():
+            # 文件消失 ≠ 文件损坏：清除陈旧 load_error，前端回到
+            # 「从未配置」向导态而非卡在错误横幅（终审 M7，升级 Important）
+            self._load_error = None
             return None
         try:
             raw = _yaml.safe_load(self._config_path.read_text(encoding="utf-8"))

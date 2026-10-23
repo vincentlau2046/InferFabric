@@ -341,6 +341,29 @@ class TestGetRuntimeState:
         assert body["load_error"] is None
         assert body["raw"] is None
 
+    def test_get_raw_is_json_serializable_with_yaml_dates(self, tmp_path):
+        # 终审 I4：YAML safe_load 把 ISO 日期解析成 datetime.date，raw 原样
+        # 透传 → _send_json 内 json.dumps TypeError → GET 整个 500。
+        # 管理端点边界必须 JSON 安全。
+        import datetime
+        import json as _json
+        import yaml as _yaml
+        cfg = _raw_config()
+        cfg["updated_at"] = datetime.date(2026, 10, 23)  # 用户在 YAML 里写日期
+        (tmp_path / "m.yaml").write_text(
+            _yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
+        reg = PoolRegistry(config_path=tmp_path / "m.yaml",
+                           evidence_path=tmp_path / "e.json",
+                           known_local={"qwen-small"}, known_providers={"prov"},
+                           provider_base=lambda p: "https://base/v1")
+        reg.load()
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools(h, FakePM(reg))
+        status, body = h.sent[-1]
+        assert status == 200
+        assert body["raw"]["updated_at"] == "2026-10-23"   # date → ISO 字符串
+        _json.dumps(body)   # 不得 TypeError
+
     def test_get_broken_file_reports_load_error(self, tmp_path):
         reg = PoolRegistry(config_path=tmp_path / "broken.yaml",
                            evidence_path=tmp_path / "e.json")

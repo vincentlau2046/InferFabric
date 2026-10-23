@@ -13,6 +13,7 @@
 （spec §5.1），推迟到独立任务。
 """
 
+import datetime
 import logging
 
 from inferfabric.model_pool.config import load_pools_dict
@@ -35,6 +36,27 @@ def _candidate_view(rc) -> dict:
     }
 
 
+def _json_safe(value):
+    """管理端点边界 JSON 安全化（终审 I4）。
+
+    YAML safe_load 会把 ISO 日期解析成 datetime.date；raw 原样透传时
+    _send_json 内 json.dumps 直接 TypeError，GET /admin/model-pools 整个
+    500。此处递归归一：date/datetime → isoformat，set → 排序列表，
+    其余不可序列化类型 → str()。
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime.date, datetime.datetime)):
+        return value.isoformat()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, (set, frozenset)):
+        return sorted(str(v) for v in value)
+    return str(value)
+
+
 def handle_get_model_pools(handler, pm):
     reg = pm.pool_registry
     snap = reg.snapshot()
@@ -53,13 +75,13 @@ def handle_get_model_pools(handler, pm):
         }
     # v7.1.0 运行状态三态 + raw 编辑基底（GET 视图有损，编辑器读-改-写
     # 必须以 raw 为基底防丢数据 — 见 registry.raw_config 文档）
-    handler._send_json({
+    handler._send_json(_json_safe({
         "revision": snap.revision,
         "pools": pools,
         "configured": reg.configured,
         "load_error": reg.last_load_error,
         "raw": reg.raw_config(),
-    })
+    }))
 
 
 def handle_put_model_pools(handler, pm):

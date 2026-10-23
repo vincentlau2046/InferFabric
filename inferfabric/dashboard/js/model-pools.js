@@ -205,6 +205,9 @@
 
       // 三态分支（spec §4.3）：
       // 1) 文件损坏 → 错误横幅（registry 保留最后有效快照继续服务）
+      // 离开向导态（配置出现/文件损坏）时清除陈旧向导状态 — 否则
+      // 残留 _wizard 既挡轮询又让「创建这些池」提交陈旧选择（终审修复）
+      _wizard = null;   // 向导分支内 renderWizard() 会重新建立
       if (def.load_error) {
         box.innerHTML = '<div class="mp-error-banner">'
           + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
@@ -436,6 +439,7 @@
       UI.toast('向导未初始化（配置文件损坏时不可用向导）', 'error');
       return;
     }
+    var session = _wizard;   // 会话令牌：在途期间向导态可能被清除/重建
     var pools = {};
     Object.keys(_wizard.roles).forEach(function (role) {
       var sel = _wizard.roles[role].selected;
@@ -450,10 +454,12 @@
       UI.toast('请至少为一个角色选择候选模型', 'error');
       return;
     }
+    // 创建语义 = 从零建立：固定 expected_revision=0（终审修复 — 即便快照
+    // revision 异常残留也不带病提交；错则 409 可重试，不会覆盖他人配置）
     var body = {
       schema_version: 1,
       pools: pools,
-      expected_revision: _state.def ? _state.def.revision : 0,
+      expected_revision: 0,
     };
     try {
       var res = await fetch(UPDATE_URL, {
@@ -462,6 +468,14 @@
       });
       var d = null;
       try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (_wizard !== session) {
+        // 向导态已变（被重渲染清除/重建）— 只提示 + 刷新，不碰当前状态
+        if (res.ok) {
+          UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
       if (res.ok) {
         _wizard = null;
         UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
@@ -596,7 +610,8 @@
     html += '<div id="mpPreview" class="mp-preview"></div>'
       + '<div class="mp-edit-actions">'
       + '<button type="button" data-mp-act="preview">预览</button>'
-      + '<button type="button" data-mp-act="apply">应用</button>'
+      + '<button type="button" data-mp-act="apply"'
+      + (_edit.validated ? '' : ' disabled') + '>应用</button>'
       + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
       + '</div></div>';
     modal.innerHTML = html;
@@ -642,6 +657,7 @@
     // D4 一键换模语义：直接替换候选，继承原优先级（不做优先级重排）
     c.priority = cands[i].priority;
     cands[i] = c;
+    _edit.validated = false;   // 任何变更使上次预览失效（终审 I1）
     renderEditor();
   }
 
@@ -652,6 +668,7 @@
     var c = deepCopy(newCand);
     c.priority = maxP + 1;   // 链尾 = 最低优先级
     cands.push(c);
+    _edit.validated = false;
     renderEditor();
   }
 
@@ -659,7 +676,10 @@
     if (!_edit) return;
     var cands = _edit.work.pools[_edit.pool].candidates;
     var i = cands.findIndex(function (c) { return c.id === candidateId; });
-    if (i >= 0) cands.splice(i, 1);
+    if (i >= 0) {
+      cands.splice(i, 1);
+      _edit.validated = false;
+    }
     renderEditor();
   }
 
@@ -672,17 +692,21 @@
     var tmp = cands[i]; cands[i] = cands[j]; cands[j] = tmp;
     // 交换优先级，保持链序与优先级一致
     var p = cands[i].priority; cands[i].priority = cands[j].priority; cands[j].priority = p;
+    _edit.validated = false;
     renderEditor();
   }
 
   function mpEditPoolParam(key, value) {
     if (!_edit) return;
     _edit.work.pools[_edit.pool][key] = value;
+    _edit.validated = false;
   }
 
-  // 预览：validate（静态）→ 不通过阻止一切；通过 → dry-run×2 携带编辑态 config
+  // 预览：validate（静态）→ 不通过阻止一切；通过 → dry-run×2 携带编辑态 config。
+  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
   async function mpEditPreview() {
     if (!_edit) return;
+    var session = _edit;
     var pv = $('mpPreview');
     _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
     try {
@@ -690,7 +714,9 @@
         method: 'POST', headers: UI.adminHeaders(),
         body: JSON.stringify(_edit.work),
       });
+      if (_edit !== session) return;
       var d = await res.json();
+      if (_edit !== session) return;
       if (!d.valid) {
         if (pv) {
           pv.innerHTML = '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
@@ -711,18 +737,37 @@
           body: JSON.stringify({ pool: _edit.pool, protocol: proto,
                                  config: _edit.work }),
         });
-        outs.push({ proto: proto, ok: r.ok, body: await r.json() });
+        if (_edit !== session) return;
+        var b = null;
+        try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
+        if (_edit !== session) return;
+        outs.push({ proto: proto, ok: r.ok, body: b || {} });
       }
-      if (pv) {
-        var html = '<p>预览（编辑态，未应用）：</p>';
-        outs.forEach(function (o) {
-          var b = o.body || {};
-          html += '<p class="mono">' + esc(o.proto) + ' → '
-            + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
-               : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选') + '</span>'))
-            + '</p>';
-        });
-        pv.innerHTML = html;
+      var previewHtml = '<p>预览（编辑态，未应用）：</p>';
+      outs.forEach(function (o) {
+        var b = o.body || {};
+        previewHtml += '<p class="mono">' + esc(o.proto) + ' → '
+          + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
+             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选') + '</span>'))
+          + '</p>';
+      });
+      if (pv) pv.innerHTML = previewHtml;
+      // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
+      // （单协议无候选 = 黄灯，属合法状态，不阻止）
+      var failed = outs.filter(function (o) { return !o.ok; });
+      if (failed.length) {
+        if (pv) pv.innerHTML += '<p class="mp-issue">预览请求失败 · HTTP '
+          + esc(failed.map(function (o) { return o.proto; }).join('/'))
+          + ' — 已阻止应用</p>';
+        UI.toast('预览请求失败 — 已阻止应用', 'error');
+        return;
+      }
+      var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
+      if (noneChosen.length === outs.length) {
+        if (pv) pv.innerHTML += '<p class="mp-issue">两个协议均无可用候选'
+          + ' — 已阻止应用</p>';
+        UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
+        return;
       }
       _edit.validated = true;
       UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
@@ -739,8 +784,10 @@
       UI.toast('请先点「预览」并通过校验，再应用', 'error');
       return;
     }
-    var body = deepCopy(_edit.work);
-    body.expected_revision = _edit.base_revision;   // 打开时的基点，不被后台刷新推进
+    var session = _edit;   // 会话令牌：请求在途时编辑器可能被关闭/重开
+    var poolName = session.pool;
+    var body = deepCopy(session.work);
+    body.expected_revision = session.base_revision;  // 打开时的基点，不被后台刷新推进
     try {
       var res = await fetch(UPDATE_URL, {
         method: 'POST', headers: UI.adminHeaders(),
@@ -748,9 +795,17 @@
       });
       var d = null;
       try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (_edit !== session) {
+        // 陈旧完成：请求已发出并生效，但当前编辑器已是另一会话 —
+        // 只提示 + 刷新，绝不触碰 _edit/_undo（终审 I3）
+        if (res.ok) {
+          UI.toast('已更新 iff/' + poolName, 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
       if (res.ok) {
-        var poolName = _edit.pool;
-        _undo = _edit.base;
+        _undo = session.base;
         _edit = null;
         var modal = $('mpModal');
         if (modal) modal.innerHTML = '';
@@ -777,9 +832,11 @@
       UI.toast('没有可回滚的编辑', 'error');
       return;
     }
+    var snapshot = _undo;   // 会话令牌：在途期间 _undo 可能已被新编辑替换
     try {
       await renderModelPools();   // 先取最新 revision（CAS 基点）
-      var body = deepCopy(_undo);
+      if (_undo !== snapshot) return;   // 回滚对象已变 — 放弃本次
+      var body = deepCopy(snapshot);
       body.expected_revision = _revision;
       var res = await fetch(UPDATE_URL, {
         method: 'POST', headers: UI.adminHeaders(),
@@ -787,6 +844,13 @@
       });
       var d = null;
       try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (_undo !== snapshot) {
+        if (res.ok) {
+          UI.toast('已回滚到上次编辑前的配置', 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
       if (res.ok) {
         _undo = null;
         UI.toast('已回滚到上次编辑前的配置', 'ok');
@@ -963,6 +1027,29 @@
     box.addEventListener('change', onBoxChange);
     box.addEventListener('click', onBoxClick);
   }
+
+  /* ── 5s 轮询（spec §6）：与首屏同一刷新函数（定义+状态+运行态合并拉取）。
+     store.js 的周期快照不触发 tabRenderers，故本模块自持定时器；
+     页面隐藏 / 非本 TAB / 向导开启（避免清掉选择框）时跳过。 ── */
+  var _pollStarted = false;
+
+  function pollTick() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (window.store && typeof window.store.get === 'function'
+          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      if (_wizard) return;
+      return renderModelPools();   // 返回 promise 供测试/调用方等待
+    } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
+  }
+
+  function startRuntimePolling() {
+    if (_pollStarted || typeof setInterval !== 'function') return;
+    _pollStarted = true;
+    setInterval(pollTick, 5000);
+  }
+
+  startRuntimePolling();
 
   /* ── 注册 ── */
   window.tabRenderers = window.tabRenderers || {};

@@ -106,6 +106,20 @@ class TestConfiguredState:
         assert reg.last_load_error is None
         assert reg.raw_config()["pools"]["fast"]["candidates"][0]["id"] == "c1"
 
+    def test_deleting_broken_file_clears_load_error(self, tmp_path):
+        # 终审 M7（升级 Important）：文件损坏 → load_error；随后文件被删除
+        # → 前端应回到「从未配置」向导态，而不是卡在错误横幅
+        reg = _make_registry(tmp_path)
+        cfg = tmp_path / "model_pools.yaml"
+        cfg.write_text("pools: [bad]", encoding="utf-8")
+        reg.load()
+        assert reg.last_load_error
+        cfg.unlink()
+        result = reg.reload_from_disk()
+        assert result is None          # 无文件 = 正常空转
+        assert reg.configured is False
+        assert reg.last_load_error is None   # 错误必须清除
+
     def test_empty_file_is_invalid_with_error(self, tmp_path):
         reg = _make_registry(tmp_path)
         (tmp_path / "model_pools.yaml").write_text("", encoding="utf-8")
