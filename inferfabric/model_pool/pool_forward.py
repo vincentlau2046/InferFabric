@@ -309,6 +309,9 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
 
         # 半开探测结果回写（健康端点未注册探测 → no-op，终审 #18）
         if cooldowns is not None:
+            # 运行态视图：记录最近一次真实传输尝试（v7.1.0；与探测回写同钟）
+            cooldowns.record_attempt(cand.endpoint_fingerprint, res.ok,
+                                     res.status, now=mono())
             cooldowns.finish_probe(cand.endpoint_fingerprint, res.ok, now=mono())
 
         if res.ok:
@@ -329,7 +332,8 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                                   ttft_ms=res.ttft_ms, attempts=records)
         if res.status in (401, 403):
             if cooldowns is not None:
-                cooldowns.add(cand.endpoint_fingerprint, now=mono())
+                cooldowns.add(cand.endpoint_fingerprint, now=mono(),
+                              reason=f"cooldown_{res.status}")
             log.warning("pool candidate '%s' upstream %s — endpoint cooling",
                         cand.candidate.id, res.status)
             queue.pop(0)

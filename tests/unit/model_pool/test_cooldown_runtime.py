@@ -114,3 +114,92 @@ class TestRecordAttempt:
         la = store.last_attempts(now=clock())
         assert la["fp-g"]["ok"] is True
         assert la["fp-g"]["status"] is None
+
+
+# ── Task 2：run_attempts 记录最近尝试 + 冷却原因 ──
+
+from types import SimpleNamespace
+
+from inferfabric.model_pool.config import CandidateConfig
+from inferfabric.model_pool.pool_forward import AttemptResult, run_attempts
+from inferfabric.model_pool.registry import ResolvedCandidate
+
+
+def _rcand(cid):
+    return ResolvedCandidate(
+        candidate=CandidateConfig(id=cid, priority=1, kind="cloud",
+                                  provider="prov", model_id="m",
+                                  declared_protocols=("openai",)),
+        endpoint_fingerprint=f"fp-{cid}", evidence={})
+
+
+def _rpool(max_attempts=3, deadline_ms=60000):
+    return SimpleNamespace(max_attempts=max_attempts, deadline_ms=deadline_ms)
+
+
+class _Recorder:
+    """按序返回预置结果，记录每次调用的候选 id。"""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, cand, remaining=None):
+        self.calls.append(cand.candidate.id)
+        return self.results.pop(0) if self.results else AttemptResult()
+
+
+class TestRunAttemptsRecording:
+    def test_failed_attempt_recorded_in_last_attempts(self):
+        clock = _FakeClock(start=100.0)
+        store = CooldownStore()
+        rec = _Recorder([AttemptResult(status=503)])
+        out = run_attempts(_rpool(max_attempts=1), [_rcand("a")], rec,
+                           cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        assert not out.ok
+        la = store.last_attempts(now=clock())
+        assert la["fp-a"]["ok"] is False
+        assert la["fp-a"]["status"] == 503
+
+    def test_success_attempt_recorded(self):
+        clock = _FakeClock()
+        store = CooldownStore()
+        rec = _Recorder([AttemptResult(ok=True, status=200, committed=True)])
+        run_attempts(_rpool(max_attempts=1), [_rcand("a")], rec,
+                     cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        la = store.last_attempts(now=clock())
+        assert la["fp-a"] == {"ok": True, "status": 200, "age_s": pytest.approx(0.0)}
+
+    def test_admission_skip_not_recorded(self):
+        clock = _FakeClock(start=0.0)
+        store = CooldownStore()
+        store.add("fp-a", now=clock())          # a 冷却中 → admission 跳过
+        rec = _Recorder([AttemptResult(ok=True, status=200, committed=True)])
+        out = run_attempts(_rpool(max_attempts=1), [_rcand("a"), _rcand("b")],
+                           rec, cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        assert out.ok and rec.calls == ["b"]
+        assert "fp-a" not in store.last_attempts(now=clock())
+
+    def test_401_sets_cooldown_reason(self):
+        clock = _FakeClock()
+        store = CooldownStore()
+        rec = _Recorder([AttemptResult(status=401)])
+        run_attempts(_rpool(max_attempts=1), [_rcand("a")], rec,
+                     cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        assert store.entries(now=clock())["fp-a"]["reason"] == "cooldown_401"
+
+    def test_403_sets_cooldown_reason(self):
+        clock = _FakeClock()
+        store = CooldownStore()
+        rec = _Recorder([AttemptResult(status=403)])
+        run_attempts(_rpool(max_attempts=1), [_rcand("a")], rec,
+                     cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        assert store.entries(now=clock())["fp-a"]["reason"] == "cooldown_403"
+
+    def test_404_sets_quarantine_reason(self):
+        clock = _FakeClock()
+        store = CooldownStore()
+        rec = _Recorder([AttemptResult(status=404, error="not found")])
+        run_attempts(_rpool(max_attempts=3), [_rcand("a"), _rcand("b")], rec,
+                     cooldowns=store, monotonic=clock, sleep=clock.sleep)
+        assert store.entries(now=clock())["fp-a"]["reason"] == "quarantine_404"
