@@ -116,12 +116,13 @@ The state machine is computed from actual service processes rather than a persis
 所有请求到达 `:8999` 后经过统一的路由链：
 
 1. **Auth** — API key 验证（YAML 密钥文件）
-2. **Cache** — ResponseCache 精确匹配（`temperature=0` 且非流式）
-3. **SWITCHING Guard** — 切换中模型 → 503 + Retry-After
-4. **Local routing** — `find_model_by_served_name()` → 活跃模型直接转发，非活跃 auto-switch
-5. **Multi-replica** — ReplicaSelector (`least_busy` / `round_robin`)
-6. **Cloud routing** — CloudDiscovery → 零协议透明代理
-7. **Unknown model** — 显式 404 + AnomalyEvent（无静默回退）
+2. **Pool routing**（v7.0.0）— `iff/<pool>` 逻辑名 → 池选择（协议过滤 + 优先级回退，见[逻辑模型池](#逻辑模型池logical-model-poolsv700)）；无 `model_pools.yaml` 时直通
+3. **Cache** — ResponseCache 精确匹配（`temperature=0` 且非流式）
+4. **SWITCHING Guard** — 切换中模型 → 503 + Retry-After
+5. **Local routing** — `find_model_by_served_name()` → 活跃模型直接转发，非活跃 auto-switch
+6. **Multi-replica** — ReplicaSelector (`least_busy` / `round_robin`)
+7. **Cloud routing** — CloudDiscovery → 零协议透明代理
+8. **Unknown model** — 显式 404 + AnomalyEvent（无静默回退）
 
 上游路径归一化（v5.8.0+，由 YAML `type` 字段自动驱动）：
 
@@ -373,6 +374,69 @@ Dashboard 推理页模型卡有 **⚙ 场景** 按钮：三阶段模态框（选
 
 ---
 
+## 逻辑模型池（Logical Model Pools，v7.0.0）
+
+`models_pools.yaml`（`IFF_DATA_DIR` 下，热加载）定义逻辑名 `iff/<pool>`，把一个逻辑模型映射到一组按优先级排序的本地/云端候选。客户端只依赖逻辑名——物理模型升级、故障回退对客户端完全透明；OpenAI `/v1/chat/completions` 与 Anthropic `/v1/messages` 同一逻辑名入口。
+
+**核心性质**：
+
+- **默认惰性**：不创建 `model_pools.yaml` 时全部新代码路径零激活（`iff/` 前缀检查 + 空快照直通），`/v1/models` 与直连行为与旧版完全一致
+- **协议兼容过滤**：候选按声明协议（`declared_protocols`）+ 探测证据（PROBED）筛选；未声明的能力不投递（如 vision 未声明则拒绝图像请求，VL 限制不解除）
+- **本地候选只用已启动端口**——池调度**绝不自动启动本地模型**
+- **跨本地/云回退默认关闭**：逐池显式 `allowed_locations: [local, cloud]` 才开启
+- **物理目标容量门**：同一物理目标跨池/跨直连共享 DualGateLimiter 并发预算（`acquire_target`），不重复计费
+- **已提交不重放**：响应向客户端提交任何字节后永不重试/切换（`committed` 信号贯穿传输层）
+- **错误信封固定文案**：上游错误体/凭证只进日志，客户端只见统一错误码（如 `upstream_http_503`）
+- **热加载**：`SIGHUP` / `POST /reload-config`；文件损坏/不可读时保留上一份好快照（三态重载）
+
+### 故障回退（固定错误动作表，spec §6.2）
+
+| 上游结果 | 动作 |
+|---|---|
+| 200 | 成功；RequestLog 记录**物理**模型（本地 served_name / 云端 model_id）+ cloud_provider |
+| 连接失败 / DNS / 不可达 | 立即切下一候选（受预算约束） |
+| 429 | 预算内尊重 Retry-After（支持秒数与 RFC 7231 HTTP-date）重试原目标；等待 >30s、超剩余预算或已重试过 → 切下一候选，**绝不按截断值提前重试** |
+| 5xx（未提交） | 最多重试原目标 1 次，之后切下一候选 |
+| 401 / 403 | 端点冷却 60s（按 endpoint_fingerprint，双协议共享——凭证级故障）+ 切下一候选 |
+| 400 / 404 / 422 / 内容安全 / 501 | **终止，不回退**（确定性错误，换候选也无解）；404 额外隔离端点 30 分钟 |
+| 已提交任何字节 | 永不重试/切换；流中断上报截断遥测 |
+
+统一预算：`max_attempts` 计**所有真实上游调用**（含同目标重试）；`deadline_ms` 覆盖限流排队与等待；准入失败（容量门超时/候选冷却中）**不消耗** attempt 预算。冷却期过半后以**半开单飞探测**恢复（同一端点并发只放一个探测请求）。
+
+### 配置示例
+
+```yaml
+schema_version: 1
+revision: 7                     # registry 管理，勿手改
+pools:
+  fast:
+    enabled: true
+    allowed_locations: [local]  # 跨本地/云回退默认关闭：显式加 cloud 才开
+    accept_declared: true       # 显式接受管理员声明证据
+    max_attempts: 2             # 全部真实上游调用总数（含同目标重试）
+    deadline_ms: 60000
+    candidates:
+      - id: qwen-small
+        priority: 1
+        kind: local
+        model_name: qwen-small
+        declared_protocols: [openai, anthropic]
+        features: [tools]       # 未声明的能力不投递（vision 未声明则拒绝）
+      # 跨云回退示例（需 allowed_locations 含 cloud）：
+      # - id: ds-flash
+      #   priority: 2
+      #   kind: cloud
+      #   provider: baidu-codingplan
+      #   model_id: deepseek-v4-flash
+      #   declared_protocols: [openai]
+```
+
+### 管理
+
+管理面端点见 [Model Pools (admin)](#model-pools-admin)；Dashboard「模型池」TAB 可视化同一能力（只读视图 + 单池 enabled 原子开关，CAS 409 冲突提示刷新）。`/v1/models` 列出启用池为 `{"id":"iff/fast","owned_by":"iff-pool"}`。
+
+---
+
 ## Cloud Provider Presets
 
 9 pre-configured cloud providers with one-click setup:
@@ -417,6 +481,7 @@ A macOS-inspired sidebar dashboard for model management, monitoring, and multi-e
 - **Two-scope token charts**: local engine vs. cloud provider consumption split side-by-side
 - Inference model card **⚙ 场景** control: three-phase modal — pick scenario (`GET /admin/tune/scenarios`) → diff/warning preview (`/admin/tune/preview`) → apply (`POST /admin/tune`, in-process + file lock); card badge shows the live scenario read straight from the applied-layer file
 - Cloud provider management: CRUD, auto-discover, connection test, API key masked-then-expanded forwarding
+- 模型池 TAB（v7.0.0）：`iff/<pool>` 只读视图（候选优先级表、每协议选择结果与排除原因、证据新鲜度）+ 单池 enabled 原子开关（CAS 冲突 409 → 提示刷新）
 - Anomaly detection: top-N anomalies with severity classification
 - Dual-protocol routing: local vLLM/sglang + cloud OpenAI-compatible, unified via YAML engine-type aliases
 - Dark mode (default) + light mode, typography hierarchy, WCAG AA contrast
@@ -532,6 +597,17 @@ python3 -m inferfabric.proxy.handler --async
 | `GET` | `/admin/tune/preview` | Scenario preset diff preview `?model=&preset=` |
 | `POST` | `/admin/tune` | Apply scenario preset `{"model","preset","restart"}` (in-process, file-locked) |
 | `GET` | `/admin/tune/scenarios` | Model scenario list + current active `?model=` (reads applied layer) |
+
+### Model Pools (admin)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/admin/model-pools` | 池定义 + revision + 证据态 + 校验问题 |
+| `POST` | `/admin/model-pools` | 原子更新（CAS，body 携带 `expected_revision`） |
+| `POST` | `/admin/model-pools/validate` | 静态校验（零出网、零副作用） |
+| `GET` | `/admin/model-pools/status` | 每池双协议当前选择视图（含排除原因） |
+| `POST` | `/admin/model-pools/dry-run` | 给定协议/能力 → 候选选择/排除原因（零副作用） |
+| `POST` | `/admin/model-pools/toggle` | 服务端原子翻转单池 `enabled`（CAS） |
 
 ### Cloud Admin (admin)
 
