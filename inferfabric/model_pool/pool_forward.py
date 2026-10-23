@@ -47,6 +47,12 @@ class CooldownStore:
     def __init__(self, ttl_s: float = DEFAULT_COOLDOWN_TTL_S):
         self._ttl = float(ttl_s)
         self._until: dict[str, float] = {}
+        # 冷却原因（v7.1.0 运行态视图）：fp → "cooldown_401"/"cooldown_403"/
+        # "quarantine_404"；None = 既有调用未带原因（向后兼容）
+        self._reason: dict[str, str | None] = {}
+        # 每 fp 最近一次真实传输尝试 (ok, status, mono 时刻) — 供 runtime 端点
+        # 展示「最近失败」；admission 跳过不算尝试
+        self._last: dict[str, tuple[bool, int | None, float]] = {}
         self._probing: set[str] = set()
         self._lock = threading.Lock()
 
@@ -54,14 +60,15 @@ class CooldownStore:
         return time.monotonic() if now is None else now
 
     def add(self, fingerprint: str, now: float | None = None,
-            ttl: float | None = None) -> None:
+            ttl: float | None = None, reason: str | None = None) -> None:
         with self._lock:
             self._until[fingerprint] = self._now(now) + (ttl if ttl is not None else self._ttl)
+            self._reason[fingerprint] = reason
             self._probing.discard(fingerprint)
 
     def quarantine(self, fingerprint: str, now: float | None = None) -> None:
         """404 隔离：长 TTL 冷却（模型不存在，换请求也无解）。"""
-        self.add(fingerprint, now=now, ttl=QUARANTINE_TTL_S)
+        self.add(fingerprint, now=now, ttl=QUARANTINE_TTL_S, reason="quarantine_404")
 
     def is_cooling(self, fingerprint: str, now: float | None = None) -> bool:
         with self._lock:
@@ -105,8 +112,46 @@ class CooldownStore:
             self._probing.discard(fingerprint)
             if ok:
                 self._until.pop(fingerprint, None)
+                self._reason.pop(fingerprint, None)
             else:
+                # 重新冷却保留原 reason（新故障原因由 add() 覆盖，探测失败不覆盖）
                 self._until[fingerprint] = self._now(now) + self._ttl
+
+    # ── 运行态只读视图（v7.1.0，供 GET /admin/model-pools/runtime）──
+
+    def entries(self, now: float | None = None) -> dict[str, dict]:
+        """锁内快照：fp → {until, remaining_s, reason, probing}。
+
+        含已到期未探测条目（半开语义要求条目保留）：remaining_s <= 0 且
+        probing=False 表示「到期待探测」；probing=True 表示探测在途。
+        """
+        with self._lock:
+            t = self._now(now)
+            return {
+                fp: {
+                    "until": until,
+                    "remaining_s": until - t,
+                    "reason": self._reason.get(fp),
+                    "probing": fp in self._probing,
+                }
+                for fp, until in self._until.items()
+            }
+
+    def record_attempt(self, fingerprint: str, ok: bool,
+                       status: int | None = None,
+                       now: float | None = None) -> None:
+        """记录 fp 最近一次真实传输尝试（覆盖式，每 fp 只留一条）。"""
+        with self._lock:
+            self._last[fingerprint] = (bool(ok), status, self._now(now))
+
+    def last_attempts(self, now: float | None = None) -> dict[str, dict]:
+        """锁内快照：fp → {ok, status, age_s}。"""
+        with self._lock:
+            t = self._now(now)
+            return {
+                fp: {"ok": ok, "status": status, "age_s": t - at}
+                for fp, (ok, status, at) in self._last.items()
+            }
 
 
 @dataclass
