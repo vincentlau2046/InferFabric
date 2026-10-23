@@ -59,7 +59,9 @@ def _json_safe(value):
 
 def handle_get_model_pools(handler, pm):
     reg = pm.pool_registry
-    snap = reg.snapshot()
+    # 单锁原子读取：revision 与 raw 必须同代（终审 M6 — 分两次取锁时
+    # 中间穿插的 update 会让编辑器以旧基点 POST 新内容，反复 409）
+    snap, raw = reg.snapshot_and_raw()
     pools = {}
     for name, ps in snap.pools.items():
         pools[name] = {
@@ -80,7 +82,7 @@ def handle_get_model_pools(handler, pm):
         "pools": pools,
         "configured": reg.configured,
         "load_error": reg.last_load_error,
-        "raw": reg.raw_config(),
+        "raw": raw,
     }))
 
 

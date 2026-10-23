@@ -107,6 +107,36 @@ class TestRecordAttempt:
         store = CooldownStore()
         assert store.last_attempts(now=0.0) == {}
 
+    def test_last_bounded_oldest_evicted(self):
+        # 终审 M8：_last 每指纹一条，但指纹随配置演变无限增长 —
+        # 超上限时按记录时刻淘汰最旧条目（新指纹入，最旧出）
+        clock = _FakeClock(start=1000.0)
+        store = CooldownStore(max_last_entries=3)
+        store.record_attempt("fp-1", ok=False, status=503, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-2", ok=True, status=200, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-3", ok=False, status=500, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-4", ok=True, status=200, now=clock())
+        la = store.last_attempts(now=clock())
+        assert set(la) == {"fp-2", "fp-3", "fp-4"}   # 最旧的 fp-1 被淘汰
+        assert la["fp-4"]["ok"] is True
+
+    def test_last_update_existing_fp_no_eviction(self):
+        # 已有条目覆盖更新不触发淘汰（每 fp 仍只留一条）
+        clock = _FakeClock(start=1000.0)
+        store = CooldownStore(max_last_entries=3)
+        store.record_attempt("fp-1", ok=False, status=503, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-2", ok=True, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-3", ok=True, now=clock())
+        clock.sleep(10.0)
+        store.record_attempt("fp-1", ok=True, status=200, now=clock())  # 覆盖
+        la = store.last_attempts(now=clock())
+        assert set(la) == {"fp-1", "fp-2", "fp-3"}
+
     def test_record_attempt_ok_without_status(self):
         clock = _FakeClock()
         store = CooldownStore()

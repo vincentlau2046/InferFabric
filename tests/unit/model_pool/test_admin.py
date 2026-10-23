@@ -364,6 +364,29 @@ class TestGetRuntimeState:
         assert body["raw"]["updated_at"] == "2026-10-23"   # date → ISO 字符串
         _json.dumps(body)   # 不得 TypeError
 
+    def test_get_revision_matches_raw_under_racing_update(self, pm, monkeypatch):
+        # 终审 M6：snapshot() 与 raw_config() 两次取锁之间穿插 update →
+        # 响应携带旧 revision + 新 raw（编辑器以旧基点 POST 新内容 → 反复 409）。
+        # handler 必须走单锁原子读取，使 revision 与 raw 永远同代。
+        reg = pm.pool_registry
+        orig_raw_config = reg.raw_config
+
+        def racing_raw_config():
+            # 模拟并发 update 在 snapshot() 之后、raw_config() 之前落地
+            cfg = _raw_config()
+            cfg["pools"]["fast"]["candidates"].append(
+                {"id": "racer", "priority": 9, "kind": "cloud",
+                 "provider": "prov", "model_id": "cloud-x"})
+            reg.update(cfg, expected_revision=reg.snapshot().revision)
+            return orig_raw_config()   # 返回已推进到新一代的 raw
+
+        monkeypatch.setattr(reg, "raw_config", racing_raw_config)
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools(h, pm)
+        status, body = h.sent[-1]
+        assert status == 200
+        assert body["revision"] == body["raw"]["revision"]   # 同代不变式
+
     def test_get_broken_file_reports_load_error(self, tmp_path):
         reg = PoolRegistry(config_path=tmp_path / "broken.yaml",
                            evidence_path=tmp_path / "e.json")

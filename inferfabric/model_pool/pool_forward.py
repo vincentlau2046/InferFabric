@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 log = logging.getLogger("inferfabric.model_pool.pool_forward")
 
 DEFAULT_COOLDOWN_TTL_S = 60.0
+# 每指纹最近尝试记录上限（终审 M8）：池配置规模远低于此，仅防配置
+# 演变导致的指纹累积
+MAX_LAST_ATTEMPTS = 512
 # 404 隔离 TTL：模型/路由已不存在，长冷却避免每请求都撞 404（终审 #18）
 QUARANTINE_TTL_S = 1800.0
 # 429 无 Retry-After 头时的默认等待（受 deadline 截断）
@@ -44,8 +47,12 @@ class CooldownStore:
     cooling_fingerprints（selector 被动恢复语义不变）。
     """
 
-    def __init__(self, ttl_s: float = DEFAULT_COOLDOWN_TTL_S):
+    def __init__(self, ttl_s: float = DEFAULT_COOLDOWN_TTL_S,
+                 max_last_entries: int = MAX_LAST_ATTEMPTS):
         self._ttl = float(ttl_s)
+        # _last 上限（终审 M8）：指纹随配置演变不断新增，无上限则单调
+        # 增长；超限时按记录时刻淘汰最旧条目
+        self._max_last = max(1, int(max_last_entries))
         self._until: dict[str, float] = {}
         # 冷却原因（v7.1.0 运行态视图）：fp → "cooldown_401"/"cooldown_403"/
         # "quarantine_404"；None = 既有调用未带原因（向后兼容）
@@ -140,8 +147,15 @@ class CooldownStore:
     def record_attempt(self, fingerprint: str, ok: bool,
                        status: int | None = None,
                        now: float | None = None) -> None:
-        """记录 fp 最近一次真实传输尝试（覆盖式，每 fp 只留一条）。"""
+        """记录 fp 最近一次真实传输尝试（覆盖式，每 fp 只留一条）。
+
+        新指纹且已达上限时淘汰最旧条目（终审 M8 — 防单调增长）。
+        """
         with self._lock:
+            if (fingerprint not in self._last
+                    and len(self._last) >= self._max_last):
+                oldest = min(self._last, key=lambda fp: self._last[fp][2])
+                del self._last[oldest]
             self._last[fingerprint] = (bool(ok), status, self._now(now))
 
     def last_attempts(self, now: float | None = None) -> dict[str, dict]:

@@ -131,6 +131,18 @@ class PoolRegistry:
         with self._lock:
             return copy.deepcopy(self._raw) if self._raw is not None else None
 
+    def snapshot_and_raw(self) -> tuple["RegistrySnapshot", dict | None]:
+        """快照 + raw 单锁原子读取（终审 M6）。
+
+        GET /admin/model-pools 需要两者同代：分两次取锁时，中间穿插的
+        update 会让响应携带旧 revision + 新 raw — 编辑器以旧基点 POST
+        新内容，表现为反复 409。
+        """
+        import copy
+        with self._lock:
+            raw = copy.deepcopy(self._raw) if self._raw is not None else None
+            return self._snapshot, raw
+
     # ── 快照 ──
 
     def snapshot(self) -> RegistrySnapshot:
