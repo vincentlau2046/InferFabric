@@ -135,11 +135,15 @@ const fetch = async (url, options) => {
   } else if (route && Array.isArray(route.bodies)) {
     // 时序路由：按命中次序取 body（越界取最后一个）
     r = {status: route.status || 200,
+         statuses: route.statuses,   // P1 Task 3 加法：保留时序 status
          body: route.bodies[Math.min(seen[mkey] - 1, route.bodies.length - 1)]};
   } else {
     r = route;
   }
-  const status = r.status;
+  // P1 Task 3 加法：statuses 时序（按命中次序取 status，越界取最后一个）
+  const status = Array.isArray(r.statuses)
+    ? r.statuses[Math.min(seen[mkey] - 1, r.statuses.length - 1)]
+    : r.status;
   return {
     ok: status >= 200 && status < 300,
     status: status,
@@ -544,6 +548,83 @@ class TestMotionTokens:
         block = m.group(1)
         assert "animation: none" in block
         assert "transition: none" in block
+
+
+# ── UI/UX P1 Task 3：A3 错误即导航（常驻 banner + 行动入口）──
+# 契约：
+# - doMpToggle 409/非 409 失败、doMpWizardSubmit 失败、doMpUndo 失败 →
+#   mp-action-banner（原因 + data-mp-banner-action 行动按钮 +
+#   data-mp-banner-dismiss 关闭）；toast 保留（即时反馈）
+# - 成功操作清除 banner（常驻但非永久）
+# - doMpBannerAction 重试原操作；doMpBannerDismiss 清除 + 重渲染
+
+
+class TestP1ErrorBanner:
+    def test_toggle_409_renders_action_banner(self, run_panel):
+        routes = _routes(toggle_status=409, toggle_body={
+            "error": "revision conflict", "status": "revision_conflict",
+            "current_revision": 9})
+        out = run_panel(routes, toggle={"pool": "fast", "enable": False})
+        html = out["htmlFinal"]
+        assert "mp-action-banner" in html
+        assert "data-mp-banner-action" in html
+        assert "data-mp-banner-dismiss" in html
+        assert "冲突" in html
+        # toast 保留（即时反馈），banner 承担常驻
+        assert any("冲突" in t["message"] for t in out["toasts"])
+
+    def test_toggle_500_renders_action_banner(self, run_panel):
+        out = run_panel(_routes(toggle_status=500, toggle_body={"error": "boom"}),
+                        toggle={"pool": "fast", "enable": False})
+        assert "mp-action-banner" in out["htmlFinal"]
+
+    def test_banner_action_retries_and_success_clears(self, run_panel):
+        routes = _routes()
+        # 首次 409、重试成功：statuses 按命中次序取（harness Task 3 加法）
+        routes["/admin/model-pools/toggle"] = {
+            "statuses": [409, 200],
+            "bodies": [{"error": "revision conflict",
+                        "status": "revision_conflict"},
+                       {"status": "updated", "revision": 4,
+                        "pool": "fast", "enabled": False}]}
+        out = run_panel(routes, toggle={"pool": "fast", "enable": False},
+                        actions=[{"fn": "doMpBannerAction"}])
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools/toggle"]
+        assert len(posts) == 2          # 原操作 + banner 重试
+        assert any(t["kind"] == "ok" for t in out["toasts"])
+        # 成功 → banner 清除
+        assert "mp-action-banner" not in out["htmlFinal"]
+
+    def test_banner_dismiss_clears_banner(self, run_panel):
+        routes = _routes(toggle_status=500, toggle_body={"error": "boom"})
+        out = run_panel(routes, toggle={"pool": "fast", "enable": False},
+                        actions=[{"fn": "doMpBannerDismiss"}])
+        assert "mp-action-banner" not in out["htmlFinal"]
+
+    def test_wizard_submit_failure_renders_banner(self, run_panel):
+        routes = _wizard_routes()
+        routes["POST /admin/model-pools"] = {"status": 500,
+                                             "body": {"error": "boom"}}
+        out = run_panel(routes, actions=[{"fn": "doMpWizardSubmit"}])
+        assert "mp-action-banner" in out["htmlFinal"]
+
+    def test_undo_failure_renders_banner(self, run_panel):
+        # 成功 apply（置 _undo）→ 回滚 409 → banner
+        routes = _editor_routes()
+        routes["POST /admin/model-pools"] = {
+            "statuses": [200, 409],
+            "bodies": [{"status": "updated", "revision": 4},
+                       {"status": "revision_conflict", "current_revision": 9}]}
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+            {"fn": "doMpUndo", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert "mp-action-banner" in out["htmlFinal"]
 
 
 class TestCatalogConsumption:

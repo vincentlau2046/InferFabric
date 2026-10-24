@@ -50,6 +50,9 @@
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
   var _edit = null;
   var _undo = null;
+  // A3 错误即导航（UI/UX P1 Task 3）：常驻行动横幅 — toast 即时反馈，
+  // banner 承担「常驻 + 去哪修」；action = {label, run} 闭包（重试原操作）
+  var _actionError = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -221,6 +224,42 @@
     return html;
   }
 
+  /* ── A3 行动横幅（Task 3）：常驻 + 去哪修；样式复用 mp-error-banner ── */
+  function setActionError(message, hint, action) {
+    _actionError = {message: message, hint: hint || null, action: action || null};
+    return renderModelPools();   // 立即可见（不等 5s 轮询）
+  }
+
+  function clearActionError() {
+    _actionError = null;
+  }
+
+  function bannerHtml() {
+    var a = _actionError;
+    var html = '<div class="mp-error-banner mp-action-banner" id="mp-action-banner">'
+      + '<p><span class="mp-action-msg">' + esc(a.message) + '</span>'
+      + (a.hint ? ' <span class="mp-action-hint">' + esc(a.hint) + '</span>' : '')
+      + '</p>';
+    if (a.action) {
+      html += '<button type="button" data-mp-banner-action="1">'
+        + esc(a.action.label || '重试') + '</button>';
+    }
+    html += '<button type="button" data-mp-banner-dismiss="1">关闭</button>';
+    return html + '</div>';
+  }
+
+  async function doMpBannerAction() {
+    if (!_actionError || !_actionError.action) return;
+    var run = _actionError.action.run;
+    _actionError = null;   // 先清（重试成功保持清；失败会重新置）
+    await run();
+  }
+
+  function doMpBannerDismiss() {
+    _actionError = null;
+    return renderModelPools();
+  }
+
   /* ── 渲染（拉取：定义 + 双协议状态 + 运行态；三态空态分支） ── */
   async function renderModelPools() {
     var box = $('mpPools');
@@ -275,6 +314,7 @@
       var stPools = (st && st.pools) || {};
       var rtPools = (rt && rt.pools) || {};
       var html = '';
+      if (_actionError) html += bannerHtml();   // A3：渲染池列表前输出行动横幅
       names.forEach(function (n) {
         html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
       });
@@ -305,20 +345,28 @@
       var d = null;
       try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
       if (res.ok) {
+        clearActionError();
         _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
         UI.toast('已' + (enable ? '启用' : '停用') + ' iff/' + pool, 'ok');
         await renderModelPools();
         return;
       }
       if (res.status === 409) {
-        // revision 冲突：配置已被其他修改更新 — 提示 + 重新拉取让用户看到最新状态
+        // revision 冲突：配置已被其他修改更新 — 常驻横幅（重试原操作）+ 重新拉取
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpToggle(pool, enable); }});
         UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
-        await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('开关失败 · HTTP ' + res.status), 'error');
+      var msg = (d && d.error) || ('开关失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
     } catch (e) {
       UI.toast('开关请求异常：' + (e && e.message), 'error');
+      await setActionError('开关请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
     }
   }
 
@@ -404,7 +452,8 @@
   function renderWizardHtml() {
     var box = $('mpPools');
     if (!box || !_wizard) return;
-    var html = '<div class="mp-wizard">'
+    var html = _actionError ? bannerHtml() : '';   // A3：向导模式同样常驻横幅
+    html += '<div class="mp-wizard">'
       + '<p class="mp-wizard-intro">逻辑模型池尚未配置。为常用角色创建池后，'
       + 'agent 产品只需配置一次 <span class="mono">iff/&lt;角色&gt;</span>，'
       + '日后换模型在这里改，客户端零改动。</p>';
@@ -497,6 +546,7 @@
       if (_wizard !== session) {
         // 向导态已变（被重渲染清除/重建）— 只提示 + 刷新，不碰当前状态
         if (res.ok) {
+          clearActionError();
           UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
           await renderModelPools();
         }
@@ -504,18 +554,26 @@
       }
       if (res.ok) {
         _wizard = null;
+        clearActionError();
         UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
         await renderModelPools();
         return;
       }
       if (res.status === 409) {
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpWizardSubmit(); }});
         UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
-        await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('创建失败 · HTTP ' + res.status), 'error');
+      var msg = (d && d.error) || ('创建失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpWizardSubmit(); }});
     } catch (e) {
       UI.toast('创建请求异常：' + (e && e.message), 'error');
+      await setActionError('创建请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpWizardSubmit(); }});
     }
   }
 
@@ -888,18 +946,26 @@
       }
       if (res.ok) {
         _undo = null;
+        clearActionError();
         UI.toast('已回滚到上次编辑前的配置', 'ok');
         await renderModelPools();
         return;
       }
       if (res.status === 409) {
+        await setActionError('回滚遇到冲突（配置又有新修改）',
+          '已刷新，请重试',
+          {label: '重试', run: function () { return doMpUndo(); }});
         UI.toast('回滚遇到冲突（配置又有新修改），已刷新，请重试', 'error');
-        await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('回滚失败 · HTTP ' + res.status), 'error');
+      var msg = (d && d.error) || ('回滚失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpUndo(); }});
     } catch (e) {
       UI.toast('回滚请求异常：' + (e && e.message), 'error');
+      await setActionError('回滚请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpUndo(); }});
     }
   }
 
@@ -1046,6 +1112,9 @@
   function onBoxClick(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
+    // A3：行动横幅（重试原操作 / 关闭）
+    if (t.getAttribute('data-mp-banner-action')) { doMpBannerAction(); return; }
+    if (t.getAttribute('data-mp-banner-dismiss')) { doMpBannerDismiss(); return; }
     var edit = t.getAttribute('data-mp-edit');
     if (edit) { doMpEdit(edit); return; }
     var snip = t.getAttribute('data-mp-snippet');
@@ -1093,6 +1162,8 @@
   window.doMpToggle = doMpToggle;
   window.doMpEdit = doMpEdit;
   window.doMpUndo = doMpUndo;
+  window.doMpBannerAction = doMpBannerAction;
+  window.doMpBannerDismiss = doMpBannerDismiss;
   window.mpEditReplace = mpEditReplace;
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
