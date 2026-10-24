@@ -1,17 +1,20 @@
 # Model Affinity — static routing hints for proxy
 # Maps request model names to routing targets when no local model matches.
-# Used by _handle_messages() and handle_chat() to resolve cloud-only models.
+#
+# ⚠ 注意（2026-10-17 清理）：当前 live 路由实际由 ~/.inferfabric/cloud_provider.yaml
+#   的 CloudDiscovery 决定；本文件的消费端 load_model_affinity() 目前无调用方，
+#   属于静态提示文件。模型名必须与 cloud_provider.yaml / 百度 token plan 官方
+#   model_id 保持一致，否则只会误导排查。
+#
+# 2026-10-17: 旧 Baidu Coding Plan 模型名（deepseek-v4-flash / deepseek-v4-pro /
+#   glm-5 / glm-5.1 / glm-5-plus / ernie-* 等）已全部失效，替换为 token plan 官方模型。
 
-# Baidu Qianfan cloud models — always route to Baidu API
-baidu:
-  - "deepseek-v4-flash"
-  - "deepseek-v4-pro"
-  - "glm-5"
-  - "glm-5.1"
-  - "glm-5-plus"
-  - "qianfan-code-latest"
-  - "ernie-4.0"
-  - "ernie-3.5"
+# Baidu Qianfan Token Plan 云端模型 — 目标 provider 见 cloud_provider.yaml (Qianfan-Token)
+Qianfan-Token:
+  - "glm-5.3"
+  - "glm-5.3-flash"
+  - "deepseek-v4-pro-0813"
+  - "deepseek-v4.1-flash"
 
 # Future: add other cloud providers here
 # ali_cloud:
