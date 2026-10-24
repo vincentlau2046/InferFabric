@@ -56,7 +56,7 @@
   // B1 局部渲染（UI/UX P1 Task 4）：结构签名 + 定点更新 + 本地倒计时
   var _lastSig = null;    // 最近一次整块重建时的结构签名
   var _cd = {};           // 'pool|candId' → {pool, candId, total, base, rt}
-  var _cdElapsed = 0;     // runtime 拉取后流逝的本地秒数（1s interval 递增）
+  var _rtAt = 0;          // runtime 拉取时刻（Date.now()，倒计时锚点，评审 I7）
   var _cdTimer = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
@@ -151,13 +151,14 @@
         }).join('')
       + '</span>'
       + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
-      + esc(c.id) + '">' + esc(runtimeBadgeText(rt));
+      + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>';
+    // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
     if (rt && rt.cooling) {
-      html += ' <span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
+      html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
         + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
         + esc(c.id) + '"></span>';
     }
-    html += '</span></div>';
+    html += '</div>';
     return html;
   }
 
@@ -235,18 +236,44 @@
 
   /* ── B1 局部渲染（Task 4）：结构签名 + applyDynamic 定点更新 + 本地倒计时 ── */
 
-  // 结构签名：池名序列 + 每池候选 id 序列 + enabled + issues 数。
+  // 结构签名（评审 I2/I3/I4 扩展）：池名 + enabled + issues 全文 +
+  // 每候选（id/kind/优先级/目标/声明协议/能力/冷却在否）+ 每协议
+  // （chosen + decisions 全文）+ 冷却在否。运行态展示字段 applyDynamic
+  // 不全更新的（issues/target/decisions/环/降级）一律进签名 → 变化即重建。
   // 签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁），只走 applyDynamic。
-  function structSig(def) {
+  function structSig(def, stPools, rtPools) {
     return Object.keys(def.pools || {}).map(function (n) {
       var p = def.pools[n];
-      return n + ':' + (p.enabled ? 1 : 0) + ':' + (p.issues || []).length
-        + ':' + (p.candidates || []).map(function (c) { return c.id; }).join(',');
-    }).join('|');
+      var stP = (stPools || {})[n] || {};
+      var rtP = (rtPools || {})[n] || {};
+      var rtById = {};
+      (rtP.candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
+      return n + ':' + (p.enabled ? 1 : 0)
+        + ':' + (p.issues || []).join(';')
+        + ':' + (p.candidates || []).map(function (c) {
+            var rt = rtById[c.id];
+            var tgt = c.target
+              || (c.kind === 'local' ? (c.model_name || '')
+                  : ((c.provider || '') + '/' + (c.model_id || '')));
+            return [c.id, c.kind || '', c.priority || 0, tgt,
+                    (c.declared_protocols || []).join(','),
+                    (c.features || []).join(','),
+                    (rt && rt.cooling) ? 'cool' : 'live'].join('~');
+          }).join(',')
+        + ':' + ['openai', 'anthropic'].map(function (proto) {
+            var pv = (stP.protocols || {})[proto] || {};
+            // chosen 不进签名（applyDynamic 定点更新）；decisions 进签名
+            //（评审 I4 — 纳入/排除原因变化必须重建，否则解释停留首屏快照）
+            return proto + '>' + (pv.decisions || []).map(function (d) {
+                  return d.id + (d.included ? '+' : '-') + (d.reason || '');
+                }).join(',');
+          }).join('|');
+    }).join('#');
   }
 
-  // 冷却快照：首见锚定总时长 total；runtime 重取 → base 重锚 + 本地流逝清零
-  //（服务端 remaining_s 在刷新时是权威值）；冷却结束的条目清除。
+  // 冷却快照：首见锚定总时长 total；runtime 重取 → base 重锚（评审 I8a：
+  // 更长剩余 = 新一轮冷却 → 重锚 total，环形百分比不超 100%）+ 锚点时刻刷新；
+  // 冷却结束的条目清除。
   function cdSnapshot(rtPools) {
     var live = {};
     Object.keys(rtPools || {}).forEach(function (n) {
@@ -258,13 +285,16 @@
           _cd[key] = {pool: n, candId: rc.id, total: rc.cooling.remaining_s,
                       base: rc.cooling.remaining_s, rt: rc};
         } else {
+          if (rc.cooling.remaining_s > _cd[key].base) {
+            _cd[key].total = rc.cooling.remaining_s;
+          }
           _cd[key].base = rc.cooling.remaining_s;
           _cd[key].rt = rc;
         }
       });
     });
     Object.keys(_cd).forEach(function (k) { if (!live[k]) delete _cd[k]; });
-    _cdElapsed = 0;
+    _rtAt = Date.now();   // 评审 I7：以 runtime 拉取时刻为锚
   }
 
   // 按 id 定点更新（签名不变的轮询路径）：灯 className / 状态灯 / 运行态文本 /
@@ -305,13 +335,13 @@
     }
   }
 
-  // 本地倒计时滴答（1s interval）：以 runtime 拉取时刻为锚递减 remaining_s，
-  // 更新 mp-rt-* 文本与环形 --p，不发出任何 fetch
-  function applyCountdown() {
+  // 本地倒计时（1s interval）：以 runtime 拉取时刻为锚按流逝秒数递减
+  // remaining_s，更新 mp-rt-* 文本与环形 --p，不发出任何 fetch
+  function applyCountdown(elapsed) {
     Object.keys(_cd).forEach(function (key) {
       var e = _cd[key];
       if (!e.rt) return;
-      var remaining = Math.max(0, e.base - _cdElapsed);
+      var remaining = Math.max(0, e.base - elapsed);
       var rt2 = Object.assign({}, e.rt, {
         cooling: Object.assign({}, e.rt.cooling, {remaining_s: remaining}),
       });
@@ -319,8 +349,9 @@
       if (rtEl) rtEl.textContent = runtimeBadgeText(rt2);
       var ring = $('mp-ring-' + e.pool + '-' + e.candId);
       if (ring && ring.style && ring.style.setProperty) {
+        // (e.total || 1)：remaining_s=0 首见时 total=0，除零防护（评审 I8b）
         ring.style.setProperty('--p',
-          String(Math.round(remaining / e.total * 100)));
+          String(Math.round(remaining / (e.total || 1) * 100)));
       }
     });
   }
@@ -331,8 +362,11 @@
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
       if (_wizard) return;
-      _cdElapsed += 1;
-      applyCountdown();
+      // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
+      // 计时器被节流，锚点差值仍反映真实时间）
+      var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
+      if (elapsed <= 0) return;
+      applyCountdown(elapsed);
     } catch (e) { /* 倒计时失败静默 — 下个滴答重试 */ }
   }
 
@@ -388,6 +422,7 @@
       var stRes = await fetch(STATUS_URL, { headers: UI.adminHeaders() });
       var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
       if (!defRes.ok || !stRes.ok) {
+        _lastSig = null;   // 评审 I5：错误页替换了面板 → 失效签名，恢复后必须重建
         box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
           + esc(defRes.status) + '/' + esc(stRes.status) + '</p>';
         return;
@@ -411,6 +446,7 @@
       // 残留 _wizard 既挡轮询又让「创建这些池」提交陈旧选择（终审修复）
       _wizard = null;   // 向导分支内 renderWizard() 会重新建立
       if (def.load_error) {
+        _lastSig = null;   // 评审 I5：错误横幅替换面板 → 失效签名
         box.innerHTML = '<div class="mp-error-banner">'
           + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
           + '<p class="mono">' + esc(def.load_error) + '</p>'
@@ -421,11 +457,13 @@
       var names = Object.keys(def.pools || {});
       // 2) 从未配置（无文件）→ 初始化向导（Task 7）
       if (def.configured === false && def.raw == null && !names.length) {
+        _lastSig = null;   // 评审 I5：向导页替换面板 → 失效签名，恢复后必须重建
         await renderWizard();
         return;
       }
       // 3) 配置了零个池 → 普通空态
       if (!names.length) {
+        _lastSig = null;
         box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
         return;
       }
@@ -433,8 +471,12 @@
       var rtPools = (rt && rt.pools) || {};
       cdSnapshot(rtPools);
       // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
-      // 不重写 innerHTML（轮询零闪烁）；banner 有无计入签名（横幅须可见）
-      var sig = structSig(def) + '|' + (_actionError ? 'banner' : '');
+      // 不重写 innerHTML（轮询零闪烁）；banner 消息/提示计入签名（评审 I6 —
+      // 内容变了的横幅必须重建，否则旧原因配新行动闭包）
+      var sig = structSig(def, stPools, rtPools) + '|'
+        + (_actionError
+            ? 'banner:' + _actionError.message + '|' + (_actionError.hint || '')
+            : '');
       if (sig === _lastSig) {
         applyDynamic(def, stPools, rtPools);
         return;
@@ -448,6 +490,7 @@
       box.innerHTML = html;
       startCountdown();
     } catch (e) {
+      _lastSig = null;   // 评审 I5：异常页替换面板 → 失效签名
       box.innerHTML = '<p class="mp-empty">拉取异常：' + esc(e && e.message) + '</p>';
     } finally {
       _loading = false;

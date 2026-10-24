@@ -121,6 +121,8 @@ const navigator = {
 };
 const calls = [];
 const seen = {};
+let fakeNow = 0;
+const timeStepMs = input.timeStepMs || 1000;
 const fetch = async (url, options) => {
   options = options || {};
   calls.push({url, method: options.method || 'GET',
@@ -157,6 +159,8 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   navigator,
   location: input.location || {protocol: 'http:', hostname: '127.0.0.1'},
   setInterval: (fn, ms) => { timers.push({fn, ms}); return timers.length; },
+  // 修复 pass 加法：可控时钟（倒计时按真实流逝时间锚定的测试用）
+  Date: {now: () => fakeNow},
   console,
 });
 (async () => {
@@ -177,9 +181,10 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
     const p = fn.apply(window, act.args || []);
     if (!act.noAwait) await p;
   }
-  // 模拟 5s 轮询滴答（每次滴答触发全部已注册 interval）
+  // 模拟 5s 轮询滴答（每次滴答触发全部已注册 interval；
+  // 每个计时器触发前推进 timeStepMs 毫秒 —— 模拟真实流逝）
   for (let i = 0; i < (input.pollTicks || 0); i++) {
-    for (const t of timers) { await t.fn(); }
+    for (const t of timers) { fakeNow += timeStepMs; await t.fn(); }
   }
   const modalHtml = elements['mpModal'] ? elements['mpModal'].innerHTML : '';
   const previewHtml = elements['mpPreview'] ? elements['mpPreview'].innerHTML : '';
@@ -208,7 +213,8 @@ def run_panel(tmp_path):
     harness.write_text(_HARNESS, encoding="utf-8")
 
     def run(routes, toggle=None, actions=None, location=None,
-            poll_ticks=0, store_state=None, document_hidden=False):
+            poll_ticks=0, store_state=None, document_hidden=False,
+            time_step_ms=None):
         proc = subprocess.run(
             [node, str(harness), str(PANEL_JS)],
             input=json.dumps({"routes": routes, "toggle": toggle,
@@ -216,7 +222,8 @@ def run_panel(tmp_path):
                               "location": location,
                               "pollTicks": poll_ticks,
                               "storeState": store_state,
-                              "documentHidden": document_hidden}),
+                              "documentHidden": document_hidden,
+                              "timeStepMs": time_step_ms}),
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0, proc.stderr
@@ -688,6 +695,115 @@ class TestP1PartialRender:
         # 倒计时不发出任何 fetch：初次渲染 3 GET + 1 次 poll tick 3 GET
         gets = [c for c in out["calls"] if c["method"] == "GET"]
         assert len(gets) == 6
+
+
+# ── UI/UX P1 修复 pass（交叉评审 glm-5.3-flash tathr/gpt-6.1-sol 发现，逐条 RED→GREEN）──
+# Important 8 条：ring 被 textContent 删除 / 冷却转换不增删环与降级样式 /
+# sig 不含 target 等字段 / decisions 不在 sig / 失败路径不失效 _lastSig /
+# banner 内容变化不重建 / 倒计时未按真实时间锚定 / 冷却重锚 + 除零。
+# Minor 2 条缓期（wizard/undo catch 会话校验、harness 子节点保真度）。
+
+
+class TestP1FixPass:
+    def test_ring_is_sibling_of_runtime_text(self, run_panel):
+        # I1：mp-rt textContent 更新不得删除 mp-ring —— 环必须是兄弟节点
+        out = run_panel(_ops_routes())
+        m = re.search(r'id="mp-rt-fast-loc">[^<]*</span>\s*'
+                      r'<span class="mp-ring" id="mp-ring-fast-loc"',
+                      out["html"])
+        assert m, "ring must be a sibling after the closing mp-rt span"
+
+    def test_cooling_start_adds_ring_and_degraded(self, run_panel):
+        # I2：冷却开始（运行态变化）→ 重建：出现环 + 虚线降级
+        rt2 = json.loads(json.dumps(_RUNTIME_BODY))
+        for rc in rt2["pools"]["fast"]["candidates"]:
+            rc["cooling"] = None
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            {"revision": 3, "pools": {"fast": {"candidates": [
+                {"id": "loc", "kind": "local", "target": "qwen-small",
+                 "active": True, "cooling": None, "last_attempt": None},
+                {"id": "cld", "kind": "cloud", "target": "prov/cloud-m",
+                 "active": False, "cooling": None, "last_attempt": None}]}}},
+            _RUNTIME_BODY]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "mp-ring-fast-loc" in out["htmlFinal"]
+        assert "mp-cand-degraded" in out["htmlFinal"]
+
+    def test_cooling_end_removes_ring_and_degraded(self, run_panel):
+        # I2：冷却结束 → 环与虚线降级消失
+        rt_none = json.loads(json.dumps(_RUNTIME_BODY))
+        for rc in rt_none["pools"]["fast"]["candidates"]:
+            rc["cooling"] = None
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            _RUNTIME_BODY, rt_none]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "mp-ring-fast-loc" not in out["htmlFinal"]
+        assert "mp-cand-degraded" not in out["htmlFinal"]
+
+    def test_candidate_target_change_rebuilds(self, run_panel):
+        # I3：sig 不含 target → 外部改目标后刷新仍显示旧目标
+        p2 = json.loads(json.dumps(_POOLS_BODY))
+        p2["pools"]["fast"]["candidates"][0]["target"] = "qwen-big"
+        routes = _ops_routes()
+        routes["/admin/model-pools"] = {"status": 200, "bodies": [
+            _POOLS_BODY, p2]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "qwen-big" in out["htmlFinal"]
+
+    def test_fetch_error_invalidates_sig(self, run_panel):
+        # I5：失败路径写 innerHTML 后必须失效 _lastSig，否则恢复后停留错误页
+        routes = _ops_routes()
+        routes["/admin/model-pools"] = {"statuses": [200, 500, 200],
+                                        "bodies": [_POOLS_BODY, {}, _POOLS_BODY]}
+        out = run_panel(routes, poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "qwen-small" in out["htmlFinal"]
+        assert "mp-action-banner" not in out["htmlFinal"]
+
+    def test_banner_message_change_rebuilds(self, run_panel):
+        # I6：banner 内容变化 → 重建（否则旧原因 + 新行动闭包不一致）
+        routes = _routes()
+        routes["/admin/model-pools/toggle"] = {
+            "statuses": [500, 500],
+            "bodies": [{"error": "boom A"}, {"error": "boom B"}]}
+        out = run_panel(routes, toggle={"pool": "fast", "enable": False},
+                        actions=[{"fn": "doMpBannerAction"}])
+        assert "boom B" in out["htmlFinal"]
+        assert "boom A" not in out["htmlFinal"]
+
+    def test_countdown_anchored_to_real_elapsed_time(self, run_panel):
+        # I7：以 runtime 拉取时刻为锚按真实流逝递减（每计时器 +5s）
+        out = run_panel(_ops_routes(), poll_ticks=1, time_step_ms=5000,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "0:37" in out["dyn"]["mp-rt-fast-loc"]["textContent"], \
+            out["dyn"]["mp-rt-fast-loc"]["textContent"]
+        assert int(out["dyn"]["mp-ring-fast-loc"]["style"]["--p"]) == 88
+
+    def test_cooling_reanchor_on_longer_cycle(self, run_panel):
+        # I8a：新一轮更长冷却 → 重锚总时长（--p 不超 100）
+        rt2 = json.loads(json.dumps(_RUNTIME_BODY))
+        rt2["pools"]["fast"]["candidates"][0]["cooling"]["remaining_s"] = 50.0
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            _RUNTIME_BODY, rt2]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert int(out["dyn"]["mp-ring-fast-loc"]["style"]["--p"]) == 98  # 49/50
+
+    def test_cooling_zero_remaining_no_nan(self, run_panel):
+        # I8b：remaining_s=0 → --p 为 0 而非 NaN（除零防护）
+        rt0 = json.loads(json.dumps(_RUNTIME_BODY))
+        rt0["pools"]["fast"]["candidates"][0]["cooling"]["remaining_s"] = 0.0
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "body": rt0}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert out["dyn"]["mp-ring-fast-loc"]["style"]["--p"] == "0"
 
 
 class TestCatalogConsumption:
