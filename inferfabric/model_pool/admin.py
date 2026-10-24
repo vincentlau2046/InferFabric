@@ -16,6 +16,7 @@
 import datetime
 import logging
 
+from inferfabric.model_pool.catalog import build_catalog
 from inferfabric.model_pool.config import load_pools_dict
 from inferfabric.model_pool.dispatch import runtime_view
 from inferfabric.model_pool.registry import RevisionConflict
@@ -234,6 +235,17 @@ def handle_post_model_pools_toggle(handler, pm):
         return
     handler._send_json({"status": "updated", "revision": snap.revision,
                         "pool": pool_name, "enabled": enabled})
+
+
+def handle_get_model_pools_catalog(handler, pm):
+    """GET /admin/model-pools/catalog — 池候选目录（v7.1.2，只读）。
+
+    运营视图唯一的候选元数据总线：向导/编辑器下拉的数据源（替代前端
+    自刮 /models 与 /admin/cloud/providers）。local=llm 模型（served_name），
+    cloud=routable 云模型；protocols 来自发现结果/引擎映射。Phase 2/3
+    在条目上做加法（latency/degraded），前端选择键编码不变。
+    """
+    handler._send_json(build_catalog(pm))
 
 
 def handle_get_model_pools_runtime(handler, pm):
