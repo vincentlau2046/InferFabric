@@ -7,7 +7,7 @@
 # 不要只看本 YAML —— 场景已应用时本 YAML 数值是 baseline，不等于 live。
 #
 # 场景一览（定义在 models.d/scenarios.yaml 侧车，本文件不内联 presets）：
-#   default     C4 · 155000 · draft1 · kv 632000（= 本文件值；池顶 620032，满载余量 1.9%）
+#   default     C4 · 200000 · draft2 · kv 632000（= 本文件值；池顶 800000，满载超卖 26.6%，3 路并发内无忧）
 #   short-ctx   C6 · 131072 · draft2 · kv 590000（低延迟；池顶 786432，超卖 25.0%）
 #   small-batch C3 · 262144 · draft3 · kv 645000（顶窗长文档；池顶 786432，超卖 18.0%）
 #   big-batch   C5 · 168000 · draft1 · kv 612000（长窗批处理；池顶 840000，超卖 27.1%）
@@ -28,16 +28,16 @@ ninfer:
   docker_image: ninfer:auto
   port: 8007
   container_name: iff-ninfer-qwen38
-  max_context: 155000
+  max_context: 200000
   kv_capacity: 632000
   kv_dtype: nvfp4
   weight_precision: NVFP4
   max_concurrency: 4
-  default_max_tokens: 24576
+  default_max_tokens: 32768
   prefill_chunk: 2048
   pending_timeout_ms: 600000
   enable_mtp: true
-  draft_tokens: 1
+  draft_tokens: 2
   enable_lm_head_draft: false
   startup_timeout: 120
   model_id: Qwen38-27B-TXT
