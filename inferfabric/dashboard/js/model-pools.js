@@ -34,6 +34,7 @@
   var POOLS_URL = '/admin/model-pools';
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
+  var CATALOG_URL = '/admin/model-pools/catalog';
   var TOGGLE_URL = '/admin/model-pools/toggle';
   var VALIDATE_URL = '/admin/model-pools/validate';
   var DRYRUN_URL = '/admin/model-pools/dry-run';
@@ -303,34 +304,15 @@
   ];
 
   // 模型目录（/models 全量条目 + 云 provider 模型，best-effort）
+  // 向导消费形态：本地条目对象（预填启发式用 active/context_window）+ 云选择键
   async function fetchWizardModels() {
-    var entries = [];
-    try {
-      var r = await fetch('/models', { headers: UI.adminHeaders() });
-      if (r.ok) {
-        var d = await r.json();
-        entries = Array.isArray(d) ? d : (d.models || []);
-      }
-    } catch (e) { /* 目录降级 → 手填 */ }
-    if (!Array.isArray(entries)) entries = [];
-    var catalog = { local: [], cloud: [] };
-    entries.forEach(function (m) {
-      if (m && m.name && m.model_type === 'llm') catalog.local.push(m);
-    });
-    try {
-      var r2 = await fetch('/admin/cloud/providers', { headers: UI.adminHeaders() });
-      if (r2.ok) {
-        var d2 = await r2.json();
-        (((d2 && d2.providers) || [])).forEach(function (pv) {
-          var pname = pv && (pv.name || pv.provider);
-          var models = (pv && (pv.models || [])) || [];
-          models.forEach(function (mid) {
-            catalog.cloud.push(pname + '/' + mid);
-          });
-        });
-      }
-    } catch (e) { /* 目录降级 */ }
-    return catalog;
+    var cat = null;
+    try { cat = await fetchCatalog(); } catch (e) { cat = null; }
+    if (!cat) {
+      return { local: [], cloud: [], cloudValues: [], index: {} };
+    }
+    return { local: cat.local, cloud: cat.cloud, cloudValues: cat.cloudValues,
+             index: cat.index };
   }
 
   // 预填启发式（可改；仅建议值）：fast=活跃小模型 / premium=大上下文本地，
@@ -340,7 +322,7 @@
     var act = llms.filter(function (m) { return !!m.active; });
     function pick(list, wantMax) {
       if (!list.length) {
-        return catalog.cloud.length ? 'cloud:' + catalog.cloud[0] : null;
+        return catalog.cloudValues.length ? catalog.cloudValues[0] : null;
       }
       var sorted = list.slice();
       var allSized = sorted.every(function (m) {
@@ -393,8 +375,8 @@
           + '>本地 · ' + esc(m.name) + (m.active ? '（服务中）' : '')
           + '</option>';
       });
-      _wizard.catalog.cloud.forEach(function (n) {
-        var v = 'cloud:' + n;
+      _wizard.catalog.cloudValues.forEach(function (v) {
+        var n = v.slice('cloud:'.length);
         opts += '<option value="' + esc(v) + '"'
           + (st.selected === v ? ' selected' : '')
           + '>云 · ' + esc(n) + '</option>';
@@ -444,7 +426,7 @@
     Object.keys(_wizard.roles).forEach(function (role) {
       var sel = _wizard.roles[role].selected;
       if (!sel) return;   // 无候选的角色跳过
-      var c = candFromCatalogValue(sel, role + '-1');
+      var c = candFromCatalogValue(sel, role + '-1', _wizard.catalog);
       c.priority = 1;
       var sk = newPoolSkeleton();
       sk.candidates = [c];
@@ -494,38 +476,46 @@
   }
 
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
+  /* 候选目录（v7.1.2）：唯一数据源 = GET /admin/model-pools/catalog。
+     旧版前端自行刮 /models 与 /admin/cloud/providers 逆向猜 schema，
+     云目录曾因字段不符静默断掉 — 目录是池域概念，由后端权威构建。 */
+  async function fetchCatalog() {
+    var r = await fetch(CATALOG_URL, { headers: UI.adminHeaders() });
+    if (!r.ok) return null;
+    var d = await r.json();
+    if (!d || !Array.isArray(d.local) || !Array.isArray(d.cloud)) return null;
+    // 派生选择键（HTML select value）：'local:<served_name>' /
+    // 'cloud:<provider>/<model_id>'；index 供候选生成查协议/能力
+    var index = {};
+    d.local.forEach(function (e) {
+      e._value = 'local:' + e.name;
+      index[e._value] = e;
+    });
+    d.cloud.forEach(function (e) {
+      e._value = 'cloud:' + e.provider + '/' + e.model_id;
+      index[e._value] = e;
+    });
+    d.localValues = d.local.map(function (e) { return e._value; });
+    d.cloudValues = d.cloud.map(function (e) { return e._value; });
+    d.index = index;
+    return d;
+  }
+
+  // 编辑器消费形态：字符串数组（下拉）+ index（候选生成）
   async function fetchCandidateCatalog() {
-    var out = { local: [], cloud: [] };
-    try {
-      var r = await fetch('/models', { headers: UI.adminHeaders() });
-      if (r.ok) {
-        var d = await r.json();
-        var list = Array.isArray(d) ? d : (d.models || []);
-        (Array.isArray(list) ? list : []).forEach(function (m) {
-          var name = (m && (m.name || m.served_name || m.model)) || null;
-          if (name) out.local.push(String(name));
-        });
-      }
-    } catch (e) { /* 目录降级 */ }
-    try {
-      var r2 = await fetch('/admin/cloud/providers', { headers: UI.adminHeaders() });
-      if (r2.ok) {
-        var d2 = await r2.json();
-        var provs = (d2 && (d2.providers || [])) || [];
-        provs.forEach(function (pv) {
-          var pname = pv && (pv.name || pv.provider);
-          var models = (pv && (pv.models || [])) || [];
-          models.forEach(function (mid) {
-            out.cloud.push(pname + '/' + mid);
-          });
-        });
-      }
-    } catch (e) { /* 目录降级 */ }
-    return out;
+    var cat = await fetchCatalog();
+    if (!cat) return null;
+    return { localValues: cat.localValues, cloudValues: cat.cloudValues,
+             index: cat.index };
   }
 
   // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
-  function candFromCatalogValue(spec, id) {
+  function candFromCatalogValue(spec, id, catalog) {
+    var entry = (catalog && catalog.index) ? catalog.index[spec] : null;
+    // 协议/能力来自目录（云=发现结果，本地=引擎映射）；目录缺失时保守
+    // 只声明 openai（declared 态，证据系统可探实）
+    var protocols = (entry && entry.protocols) || ['openai'];
+    var features = (entry && entry.features) || [];
     var i = spec.indexOf(':');
     var kind = spec.slice(0, i);
     var target = spec.slice(i + 1);
@@ -533,10 +523,10 @@
       var j = target.indexOf('/');
       return { id: id, kind: 'cloud', provider: target.slice(0, j),
                model_id: target.slice(j + 1),
-               declared_protocols: ['openai'], features: [] };
+               declared_protocols: protocols, features: features };
     }
     return { id: id, kind: 'local', model_name: target,
-             declared_protocols: ['openai'], features: [] };
+             declared_protocols: protocols, features: features };
   }
 
   // 编辑器渲染：#mpModal（候选链操作 + 池参数 + 预览/应用/回滚）
@@ -555,15 +545,16 @@
     // 候选链：id / 优先级 / 目标 / 运行态 / 操作（替换=行内下拉选中即换）
     var cands = wp.candidates || [];
     var opts = function (sel) {
-      var local = ((_edit.catalog || {}).local || []);
-      var cloud = ((_edit.catalog || {}).cloud || []);
+      var catalog = _edit.catalog || {};
       var o = '';
-      local.forEach(function (n) {
-        o += '<option value="local:' + esc(n) + '"' + (sel === 'local:' + n ? ' selected' : '')
+      (catalog.localValues || []).forEach(function (v) {
+        var n = v.slice('local:'.length);
+        o += '<option value="' + esc(v) + '"' + (sel === v ? ' selected' : '')
           + '>本地 · ' + esc(n) + '</option>';
       });
-      cloud.forEach(function (n) {
-        o += '<option value="cloud:' + esc(n) + '"' + (sel === 'cloud:' + n ? ' selected' : '')
+      (catalog.cloudValues || []).forEach(function (v) {
+        var n = v.slice('cloud:'.length);
+        o += '<option value="' + esc(v) + '"' + (sel === v ? ' selected' : '')
           + '>云 · ' + esc(n) + '</option>';
       });
       if (!o) o = '<option value="">（目录不可用 — 请用下方新增候选）</option>';
@@ -874,12 +865,12 @@
     if (!t || !t.getAttribute) return;
     var repId = t.getAttribute('data-mp-replace');
     if (repId && t.value) {
-      mpEditReplace(repId, candFromCatalogValue(t.value, repId));
+      mpEditReplace(repId, candFromCatalogValue(t.value, repId, _edit.catalog));
       return;
     }
     if (t.getAttribute('data-mp-add') && t.value) {
       var id = 'cand-' + Date.now().toString(36);
-      mpEditAddCandidate(candFromCatalogValue(t.value, id));
+      mpEditAddCandidate(candFromCatalogValue(t.value, id, _edit.catalog));
       return;
     }
     var param = t.getAttribute('data-mp-param');

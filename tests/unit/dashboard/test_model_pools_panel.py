@@ -397,6 +397,111 @@ _EDITOR_RAW = {
     },
 }
 
+# v7.1.2 候选目录 — schema 来自 build_catalog 契约测试的输出快照
+# （禁止发明字段：上一版云目录就是 fixture 发明了 providers[].models
+#   导致前端解析静默断掉而测试全绿）
+_CATALOG_BODY = {
+    "local": [
+        {"name": "qwen3-4b", "active": True, "engine": "vllm",
+         "modality": "text", "context_window": 32768,
+         "protocols": ["openai", "anthropic"]},
+        {"name": "NI-Qwen38-27B", "active": False, "engine": "ninfer",
+         "modality": "text", "context_window": 262144,
+         "protocols": ["openai"]},
+    ],
+    "cloud": [
+        {"provider": "tathr-glm", "model_id": "glm-5",
+         "protocols": ["openai", "anthropic"], "features": [],
+         "active": True, "context_window": None},
+        {"provider": "Qianfan-Token", "model_id": "deepseek-v4.1-flash",
+         "protocols": ["openai", "anthropic"], "features": ["tools"],
+         "active": True, "context_window": None},
+    ],
+}
+
+_CATALOG_LOCAL_ONLY_CLOUD = {
+    "local": [],
+    "cloud": [
+        {"provider": "tathr-glm", "model_id": "glm-5",
+         "protocols": ["openai", "anthropic"], "features": [],
+         "active": True, "context_window": None},
+    ],
+}
+
+
+class TestCatalogConsumption:
+    """v7.1.2 候选目录：向导/编辑器只消费 /admin/model-pools/catalog。"""
+
+    def test_editor_cloud_options_from_catalog(self, run_panel):
+        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
+        # 云候选出现在替换下拉（上一版刮错字段 → 恒空）
+        assert "cloud:tathr-glm/glm-5" in out["modalHtml"]
+        assert "cloud:Qianfan-Token/deepseek-v4.1-flash" in out["modalHtml"]
+
+    def test_single_catalog_source_no_legacy_scraping(self, run_panel):
+        # 架构契约：目录只来自 catalog 端点 — 不得再刮 /models 与
+        # /admin/cloud/providers（字段属别的域，逆向猜 schema 会再断）
+        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        actions = [{"fn": "doMpEdit", "args": ["fast"]},
+                   {"fn": "doMpUndo"}]
+        run_panel(routes, actions=actions)   # undo 前置 renderModelPools
+        wizard_routes = _wizard_routes()
+        wizard_routes["/admin/model-pools/catalog"] = {
+            "status": 200, "body": _CATALOG_LOCAL_ONLY_CLOUD}
+        out = run_panel(wizard_routes)
+        for o in (run_panel(routes, actions=actions), out):
+            urls = {c["url"] for c in o["calls"]}
+            assert "/admin/model-pools/catalog" in urls
+            assert "/admin/cloud/providers" not in urls
+            assert "/models" not in urls
+
+    def test_wizard_cloud_options_from_catalog(self, run_panel):
+        routes = _wizard_routes()
+        routes["/admin/model-pools/catalog"] = {
+            "status": 200, "body": _CATALOG_LOCAL_ONLY_CLOUD}
+        out = run_panel(routes)
+        assert "cloud:tathr-glm/glm-5" in out["html"]
+        assert "云 · tathr-glm/glm-5" in out["html"]
+
+    def test_wizard_cloud_candidate_carries_catalog_protocols(
+            self, run_panel):
+        # 云候选协议来自发现结果（openai+anthropic），不再硬编码 openai —
+        # 硬编码会让双协议云模型在 anthropic 下被证据系统误排除
+        routes = _wizard_routes()
+        routes["/admin/model-pools/catalog"] = {
+            "status": 200, "body": _CATALOG_LOCAL_ONLY_CLOUD}
+        out = run_panel(routes,
+                        actions=[{"fn": "doMpWizardSubmit", "args": []}])
+        body = _last_update_post(out)[-1]["body"]
+        cand = next(iter(body["pools"].values()))["candidates"][0]
+        assert cand["provider"] == "tathr-glm"
+        assert cand["model_id"] == "glm-5"
+        assert cand["declared_protocols"] == ["openai", "anthropic"]
+
+    def test_non_routable_alias_never_offered(self, run_panel):
+        # routable-only（用户决策）：目录只含 cloud_models（可路由集），
+        # glm-5-failover 这类手动回退别名不在其中 — 面板不得出现它
+        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
+        assert "failover" not in out["modalHtml"]
+
+    def test_catalog_fetch_failure_degrades_without_blocking(
+            self, run_panel):
+        # catalog 端点故障 → 空目录 + 手填提示，页面不崩
+        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 500, "body": {}}
+        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
+        assert "mp-editor" in out["modalHtml"]
+        assert "目录不可用" in out["modalHtml"]
+
+
 _NEW_CAND = {"id": "newloc", "kind": "local", "model_name": "qwen3-32b",
              "declared_protocols": ["openai", "anthropic"],
              "features": ["tools"]}
@@ -586,18 +691,24 @@ class TestEditor:
 # - 提交：CAS POST expected_revision=0；无候选的角色跳过
 # - 文件损坏（load_error≠null）→ 只出错误横幅，不出向导、零 POST
 
-_WIZARD_MODELS = [
-    {"name": "NI-Qwen38-27B", "model_type": "llm", "modality": "text",
-     "active": False, "context_window": 262144},
-    {"name": "qwen3-4b", "model_type": "llm", "modality": "text",
-     "active": True, "context_window": 32768},
-]
+# 目录 schema（build_catalog 真实输出契约）— 不再刮 /models（v7.1.2）
+_WIZARD_CATALOG = {
+    "local": [
+        {"name": "NI-Qwen38-27B", "active": False, "engine": "ninfer",
+         "modality": "text", "context_window": 262144,
+         "protocols": ["openai"]},
+        {"name": "qwen3-4b", "active": True, "engine": "vllm",
+         "modality": "text", "context_window": 32768,
+         "protocols": ["openai", "anthropic"]},
+    ],
+    "cloud": [],
+}
 
 _WIZARD_POOLS_BODY = {"revision": 0, "pools": {}, "configured": False,
                       "load_error": None, "raw": None}
 
 
-def _wizard_routes(pools_body=None, models=None):
+def _wizard_routes(pools_body=None, catalog=None):
     return {
         "/admin/model-pools": {
             "status": 200, "body": pools_body or _WIZARD_POOLS_BODY},
@@ -605,8 +716,9 @@ def _wizard_routes(pools_body=None, models=None):
             "status": 200, "body": {"revision": 0, "pools": {}}},
         "/admin/model-pools/runtime": {
             "status": 200, "body": {"revision": 0, "pools": {}}},
-        "/models": {"status": 200,
-                    "body": _WIZARD_MODELS if models is None else models},
+        "/admin/model-pools/catalog": {
+            "status": 200, "body": catalog if catalog is not None
+            else _WIZARD_CATALOG},
         "POST /admin/model-pools": {
             "status": 200, "body": {"status": "updated", "revision": 1}},
     }
