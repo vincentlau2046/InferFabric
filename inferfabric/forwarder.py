@@ -24,6 +24,11 @@ from inferfabric.config import (
 from inferfabric.proxy.sse_buffer import SSELineBuffer, first_token_ttft_cb
 from inferfabric.proxy.usage import normalize_usage
 
+# 云端转发显式 User-Agent：urllib 默认的 "Python-urllib/3.x" 会被
+# Cloudflare 判为封禁签名 → 403 error code 1010（实测：不带头/curl UA/自定义 UA 均 200）。
+# 仅作用于云分支（本地转发路径不受影响）。
+_CLOUD_UA = "inferfabric/6.1.6"
+
 @dataclass
 class CloudResult:
     """cloud 路由请求结果 — 供 RequestLog 补全"""
@@ -260,6 +265,7 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         headers = {
             "Content-Type": "application/json",
             "x-api-key": provider_cfg.api_key,
+            "User-Agent": _CLOUD_UA,
         }
     else:  # openai
         if not cloud_model.openai_available:
@@ -278,6 +284,7 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {provider_cfg.api_key}",
+            "User-Agent": _CLOUD_UA,
         }
 
     # Override model with cloud model_id

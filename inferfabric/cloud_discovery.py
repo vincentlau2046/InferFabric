@@ -25,6 +25,10 @@ import urllib.error
 
 log = logging.getLogger("inferfabric.cloud_discovery")
 
+# 发现请求显式 User-Agent：urllib 默认 "Python-urllib/3.x" 会被 Cloudflare
+# 返回 403 error code 1010（浏览器签名封禁）→ 候选列表恒为空。
+_CLOUD_UA = "inferfabric/6.1.6"
+
 
 @dataclass
 class CloudModel:
@@ -583,12 +587,17 @@ class CloudDiscovery:
         return result
 
     @staticmethod
-    def _merge_model_spec(model: CloudModel, cfg: ProviderConfig) -> CloudModel:
+    def _merge_model_spec(model: CloudModel, cfg: ProviderConfig,
+                          spec_key: str | None = None) -> CloudModel:
         """将 ProviderConfig.model_specs 中的手动属性合并到 CloudModel。
 
         手动配置优先：如果 model_specs 中有该模型，覆盖/补充其能力属性。
+
+        spec_key: 显式指定 model_specs 的查找键。spec 别名场景下注册表 key 是
+                  短名（如 "k3"）而 model.model_id 是上游全名（如 "kimi/k3"），
+                  二者不一致，必须显式传入，否则 spec 属性会被漏合并。
         """
-        spec = cfg.model_specs.get(model.model_id)
+        spec = cfg.model_specs.get(spec_key or model.model_id)
         if not spec:
             return model
         # 新字段
@@ -636,18 +645,24 @@ class CloudDiscovery:
             for mid, spec in cfg.model_specs.items():
                 if mid in merged:
                     continue  # 已发现，跳过
+                # v6.6：spec 的 key 是注册表短名（routing 按 split("/")[-1] 查表），
+                # spec["model_id"] 才是上游真实模型 id —— _serialize_providers 保存时
+                # 正是 key=短名 / model_id=全名。二者不同时：注册表 key 用短名，
+                # CloudModel.model_id 用全名，转发时由 forward_to_cloud 覆盖 data["model"]。
+                upstream_id = (spec or {}).get("model_id") or mid
                 # 仅 spec 注册，协议信息从 provider 配置推断
                 m = CloudModel(
-                    model_id=mid,
+                    model_id=upstream_id,
                     provider=name,
                     openai_available=bool(cfg.openai_base),
                     anthropic_available=bool(cfg.anthropic_base),
                     discovered_at=0.0,  # 0 表示未实际发现，仅配置
                 )
-                m = self._merge_model_spec(m, cfg)
+                m = self._merge_model_spec(m, cfg, spec_key=mid)
                 merged[mid] = m
                 merged[f"{name}/{mid}"] = m
-                log.debug("Registered spec-only model: %s/%s", name, mid)
+                log.debug("Registered spec-only model: %s/%s (upstream %s)",
+                          name, mid, upstream_id)
 
     def _load_config(self, config_path: Path):
         # v4.7.0: Inject secrets.env before expanding ${VAR}
@@ -728,6 +743,7 @@ class CloudDiscovery:
         log.debug("Discovering models from %s: %s", cfg.name, url)
 
         req = urllib.request.Request(url)
+        req.add_header("User-Agent", _CLOUD_UA)
         if cfg.api_key:
             req.add_header("Authorization", f"Bearer {cfg.api_key}")
         req.add_header("Content-Type", "application/json")
