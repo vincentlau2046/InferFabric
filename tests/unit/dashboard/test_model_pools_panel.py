@@ -627,6 +627,69 @@ class TestP1ErrorBanner:
         assert "mp-action-banner" in out["htmlFinal"]
 
 
+# ── UI/UX P1 Task 4：B1 局部渲染 + 本地倒计时 ──
+# 契约：
+# - 结构签名（池名 + 每池候选 id 序列 + enabled + issues 数）不变 → 不重写
+#   mpPools.innerHTML（轮询零闪烁），只走 applyDynamic 按 id 定点更新
+# - applyDynamic 定点更新：mp-lamp-<pool>-<proto>（className）、mp-dot-*、
+#   mp-rt-*（textContent）、mp-chosen-<pool>-<proto>、revision
+# - 本地倒计时：1s interval 以 runtime 拉取时刻为锚本地递减 remaining_s，
+#   更新 mp-rt-* 与环形 --p，不发出任何 fetch
+
+
+def _pools_body_without_cld():
+    body = json.loads(json.dumps(_POOLS_BODY))
+    body["pools"]["fast"]["candidates"] = [
+        c for c in body["pools"]["fast"]["candidates"] if c["id"] != "cld"]
+    return body
+
+
+class TestP1PartialRender:
+    def test_structure_unchanged_skips_innerhtml_rewrite(self, run_panel):
+        out = run_panel(_ops_routes(), poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"})
+        # 仅首屏重建一次；轮询结构未变 → applyDynamic 定点更新，不重写 innerHTML
+        assert out["writeCounts"].get("mpPools") == 1
+
+    def test_structure_change_triggers_rebuild(self, run_panel):
+        routes = _ops_routes()
+        routes["/admin/model-pools"] = {"status": 200, "bodies": [
+            _POOLS_BODY, _pools_body_without_cld()]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        # 候选移除 → 签名变 → 整块重建
+        assert out["writeCounts"].get("mpPools") == 2
+        assert "prov/cloud-m" not in out["htmlFinal"]
+
+    def test_apply_dynamic_updates_lamp_and_chosen_by_id(self, run_panel):
+        # openai chosen: loc → cld（回退）→ lamp warn + chosen 文本更新，
+        # 且结构未变（不重写 innerHTML）
+        status2 = json.loads(json.dumps(_STATUS_BODY))
+        status2["pools"]["fast"]["protocols"]["openai"]["chosen"] = "cld"
+        routes = _ops_routes()
+        routes["/admin/model-pools/status"] = {"status": 200, "bodies": [
+            _STATUS_BODY, status2]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert out["writeCounts"].get("mpPools") == 1
+        dyn = out["dyn"]
+        assert dyn["mp-lamp-fast-openai"]["className"] == "mp-lamp mp-lamp-warn"
+        assert "cld" in dyn["mp-chosen-fast-openai"]["textContent"]
+
+    def test_local_countdown_decrements_without_fetch(self, run_panel):
+        out = run_panel(_ops_routes(), poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        dyn = out["dyn"]
+        # 冷却 loc：remaining 42 → 1 次本地滴答后 0:41
+        assert "0:41" in dyn["mp-rt-fast-loc"]["textContent"], \
+            dyn["mp-rt-fast-loc"]["textContent"]
+        # 环形 --p = 41/42 ≈ 98（首见锚定总时长，客户端递减）
+        assert int(dyn["mp-ring-fast-loc"]["style"]["--p"]) == 98
+        # 倒计时不发出任何 fetch：初次渲染 3 GET + 1 次 poll tick 3 GET
+        gets = [c for c in out["calls"] if c["method"] == "GET"]
+        assert len(gets) == 6
+
+
 class TestCatalogConsumption:
     """v7.1.2 候选目录：向导/编辑器只消费 /admin/model-pools/catalog。"""
 

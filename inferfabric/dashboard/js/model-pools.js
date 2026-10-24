@@ -53,6 +53,11 @@
   // A3 错误即导航（UI/UX P1 Task 3）：常驻行动横幅 — toast 即时反馈，
   // banner 承担「常驻 + 去哪修」；action = {label, run} 闭包（重试原操作）
   var _actionError = null;
+  // B1 局部渲染（UI/UX P1 Task 4）：结构签名 + 定点更新 + 本地倒计时
+  var _lastSig = null;    // 最近一次整块重建时的结构签名
+  var _cd = {};           // 'pool|candId' → {pool, candId, total, base, rt}
+  var _cdElapsed = 0;     // runtime 拉取后流逝的本地秒数（1s interval 递增）
+  var _cdTimer = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -148,7 +153,8 @@
       + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
       + esc(c.id) + '">' + esc(runtimeBadgeText(rt));
     if (rt && rt.cooling) {
-      html += ' <span class="mp-ring" data-mp-ring="' + esc(pool) + '|'
+      html += ' <span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
+        + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
         + esc(c.id) + '"></span>';
     }
     html += '</span></div>';
@@ -164,7 +170,8 @@
       + '<span class="mp-lamps">'
       + ['openai', 'anthropic'].map(function (proto) {
           var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
-          return '<span class="mp-lamp ' + cls + '" data-mp-lamp="' + esc(proto)
+          return '<span class="mp-lamp ' + cls + '" id="mp-lamp-' + esc(name)
+            + '-' + esc(proto) + '" data-mp-lamp="' + esc(proto)
             + '" title="' + esc(proto) + '"></span>';
         }).join('')
       + '</span>'
@@ -204,9 +211,11 @@
       html += '<div class="mp-proto" data-mp-proto="' + esc(proto) + '">'
         + '<span class="mp-proto-name mono">' + esc(proto) + '</span>';
       if (pv.chosen) {
-        html += '<span class="mp-chosen mono">当前选择：' + esc(pv.chosen) + '</span>';
+        html += '<span class="mp-chosen mono" id="mp-chosen-' + esc(name)
+          + '-' + esc(proto) + '">当前选择：' + esc(pv.chosen) + '</span>';
       } else {
-        html += '<span class="mp-nochosen mono">' + esc(pv.error || '无可用候选') + '</span>';
+        html += '<span class="mp-nochosen mono" id="mp-chosen-' + esc(name)
+          + '-' + esc(proto) + '">' + esc(pv.error || '无可用候选') + '</span>';
       }
       var decisions = pv.decisions || [];
       if (decisions.length) {
@@ -222,6 +231,115 @@
 
     html += '</div>';
     return html;
+  }
+
+  /* ── B1 局部渲染（Task 4）：结构签名 + applyDynamic 定点更新 + 本地倒计时 ── */
+
+  // 结构签名：池名序列 + 每池候选 id 序列 + enabled + issues 数。
+  // 签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁），只走 applyDynamic。
+  function structSig(def) {
+    return Object.keys(def.pools || {}).map(function (n) {
+      var p = def.pools[n];
+      return n + ':' + (p.enabled ? 1 : 0) + ':' + (p.issues || []).length
+        + ':' + (p.candidates || []).map(function (c) { return c.id; }).join(',');
+    }).join('|');
+  }
+
+  // 冷却快照：首见锚定总时长 total；runtime 重取 → base 重锚 + 本地流逝清零
+  //（服务端 remaining_s 在刷新时是权威值）；冷却结束的条目清除。
+  function cdSnapshot(rtPools) {
+    var live = {};
+    Object.keys(rtPools || {}).forEach(function (n) {
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        if (!rc.cooling || typeof rc.cooling.remaining_s !== 'number') return;
+        var key = n + '|' + rc.id;
+        live[key] = true;
+        if (!_cd[key]) {
+          _cd[key] = {pool: n, candId: rc.id, total: rc.cooling.remaining_s,
+                      base: rc.cooling.remaining_s, rt: rc};
+        } else {
+          _cd[key].base = rc.cooling.remaining_s;
+          _cd[key].rt = rc;
+        }
+      });
+    });
+    Object.keys(_cd).forEach(function (k) { if (!live[k]) delete _cd[k]; });
+    _cdElapsed = 0;
+  }
+
+  // 按 id 定点更新（签名不变的轮询路径）：灯 className / 状态灯 / 运行态文本 /
+  // 当前选择 / revision — 零 innerHTML 重写
+  function applyDynamic(def, stPools, rtPools) {
+    Object.keys(def.pools || {}).forEach(function (n) {
+      var poolDef = def.pools[n];
+      var protocols = (stPools[n] && stPools[n].protocols) || {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var lamp = $('mp-lamp-' + n + '-' + proto);
+        if (lamp) {
+          lamp.className = 'mp-lamp '
+            + lampForProtocol(poolDef, protocols[proto]);
+        }
+        var pv = protocols[proto] || {};
+        var chosen = $('mp-chosen-' + n + '-' + proto);
+        if (chosen) {
+          chosen.className = pv.chosen ? 'mp-chosen mono' : 'mp-nochosen mono';
+          chosen.textContent = pv.chosen ? ('当前选择：' + pv.chosen)
+            : (pv.error || '无可用候选');
+        }
+      });
+      var rtById = {};
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        rtById[rc.id] = rc;
+      });
+      (poolDef.candidates || []).forEach(function (c) {
+        var rt = rtById[c.id];
+        var dot = $('mp-dot-' + n + '-' + c.id);
+        if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
+        var rtEl = $('mp-rt-' + n + '-' + c.id);
+        if (rtEl) rtEl.textContent = runtimeBadgeText(rt);
+      });
+    });
+    var revEl = $('mpRevision');
+    if (revEl && typeof def.revision !== 'undefined') {
+      revEl.textContent = String(def.revision);
+    }
+  }
+
+  // 本地倒计时滴答（1s interval）：以 runtime 拉取时刻为锚递减 remaining_s，
+  // 更新 mp-rt-* 文本与环形 --p，不发出任何 fetch
+  function applyCountdown() {
+    Object.keys(_cd).forEach(function (key) {
+      var e = _cd[key];
+      if (!e.rt) return;
+      var remaining = Math.max(0, e.base - _cdElapsed);
+      var rt2 = Object.assign({}, e.rt, {
+        cooling: Object.assign({}, e.rt.cooling, {remaining_s: remaining}),
+      });
+      var rtEl = $('mp-rt-' + e.pool + '-' + e.candId);
+      if (rtEl) rtEl.textContent = runtimeBadgeText(rt2);
+      var ring = $('mp-ring-' + e.pool + '-' + e.candId);
+      if (ring && ring.style && ring.style.setProperty) {
+        ring.style.setProperty('--p',
+          String(Math.round(remaining / e.total * 100)));
+      }
+    });
+  }
+
+  function cdTick() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (window.store && typeof window.store.get === 'function'
+          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      if (_wizard) return;
+      _cdElapsed += 1;
+      applyCountdown();
+    } catch (e) { /* 倒计时失败静默 — 下个滴答重试 */ }
+  }
+
+  // 懒启动：首次整块重建后才开始（无池渲染不空转）
+  function startCountdown() {
+    if (_cdTimer || typeof setInterval !== 'function') return;
+    _cdTimer = setInterval(cdTick, 1000);
   }
 
   /* ── A3 行动横幅（Task 3）：常驻 + 去哪修；样式复用 mp-error-banner ── */
@@ -313,12 +431,22 @@
       }
       var stPools = (st && st.pools) || {};
       var rtPools = (rt && rt.pools) || {};
+      cdSnapshot(rtPools);
+      // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
+      // 不重写 innerHTML（轮询零闪烁）；banner 有无计入签名（横幅须可见）
+      var sig = structSig(def) + '|' + (_actionError ? 'banner' : '');
+      if (sig === _lastSig) {
+        applyDynamic(def, stPools, rtPools);
+        return;
+      }
+      _lastSig = sig;
       var html = '';
       if (_actionError) html += bannerHtml();   // A3：渲染池列表前输出行动横幅
       names.forEach(function (n) {
         html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
       });
       box.innerHTML = html;
+      startCountdown();
     } catch (e) {
       box.innerHTML = '<p class="mp-empty">拉取异常：' + esc(e && e.message) + '</p>';
     } finally {
