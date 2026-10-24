@@ -225,7 +225,8 @@
   /* ── 池卡片 ── */
   function poolCard(name, def, st, rt) {
     var checked = def.enabled ? ' checked' : '';
-    var html = '<div class="if-card mp-pool" data-mp-card="' + esc(name) + '">'
+    var html = '<div class="if-card mp-pool" id="mp-card-' + esc(name)
+      + '" data-mp-card="' + esc(name) + '">'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
       + '<span class="mp-lamps">'
@@ -572,23 +573,75 @@
   }
 
   /* ── 单池 enabled 开关（服务端原子翻转 + CAS） ── */
+  /* ── B2 乐观 UI + 切换中骨架态（UI/UX P2 Task 2）──
+     请求在途：池卡外壳 mp-busy（CSS 微光扫过）+ 协议灯直写乐观目标类；
+     响应到达（fetch 段 finally）即清除 — 成败均由后续重渲染回服务端真值
+     （真实浏览器全量重建自然覆盖；签名不变的局部渲染路径由清除兜底）。 */
+
+  function markBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c && (' ' + c.className + ' ').indexOf(' mp-busy ') < 0) {
+      c.className = (c.className ? c.className + ' ' : '') + 'mp-busy';
+    }
+  }
+
+  function clearBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c) {
+      c.className = (' ' + c.className + ' ')
+        .split(' mp-busy ').join(' ').trim();
+    }
+  }
+
+  // 乐观灯：与 lampForProtocol 同词表（启用→ok / 停用→warn）
+  var _optLamps = null;
+
+  function optimisticLamps(pool, enable) {
+    var prev = [];
+    ['openai', 'anthropic'].forEach(function (proto) {
+      var id = 'mp-lamp-' + pool + '-' + proto;
+      var e = $(id);
+      if (!e) return;
+      prev.push({ id: id, cls: e.className });
+      e.className = 'mp-lamp ' + (enable ? 'mp-lamp-ok' : 'mp-lamp-warn');
+    });
+    _optLamps = prev.length ? prev : null;
+  }
+
+  function restoreLamps() {
+    if (!_optLamps) return;
+    _optLamps.forEach(function (o) {
+      var e = $(o.id);
+      if (e) e.className = o.cls;
+    });
+    _optLamps = null;
+  }
+
   async function doMpToggle(pool, enable) {
     if (_revision == null) {
       UI.toast('配置尚未加载完成，请稍后重试', 'error');
       return;
     }
+    markBusy(pool);
+    optimisticLamps(pool, enable);
     try {
-      var res = await fetch(TOGGLE_URL, {
-        method: 'POST',
-        headers: UI.adminHeaders(),
-        body: JSON.stringify({
-          pool: pool,
-          enabled: enable,
-          expected_revision: _revision,
-        }),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      var res, d = null;
+      try {
+        res = await fetch(TOGGLE_URL, {
+          method: 'POST',
+          headers: UI.adminHeaders(),
+          body: JSON.stringify({
+            pool: pool,
+            enabled: enable,
+            expected_revision: _revision,
+          }),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        // B2：响应到达即清骨架 + 回滚乐观灯 — 成败分支的重渲染前完成
+        clearBusy(pool);
+        restoreLamps();
+      }
       if (res.ok) {
         clearActionError();
         _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
@@ -694,13 +747,18 @@
     var poolName = session.pool;
     var body = deepCopy(session.work);
     body.expected_revision = session.base_revision;
+    markBusy(poolName);      // B2：应用在途骨架态
     try {
-      var res = await fetch(UPDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(body),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      var res, d = null;
+      try {
+        res = await fetch(UPDATE_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify(body),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        clearBusy(poolName);   // B2：响应到达即清（分支渲染前）
+      }
       if (_inline !== session) {
         // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
         if (res.ok) {

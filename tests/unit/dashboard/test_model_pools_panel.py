@@ -120,6 +120,8 @@ const navigator = {
   clipboard: {writeText: async (t) => { clipboardWrites.push(t); }},
 };
 const calls = [];
+const fetchSnapshots = [];   // P2 Task 2 加法：captureAtFetch — 每次请求
+                             // 瞬间快照指定元素 className（乐观态在途断言）
 const seen = {};
 let fakeNow = 0;
 const timeStepMs = input.timeStepMs || 1000;
@@ -127,6 +129,11 @@ const fetch = async (url, options) => {
   options = options || {};
   calls.push({url, method: options.method || 'GET',
               body: options.body ? JSON.parse(options.body) : null});
+  if (input.captureAtFetch && input.captureAtFetch.length) {
+    const cls = {};
+    for (const id of input.captureAtFetch) cls[id] = el(id).className;
+    fetchSnapshots.push({url, method: options.method || 'GET', cls});
+  }
   const method = options.method || 'GET';
   const mkey = method + ' ' + url;
   seen[mkey] = (seen[mkey] || 0) + 1;
@@ -196,7 +203,8 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
                style: e.style};
   }
   console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
-                              clipboardWrites, htmlFinal, writeCounts, dyn}));
+                              fetchSnapshots, clipboardWrites, htmlFinal,
+                              writeCounts, dyn}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -214,7 +222,7 @@ def run_panel(tmp_path):
 
     def run(routes, toggle=None, actions=None, location=None,
             poll_ticks=0, store_state=None, document_hidden=False,
-            time_step_ms=None):
+            time_step_ms=None, capture_at_fetch=None):
         proc = subprocess.run(
             [node, str(harness), str(PANEL_JS)],
             input=json.dumps({"routes": routes, "toggle": toggle,
@@ -223,7 +231,8 @@ def run_panel(tmp_path):
                               "pollTicks": poll_ticks,
                               "storeState": store_state,
                               "documentHidden": document_hidden,
-                              "timeStepMs": time_step_ms}),
+                              "timeStepMs": time_step_ms,
+                              "captureAtFetch": capture_at_fetch}),
             capture_output=True, text=True, timeout=30,
         )
         assert proc.returncode == 0, proc.stderr
@@ -941,6 +950,77 @@ class TestP2InlineEdit:
         out = run_panel(routes, actions=actions)
         body = _last_update_post(out)[-1]["body"]
         assert body["expected_revision"] == 3
+
+
+class TestP2Optimistic:
+    """B2 乐观 UI + 切换中骨架态：请求瞬间即反馈（灯/骨架），完成回真值。
+
+    契约（captureAtFetch — 每次请求瞬间快照元素 className）：
+    - toggle 发请求前：池卡进入 mp-busy 骨架态；协议灯直写乐观目标类
+      （启用→mp-lamp-ok / 停用→mp-lamp-warn，与 lampForProtocol 同词表）
+    - 响应完成（无论成败）：乐观态清除（fetch 段 finally），重渲染回真值
+    - 行内应用（A2 apply）同样在途 markBusy、完成清除
+    """
+
+    def _cat_routes(self, **kw):
+        routes = _editor_routes(**kw)
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        return routes
+
+    def test_toggle_shows_optimistic_lamp_and_busy_during_post(self, run_panel):
+        out = run_panel(_routes(), toggle={"pool": "fast", "enable": True},
+                        capture_at_fetch=["mp-lamp-fast-openai",
+                                          "mp-card-fast"])
+        # POST 在途瞬间：灯已是乐观目标类、卡带骨架 busy
+        post = [s for s in out["fetchSnapshots"]
+                if s["method"] == "POST"
+                and s["url"] == "/admin/model-pools/toggle"]
+        assert len(post) == 1
+        assert "mp-lamp-ok" in post[0]["cls"]["mp-lamp-fast-openai"]
+        assert "mp-busy" in post[0]["cls"]["mp-card-fast"]
+        # 响应完成后：重拉渲染，乐观态清除回服务端真值
+        gets = [s for s in out["fetchSnapshots"]
+                if s["method"] == "GET" and s["url"] == "/admin/model-pools"]
+        assert gets
+        assert "mp-busy" not in gets[-1]["cls"]["mp-card-fast"]
+        assert "mp-lamp-ok" not in gets[-1]["cls"]["mp-lamp-fast-openai"]
+
+    def test_toggle_failure_reverts_optimistic_state(self, run_panel):
+        routes = _routes(toggle_status=500, toggle_body={"error": "boom"})
+        out = run_panel(routes, toggle={"pool": "fast", "enable": False},
+                        capture_at_fetch=["mp-lamp-fast-anthropic",
+                                          "mp-card-fast"])
+        post = [s for s in out["fetchSnapshots"]
+                if s["method"] == "POST"
+                and s["url"] == "/admin/model-pools/toggle"]
+        assert "mp-lamp-warn" in post[0]["cls"]["mp-lamp-fast-anthropic"]
+        assert "mp-busy" in post[0]["cls"]["mp-card-fast"]
+        # 失败：回滚乐观态 + A3 横幅 + busy 清除
+        assert "mp-action-banner" in out["htmlFinal"]
+        gets = [s for s in out["fetchSnapshots"]
+                if s["method"] == "GET" and s["url"] == "/admin/model-pools"]
+        assert gets
+        assert "mp-busy" not in gets[-1]["cls"]["mp-card-fast"]
+        assert "mp-lamp-warn" not in gets[-1]["cls"]["mp-lamp-fast-anthropic"]
+        assert "mp-busy" not in out["htmlFinal"]
+
+    def test_inline_apply_marks_pool_busy(self, run_panel):
+        actions = [
+            {"fn": "doMpInlineSelect", "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(self._cat_routes(), actions=actions,
+                        capture_at_fetch=["mp-card-fast"])
+        post = [s for s in out["fetchSnapshots"]
+                if s["method"] == "POST" and s["url"] == "/admin/model-pools"]
+        assert len(post) == 1
+        assert "mp-busy" in post[0]["cls"]["mp-card-fast"]
+        # 成功后重拉：busy 清除
+        gets = [s for s in out["fetchSnapshots"]
+                if s["method"] == "GET" and s["url"] == "/admin/model-pools"]
+        assert gets
+        assert "mp-busy" not in gets[-1]["cls"]["mp-card-fast"]
 
 
 class TestCatalogConsumption:
