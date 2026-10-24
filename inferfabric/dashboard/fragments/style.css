@@ -47,6 +47,21 @@
 
   --t-fast: 120ms ease;
   --t-mid:  200ms ease;
+
+  /* UI/UX P1：Motion 令牌 — 时长 + macOS 质感缓动曲线（v7.2.0）。
+     组件动效一律引用这四个令牌；reduced-motion 降级见文件尾。 */
+  --dur-fast: 120ms;
+  --dur:      200ms;
+  --dur-slow: 400ms;
+  --ease:     cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* UI/UX P1：无障碍 — 用户偏好减动效时全局一刀切关停（无零散例外） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 /* ── L2: Semantic 令牌 — DARK（:root 默认，主力主题） ──────────── */
@@ -1445,3 +1460,61 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--if-text-dim, #999); }
 .mp-snippet { background: rgba(0, 0, 0, .25); border-radius: 8px;
   padding: 10px 12px; font-size: 12px; overflow-x: auto; margin: 4px 0 8px; }
+
+/* ── UI/UX P1：候选体检卡 + 状态灯五态 + 环形倒计时（v7.2.0）──
+   灯语义（用户拍板 #3）：flow=真实数据交换（呼吸流动）；ok=routable 空闲；
+   cool=冷却/隔离（暗态，卡边框虚线 = unroutable 区分）；probe=半开探测。 */
+.mp-cands { display: flex; flex-direction: column; gap: var(--sp-1);
+  margin: var(--sp-1) 0; }
+.mp-cand-card {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 10px var(--sp-2); background: var(--surface-2, #1c242e);
+  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  transition: border-color var(--dur) var(--ease),
+              opacity var(--dur) var(--ease);
+}
+.mp-cand-degraded { border-style: dashed; opacity: .85; }
+.mp-cand-main { display: flex; align-items: center; gap: var(--sp-1);
+  flex: 1; min-width: 0; flex-wrap: wrap; }
+.mp-cand-target { font-size: var(--fs-table); }
+.mp-cand-kind, .mp-cand-pri {
+  font-size: 11px; color: var(--if-text-dim, #999);
+}
+.mp-cand-kind { border: 1px solid var(--if-border, #444);
+  border-radius: var(--radius-pill); padding: 1px 8px; }
+.mp-proto-badge {
+  font-size: 11px; font-family: var(--font-mono); color: #64d2ff;
+  border: 1px solid rgba(100, 210, 255, .35);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+}
+.mp-feat {
+  font-size: 11px; color: var(--if-accent, #0a84ff);
+  border: 1px solid color-mix(in srgb, var(--if-accent, #0a84ff) 35%, transparent);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+}
+.mp-cand-rt { font-size: var(--fs-table); color: var(--if-text-dim, #999);
+  display: flex; align-items: center; gap: var(--sp-1); }
+
+.mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
+  background: var(--if-border, #444); }
+.mp-dot-ok   { background: #30d158; }
+.mp-dot-flow { background: #30d158;
+  box-shadow: 0 0 6px rgba(48, 209, 88, .5);
+  animation: mp-breathe 2.4s var(--ease) infinite; }
+.mp-dot-probe { background: #ffd60a;
+  animation: mp-breathe .9s var(--ease) infinite; }
+.mp-dot-cool { background: #ffd60a; opacity: .5; }
+.mp-dot-off  { background: var(--if-border, #444); }
+
+@keyframes mp-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .45; transform: scale(.82); }
+}
+
+/* 环形倒计时：--p = 剩余百分比（0-100），由局部渲染任务 JS 驱动 */
+.mp-ring { width: 14px; height: 14px; border-radius: 50%; flex: none;
+  background: conic-gradient(#ffd60a calc(var(--p, 100) * 1%),
+                             var(--if-border, #444) 0);
+  position: relative; }
+.mp-ring::after { content: ''; position: absolute; inset: 3px;
+  border-radius: 50%; background: var(--surface-2, #1c242e); }

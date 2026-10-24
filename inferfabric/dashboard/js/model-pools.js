@@ -78,23 +78,78 @@
     return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
   }
 
-  // 候选行运行态：可用性徽标 + 冷却/隔离 + 最近失败
-  function runtimeBadge(rt) {
+  // 候选行运行态（纯文本 — innerHTML 路径 esc 包裹，局部更新走 textContent）
+  function runtimeBadgeText(rt) {
     if (!rt) return '—';
     var parts = [];
     if (rt.cooling) {
       var label = rt.cooling.reason === 'quarantine_404' ? '隔离'
         : (rt.cooling.probing ? '探测中' : '冷却');
       parts.push(label + ' ' + fmtRemaining(rt.cooling.remaining_s)
-        + (rt.cooling.reason ? ' (' + esc(rt.cooling.reason) + ')' : ''));
+        + (rt.cooling.reason ? ' (' + rt.cooling.reason + ')' : ''));
     }
     parts.push(rt.active
       ? (rt.kind === 'local' ? '服务中' : '已发现')
       : (rt.kind === 'local' ? '未启动' : '未发现'));
     if (rt.last_attempt && !rt.last_attempt.ok) {
-      parts.push('HTTP ' + esc(rt.last_attempt.status));
+      parts.push('HTTP ' + rt.last_attempt.status);
     }
     return parts.join(' · ');
+  }
+
+  // 状态灯五态（UI/UX P1，用户拍板 #3）：
+  // probe（半开探测）> cool（冷却/隔离）> flow（真实数据交换：last_attempt
+  // 成功且 <30s）> ok（routable 空闲）> off（未启动/未发现，unroutable）
+  function candDotClass(rt) {
+    if (!rt) return 'mp-dot-off';
+    if (rt.cooling) {
+      return rt.cooling.probing ? 'mp-dot-probe' : 'mp-dot-cool';
+    }
+    var la = rt.last_attempt;
+    if (la && la.ok && typeof la.age_s === 'number' && la.age_s < 30) {
+      return 'mp-dot-flow';
+    }
+    return rt.active ? 'mp-dot-ok' : 'mp-dot-off';
+  }
+
+  // 协议徽章来源：声明协议优先，回退 evidence 键（GET 视图无 declared 字段时）
+  function candProtocols(c) {
+    if (Array.isArray(c.declared_protocols) && c.declared_protocols.length) {
+      return c.declared_protocols;
+    }
+    return Object.keys(c.evidence || {});
+  }
+
+  // 候选体检卡（UI/UX P1 Task 2：表格 → 横向卡片，状态一眼可读）
+  function candCard(pool, c, rt) {
+    var dot = candDotClass(rt);
+    var ev = c.evidence || {};
+    var html = '<div class="mp-cand-card'
+      + ((rt && rt.cooling) ? ' mp-cand-degraded' : '')
+      + '" data-mp-cand-card="' + esc(c.id) + '">'
+      + '<span class="mp-dot ' + dot + '" id="mp-dot-'
+      + esc(pool) + '-' + esc(c.id) + '"></span>'
+      + '<span class="mp-cand-main">'
+      + '<span class="mono mp-cand-target">' + esc(c.target) + '</span>'
+      + '<span class="mp-cand-kind">'
+      + esc(c.kind === 'local' ? '本地' : '云') + '</span>'
+      + '<span class="mono mp-cand-pri">P' + esc(c.priority) + '</span>'
+      + candProtocols(c).map(function (p) {
+          return '<span class="mp-proto-badge" title="'
+            + (ev[p] ? esc(ev[p]) : '') + '">' + esc(p) + '</span>';
+        }).join('')
+      + (c.features || []).map(function (f) {
+          return '<span class="mp-feat">' + esc(f) + '</span>';
+        }).join('')
+      + '</span>'
+      + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
+      + esc(c.id) + '">' + esc(runtimeBadgeText(rt));
+    if (rt && rt.cooling) {
+      html += ' <span class="mp-ring" data-mp-ring="' + esc(pool) + '|'
+        + esc(c.id) + '"></span>';
+    }
+    html += '</span></div>';
+    return html;
   }
 
   /* ── 池卡片 ── */
@@ -125,22 +180,11 @@
     var rtById = {};
     (((rt || {}).candidates) || []).forEach(function (rc) { rtById[rc.id] = rc; });
     if (cands.length) {
-      html += '<div class="cp-table-wrap"><table class="if-table">'
-        + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th><th>证据</th><th>运行态</th></tr></thead>'
-        + '<tbody>';
+      html += '<div class="mp-cands">';
       cands.forEach(function (c) {
-        var evKeys = Object.keys(c.evidence || {});
-        var evTxt = evKeys.length
-          ? evKeys.map(function (k) { return esc(k) + ':' + esc(c.evidence[k]); }).join(' · ')
-          : '—';
-        html += '<tr><td class="mono">' + esc(c.id) + '</td>'
-          + '<td class="mono">' + esc(c.priority) + '</td>'
-          + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
-          + '<td class="mono">' + esc(c.target) + '</td>'
-          + '<td class="mono">' + evTxt + '</td>'
-          + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td></tr>';
+        html += candCard(name, c, rtById[c.id]);
       });
-      html += '</tbody></table></div>';
+      html += '</div>';
     } else {
       html += '<p class="mp-empty">无可解析候选（目标悬空或未配置）</p>';
     }
@@ -571,7 +615,7 @@
         + '<td class="mono">' + esc(c.priority) + '</td>'
         + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
         + '<td class="mono">' + esc(target) + '</td>'
-        + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td>'
+        + '<td class="mono">' + esc(runtimeBadgeText(rtById[c.id])) + '</td>'
         + '<td class="mp-edit-ops">'
         + '<select data-mp-replace="' + esc(c.id) + '">'
         + '<option value="">替换为…</option>' + opts(sel) + '</select>'

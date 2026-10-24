@@ -86,12 +86,20 @@ const vm = require('node:vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const toasts = [];
 const elements = {};
+const writeCounts = {};
 function el(id) {
   if (!elements[id]) {
-    elements[id] = {
-      id: id, innerHTML: '', textContent: '',
+    const e = {
+      id: id, textContent: '', className: '',
+      style: {setProperty: function (k, v) { this[k] = v; }},
       addEventListener: function () {}, classList: {add(){}, remove(){}},
     };
+    let _html = '';
+    Object.defineProperty(e, 'innerHTML', {
+      get: () => _html,
+      set: (v) => { _html = v; writeCounts[id] = (writeCounts[id] || 0) + 1; },
+    });
+    elements[id] = e;
   }
   return elements[id];
 }
@@ -171,8 +179,15 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   }
   const modalHtml = elements['mpModal'] ? elements['mpModal'].innerHTML : '';
   const previewHtml = elements['mpPreview'] ? elements['mpPreview'].innerHTML : '';
+  // UI/UX P1：末态池 html（动作/轮询后）+ innerHTML 写计数 + 动态元素快照
+  const htmlFinal = elements['mpPools'] ? elements['mpPools'].innerHTML : '';
+  const dyn = {};
+  for (const [id, e] of Object.entries(elements)) {
+    dyn[id] = {textContent: e.textContent, className: e.className,
+               style: e.style};
+  }
   console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
-                              clipboardWrites}));
+                              clipboardWrites, htmlFinal, writeCounts, dyn}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -361,6 +376,81 @@ class TestOpsRender:
         assert "未发现" in html
 
 
+# ── UI/UX P1 Task 2：候选体检卡（表格 → 横向卡片）──
+# 契约：
+# - 候选行 = mp-cand-card（data-mp-cand-card），不再是 if-table 表格行
+# - 状态灯 mp-dot 五态（用户拍板 #3）：
+#     probe（半开探测，快脉冲）> cool（冷却/隔离，暗态+环形倒计时）
+#     > flow（last_attempt.ok 且 age_s<30 —— 真实数据交换，呼吸流动）
+#     > ok（routable 空闲静默）> off（未启动/未发现，unroutable）
+# - 协议徽章（declared_protocols ‖ evidence 键）+ 能力点（features）
+# - 运行态语义文本令牌沿用（服务中/已发现/冷却 …）— TestOpsRender 是契约
+
+
+class TestP1CandidateCards:
+    def test_cards_replace_table_markup(self, run_panel):
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        assert 'data-mp-cand-card="loc"' in html
+        assert 'class="mp-cand-card' in html
+        # 旧候选表格不再出现在池卡片（编辑器模态内 cp-table 不受影响）
+        assert "候选</th>" not in html
+
+    def test_dot_cooling_and_off_states(self, run_panel):
+        # loc: cooling(cooldown_401, 非探测) → mp-dot-cool
+        # cld: 云未发现 → mp-dot-off
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        assert "mp-dot-cool" in html
+        assert "mp-dot-off" in html
+
+    def test_dot_flow_on_recent_real_traffic(self, run_panel):
+        # 真实数据交换（last_attempt.ok 且 age_s<30）→ 流动态（拍板 #3）
+        rt = json.loads(json.dumps(_RUNTIME_BODY))
+        c = rt["pools"]["fast"]["candidates"][0]
+        c["cooling"] = None
+        c["last_attempt"] = {"ok": True, "status": 200, "age_s": 5.0}
+        out = run_panel(_ops_routes(runtime_body=rt))
+        assert "mp-dot-flow" in out["html"]
+
+    def test_dot_flow_not_for_stale_success(self, run_panel):
+        # 成功但久远（age_s>30）→ 空闲静默，不流动
+        rt = json.loads(json.dumps(_RUNTIME_BODY))
+        c = rt["pools"]["fast"]["candidates"][0]
+        c["cooling"] = None
+        c["last_attempt"] = {"ok": True, "status": 200, "age_s": 300.0}
+        out = run_panel(_ops_routes(runtime_body=rt))
+        assert "mp-dot-flow" not in out["html"]
+        assert "mp-dot-ok" in out["html"]     # active 本地 → routable 静默
+
+    def test_dot_probe_while_half_open(self, run_panel):
+        rt = json.loads(json.dumps(_RUNTIME_BODY))
+        rt["pools"]["fast"]["candidates"][0]["cooling"] = {
+            "remaining_s": 3.0, "reason": "cooldown_401", "probing": True}
+        out = run_panel(_ops_routes(runtime_body=rt))
+        assert "mp-dot-probe" in out["html"]
+
+    def test_protocol_badges_from_evidence(self, run_panel):
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        # 候选 loc evidence {openai: declared} → openai 协议徽章 + declared 态
+        assert "mp-proto-badge" in html
+        assert "openai" in html
+
+    def test_feature_dots_rendered(self, run_panel):
+        # loc features ["tools"] → tools 能力点（v7.1.2 目录语义在前端可见）
+        out = run_panel(_ops_routes())
+        assert "mp-feat" in out["html"]
+        assert "tools" in out["html"]
+
+    def test_ring_countdown_on_cooling(self, run_panel):
+        out = run_panel(_ops_routes())
+        html = out["html"]
+        # 冷却候选带环形倒计时元素（--p 百分比由局部渲染任务驱动）
+        assert "data-mp-ring" in html
+        assert "0:42" in html                  # fmtRemaining(42.0)
+
+
 # ── Task 6：三段式编辑器（编辑 → 预览 → 应用/回滚）──
 # 契约：
 # - 编辑基底 = _state.def.raw（GET 视图有损，经视图重建丢数据 — spec §4.3）
@@ -427,6 +517,33 @@ _CATALOG_LOCAL_ONLY_CLOUD = {
          "active": True, "context_window": None},
     ],
 }
+
+
+# ── UI/UX P1（v7.2.0）：Motion/Depth 令牌 + 体检卡 + 错误即导航 + 局部渲染 ──
+
+
+class TestMotionTokens:
+    """Task 1：动效令牌集中定义 + reduced-motion 全局降级。"""
+
+    def test_motion_tokens_defined_in_root(self):
+        css = (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+            encoding="utf-8")
+        for token in ("--dur-fast", "--dur", "--dur-slow", "--ease"):
+            assert token + ":" in css, token
+        # macOS 质感缓动曲线
+        assert "cubic-bezier(0.2, 0, 0, 1)" in css
+
+    def test_reduced_motion_global_kill_switch(self):
+        css = (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+            encoding="utf-8")
+        assert "prefers-reduced-motion: reduce" in css
+        # 降级块内全局关停动画与过渡（一刀切，无零散例外）
+        m = re.search(r"prefers-reduced-motion:\s*reduce\)\s*\{(.*?)\n\}",
+                      css, re.S)
+        assert m, "reduced-motion block missing"
+        block = m.group(1)
+        assert "animation: none" in block
+        assert "transition: none" in block
 
 
 class TestCatalogConsumption:
