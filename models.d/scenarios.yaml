@@ -30,8 +30,8 @@ Qwen38-27B-VL:
     default_max_tokens: 16384
     prefill_chunk: 2048
     enable_mtp: true
-    draft_tokens: 2
-    kv_capacity: 390000
+    draft_tokens: 3
+    kv_capacity: 0
   small-batch:
     max_concurrency: 2
     max_context: 262144
@@ -39,12 +39,12 @@ Qwen38-27B-VL:
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 3
-    kv_capacity: 440000
+    kv_capacity: 0
   big-batch:
     max_concurrency: 3
     max_context: 204800
     default_max_tokens: 32768
     prefill_chunk: 2048
     enable_mtp: true
-    draft_tokens: 2
-    kv_capacity: 420000
+    draft_tokens: 3
+    kv_capacity: 0
