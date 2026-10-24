@@ -128,6 +128,25 @@ class TestConfiguredState:
         assert reg.last_load_error
 
 
+class TestSnapshotAndRaw:
+    """终审 M6：GET 的 revision 与 raw 必须同代（单锁原子读取）。"""
+
+    def test_snapshot_and_raw_same_generation(self, tmp_path):
+        import yaml
+        reg = _make_registry(tmp_path)
+        cfg = tmp_path / "model_pools.yaml"
+        cfg.write_text(yaml.safe_dump(_VALID), encoding="utf-8")
+        reg.load()
+        snap, raw = reg.snapshot_and_raw()
+        assert snap.revision == raw["revision"]   # update() 把 revision 写进 raw
+
+    def test_snapshot_and_raw_unconfigured(self, tmp_path):
+        reg = _make_registry(tmp_path)
+        snap, raw = reg.snapshot_and_raw()
+        assert snap.revision == 0
+        assert raw is None
+
+
 class TestCompilePool:
     def test_compile_pool_returns_snapshot_for_config(self, tmp_path):
         reg = _make_registry(tmp_path)
