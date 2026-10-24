@@ -806,6 +806,143 @@ class TestP1FixPass:
         assert out["dyn"]["mp-ring-fast-loc"]["style"]["--p"] == "0"
 
 
+# ── UI/UX P2 Task 1：A2 行内 diff 编辑（两步换模，不离开列表）──
+# 契约：
+# - 每张候选卡内嵌「替换为…」下拉（目录手势惰性预热：普通渲染/轮询零目录
+#   请求 — Task 1 裁决，保既有 GET 计数契约；预热失败 → 禁用 + 提示）
+# - 选中 → 候选卡下方出 mp-inline-diff 条（旧→新 红/绿）+ 自动预览
+#   （validate + dry-run×2 携带替换后 work — 三段式门禁不放松）
+# - 应用：CAS POST（基点=选中时刻 revision）；成功 → 记 _undo + 清条 +
+#   刷新目录；409 → A3 横幅（重新选择）+ 条保留
+# - 预览未通过 → 应用按钮禁用，不 POST
+
+
+class TestP2InlineEdit:
+    def _inline_routes(self, **kw):
+        routes = _editor_routes(**kw)
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        return routes
+
+    def test_inline_select_present_with_catalog_options(self, run_panel):
+        # 手势预热（box mouseover/focusin → primeInline）后下拉出目录选项；
+        # 普通渲染期不产生目录请求（既有轮询 GET 计数契约）
+        out = run_panel(self._inline_routes(),
+                        actions=[{"fn": "mpPrimeInline"}])
+        # 每张候选卡内嵌「替换为…」下拉（行内编辑入口）
+        assert 'data-mp-inline-replace="fast|loc"' in out["htmlFinal"]
+        assert 'value="local:qwen3-4b"' in out["htmlFinal"]
+        assert 'value="cloud:tathr-glm/glm-5"' in out["htmlFinal"]
+
+    def test_inline_select_disabled_without_catalog(self, run_panel):
+        # 预热失败（路由缺失 → 拉取失败）→ 下拉禁用 + 明示，不出可选项
+        out = run_panel(_editor_routes(),
+                        actions=[{"fn": "mpPrimeInline"}])
+        assert "目录不可用" in out["htmlFinal"]
+        assert 'value="local:' not in out["htmlFinal"]
+
+    def test_inline_select_shows_diff_bar_with_auto_preview(self, run_panel):
+        actions = [{"fn": "doMpInlineSelect",
+                    "args": ["fast", "loc", "local:qwen3-4b"]}]
+        out = run_panel(self._inline_routes(), actions=actions)
+        h = out["htmlFinal"]
+        assert "mp-inline-diff" in h
+        assert "mp-diff-old" in h and "qwen-small" in h   # 旧目标（红）
+        assert "mp-diff-new" in h and "qwen3-4b" in h     # 新目标（绿）
+        assert 'data-mp-inline-apply="fast|loc"' in h
+        assert 'data-mp-inline-cancel' in h
+        # 自动预览：dry-run×2 携带替换后的 work（三段式门禁）
+        drys = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/dry-run"]
+        assert len(drys) == 2
+        for c in drys:
+            assert c["body"]["config"]["pools"]["fast"]["candidates"][0] \
+                ["model_name"] == "qwen3-4b"
+
+    def test_inline_apply_posts_replaced_candidate_with_cas(self, run_panel):
+        actions = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
+            {"fn": "mpPrimeInline"},   # 应用后目录失效 → 下次手势重取
+        ]
+        out = run_panel(self._inline_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        cands = body["pools"]["fast"]["candidates"]
+        new = next(c for c in cands if c["id"] == "loc")
+        assert new["model_name"] == "qwen3-4b"
+        assert new["priority"] == 1                    # D4：继承原优先级
+        assert new["declared_protocols"] == ["openai", "anthropic"]
+        assert "dang" in [c["id"] for c in cands]      # raw 基底防丢数据
+        assert body["expected_revision"] == 3          # 选中时刻 CAS 基点
+        # 成功：条清空 + toast；目录缓存失效（下次手势重取）
+        assert "mp-inline-diff" not in out["htmlFinal"]
+        assert any("已更新 iff/fast" in t["message"] for t in out["toasts"])
+        cat_gets = [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools/catalog"]
+        assert len(cat_gets) >= 2
+
+    def test_inline_apply_blocked_when_preview_fails(self, run_panel):
+        routes = self._inline_routes()
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200,
+            "body": {"chosen": None, "error": "no_compatible_target",
+                     "decisions": [], "pool": "fast", "protocol": "openai"}}
+        actions = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools"
+                    and c["method"] == "POST"]
+        # 应用按钮禁用（属性级）+ 阻止原因在条内可见
+        m = re.search(r'data-mp-inline-apply="fast\|loc"[^>]*>',
+                      out["htmlFinal"])
+        assert m and "disabled" in m.group(0)
+        assert "无可用候选" in out["htmlFinal"]
+
+    def test_inline_apply_409_shows_banner_keeps_bar(self, run_panel):
+        routes = self._inline_routes(
+            apply_status=409,
+            apply_body={"status": "revision_conflict", "current_revision": 5})
+        actions = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(routes, actions=actions)
+        assert "mp-action-banner" in out["htmlFinal"]   # A3 横幅
+        assert 'data-mp-banner-action' in out["htmlFinal"]
+        assert "mp-inline-diff" in out["htmlFinal"]     # 条保留（可重新选择）
+
+    def test_inline_cancel_clears_bar(self, run_panel):
+        actions = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineCancel"},
+        ]
+        out = run_panel(self._inline_routes(), actions=actions)
+        assert "mp-inline-diff" not in out["htmlFinal"]
+
+    def test_inline_apply_pins_select_time_revision(self, run_panel):
+        # Review Focus #1：选中后后台轮询推进 revision → apply 仍用选中时
+        # 基点（不得借新 revision 让陈旧 work 覆盖他人修改）
+        pools_bodies = [_editor_pools_body(), _editor_pools_body(revision=4)]
+        routes = self._inline_routes()
+        routes["/admin/model-pools"] = {"status": 200, "bodies": pools_bodies}
+        actions = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "renderModelPools", "args": []},   # 模拟后台刷新 rev=4
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(routes, actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        assert body["expected_revision"] == 3
+
+
 class TestCatalogConsumption:
     """v7.1.2 候选目录：向导/编辑器只消费 /admin/model-pools/catalog。"""
 

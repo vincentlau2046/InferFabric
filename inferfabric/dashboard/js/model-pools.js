@@ -58,6 +58,13 @@
   var _cd = {};           // 'pool|candId' → {pool, candId, total, base, rt}
   var _rtAt = 0;          // runtime 拉取时刻（Date.now()，倒计时锚点，评审 I7）
   var _cdTimer = null;
+  // A2 行内 diff 编辑（UI/UX P2 Task 1）：目录缓存（null=未取/不可用，
+  // 每次渲染 best-effort 重试；应用成功后置 null 触发重取）+ 行内会话
+  var _catalog = null;
+  //   _inline = {pool, candId, spec, base, work, base_revision, validated,
+  //              previewHtml, rev} — spec/rev 进结构签名：换目标或预览
+  //   完成 完成（启用应用按钮）都必须重建
+  var _inline = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -128,6 +135,47 @@
     return Object.keys(c.evidence || {});
   }
 
+  // A2 行内下拉选项（与编辑器 opts 同源同格式 — 目录是唯一元数据总线）
+  function inlineOptions() {
+    var o = '';
+    (_catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (_catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // A2 行内 diff 预览条：旧→新（红/绿）+ 自动预览结果 + 应用/撤销。
+  // validated 经 _inline.rev 进结构签名 — 预览完成 → 重建以启用应用按钮
+  function inlineDiffBar(pool, oldCand) {
+    var n = _inline;
+    var newC = candFromCatalogValue(n.spec, n.candId, _catalog);
+    var newTarget = newC.kind === 'local' ? newC.model_name
+      : (newC.provider + '/' + newC.model_id);
+    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开
+    var oldTarget = oldCand.target
+      ? oldCand.target
+      : (oldCand.kind === 'local' ? oldCand.model_name
+         : (oldCand.provider + '/' + oldCand.model_id));
+    return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
+      + '|' + esc(n.candId) + '">'
+      + '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
+      + '<span class="mp-diff-arrow">→</span>'
+      + '<span class="mp-diff-new mono">' + esc(newTarget) + '</span>'
+      + '<span class="mp-inline-preview" id="mp-inline-preview-'
+      + esc(pool) + '-' + esc(n.candId) + '">'
+      + (n.previewHtml || '预览中…') + '</span>'
+      + '<button type="button" data-mp-inline-apply="' + esc(pool) + '|'
+      + esc(n.candId) + '"' + (n.validated ? '' : ' disabled')
+      + ' title="需先通过预览">应用</button>'
+      + '<button type="button" data-mp-inline-cancel="1">撤销</button>'
+      + '</div>';
+  }
+
   // 候选体检卡（UI/UX P1 Task 2：表格 → 横向卡片，状态一眼可读）
   function candCard(pool, c, rt) {
     var dot = candDotClass(rt);
@@ -158,6 +206,18 @@
         + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
         + esc(c.id) + '"></span>';
     }
+    // A2 行内编辑入口：卡内「替换为…」下拉。目录手势惰性预热（Task 1
+    // 裁决）：null=未预热（占位可选，mouseover/focusin 即拉取）；
+    // false=拉取失败（禁用 + 明示）；object=就绪出选项
+    html += '<select class="mp-inline-sel" data-mp-inline-replace="'
+      + esc(pool) + '|' + esc(c.id) + '"'
+      + (_catalog === false ? ' disabled' : '') + '>'
+      + (_catalog
+          ? '<option value="">替换为…</option>' + inlineOptions()
+          : _catalog === false
+            ? '<option value="">目录不可用 — 请用编辑器</option>'
+            : '<option value="">替换为…</option>')
+      + '</select>';
     html += '</div>';
     return html;
   }
@@ -194,6 +254,10 @@
       html += '<div class="mp-cands">';
       cands.forEach(function (c) {
         html += candCard(name, c, rtById[c.id]);
+        // A2：命中行内编辑会话 → 卡后渲染 diff 预览条
+        if (_inline && _inline.pool === name && _inline.candId === c.id) {
+          html += inlineDiffBar(name, c);
+        }
       });
       html += '</div>';
     } else {
@@ -467,13 +531,23 @@
         box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
         return;
       }
+      // A2：目录不做渲染期拉取（Task 1 裁决 — 既有轮询 GET 计数是契约），
+      // 手势惰性预热：box mouseover/focusin → primeInline()
       var stPools = (st && st.pools) || {};
       var rtPools = (rt && rt.pools) || {};
       cdSnapshot(rtPools);
       // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
       // 不重写 innerHTML（轮询零闪烁）；banner 消息/提示计入签名（评审 I6 —
-      // 内容变了的横幅必须重建，否则旧原因配新行动闭包）
-      var sig = structSig(def, stPools, rtPools) + '|'
+      // 内容变了的横幅必须重建，否则旧原因配新行动闭包）；A2 目录在否与
+      // 行内会话（池|候选|spec|rev）计入签名 — 下拉出现/diff 条/应用按钮
+      // 启用都是结构变化
+      var sig = structSig(def, stPools, rtPools)
+        + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
+        + '|inline:' + (_inline
+            ? _inline.pool + '|' + _inline.candId + '|' + _inline.spec
+              + '|' + _inline.rev
+            : '')
+        + '|'
         + (_actionError
             ? 'banner:' + _actionError.message + '|' + (_actionError.hint || '')
             : '');
@@ -539,6 +613,139 @@
       await setActionError('开关请求异常：' + (e && e.message), null,
         {label: '重试', run: function () { return doMpToggle(pool, enable); }});
     }
+  }
+
+  /* ── A2 行内 diff 编辑（UI/UX P2 Task 1）：两步换模，不离开列表 ── */
+
+  // 目录惰性预热（Task 1 裁决）：并发共享一个在途 promise；
+  // 成功 → object，失败 → false（下次手势可重试）
+  var _catPromise = null;
+
+  function ensureCatalog() {
+    if (_catalog) return Promise.resolve(_catalog);
+    if (!_catPromise) {
+      _catPromise = fetchCandidateCatalog()
+        .then(function (c) { _catalog = c; _catPromise = null; return c; })
+        .catch(function () {
+          _catalog = false; _catPromise = null; return false;
+        });
+    }
+    return _catPromise;
+  }
+
+  // 手势入口（box mouseover/focusin）：取目录 → 重渲染出选项
+  async function primeInline() {
+    if (_catalog) return;
+    await ensureCatalog();
+    await renderModelPools();
+  }
+
+  async function doMpInlineSelect(pool, candId, spec) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    var cands = (base.pools[pool] || {}).candidates;
+    if (!Array.isArray(cands)) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var i = cands.findIndex(function (c) { return c.id === candId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var nc = candFromCatalogValue(spec, candId, _catalog);
+    nc.priority = cands[i].priority;   // D4 一键换模：继承原优先级
+    var work = deepCopy(base);
+    work.pools[pool].candidates[i] = deepCopy(nc);
+    // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
+    // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
+    _inline = { pool: pool, candId: candId, spec: spec, base: base,
+                work: work, base_revision: _state.def.revision,
+                validated: false, previewHtml: '', rev: 0 };
+    await renderModelPools();          // 重建出 diff 条
+    var session = _inline;
+    var out = await previewWork(work, pool);   // 自动预览（三段式门禁）
+    if (_inline !== session) return;
+    _inline.previewHtml = out.code === 'error'
+      ? '<span class="mp-issue">预览请求异常：' + esc(out.message) + '</span>'
+      : out.html;
+    _inline.validated = out.validated;
+    _inline.rev += 1;                  // 进签名 → 重建（启用/禁用应用按钮）
+    await renderModelPools();
+  }
+
+  async function doMpInlineApply() {
+    if (!_inline) return;
+    if (!_inline.validated) {
+      UI.toast('请先通过预览，再应用', 'error');
+      return;
+    }
+    var session = _inline;   // 会话令牌：在途时可能被取消/重选
+    var poolName = session.pool;
+    var body = deepCopy(session.work);
+    body.expected_revision = session.base_revision;
+    try {
+      var res = await fetch(UPDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(body),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (_inline !== session) {
+        // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
+        if (res.ok) {
+          UI.toast('已更新 iff/' + poolName, 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
+      if (res.ok) {
+        _undo = session.base;
+        _inline = null;
+        _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
+        clearActionError();
+        UI.toast('已更新 iff/' + poolName, 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        // 基点过期：本 work 不可再应用（重试仍 409）— 横幅引导基于最新
+        // 配置重新选择；diff 条保留供对照
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，请重新选择替换目标',
+          {label: '重新选择', run: function () {
+             _inline = null;
+             return renderModelPools();
+           }});
+        UI.toast('配置已被其他修改更新（冲突），请重新选择', 'error');
+        await renderModelPools();
+        return;
+      }
+      var msg = (d && d.error) || ('更新失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
+    } catch (e) {
+      UI.toast('更新请求异常：' + (e && e.message), 'error');
+      await setActionError('更新请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
+    }
+  }
+
+  async function doMpInlineCancel() {
+    if (!_inline) return;
+    _inline = null;
+    await renderModelPools();
   }
 
   /* ── 三段式编辑器（Task 6）：编辑 → 预览 → 应用/回滚 ── */
@@ -966,78 +1173,99 @@
     _edit.validated = false;
   }
 
-  // 预览：validate（静态）→ 不通过阻止一切；通过 → dry-run×2 携带编辑态 config。
-  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
-  async function mpEditPreview() {
-    if (!_edit) return;
-    var session = _edit;
-    var pv = $('mpPreview');
-    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+  // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
+  // 阻止一切；通过 → dry-run×2 携带编辑态 config。
+  // 返回 {validated, code, html, message}；code ∈ ok | invalid | http_fail |
+  // none_chosen | error（调用方决定 toast 文案与容器前缀）。
+  // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
+  // （单协议无候选 = 黄灯，属合法状态，不阻止）
+  async function previewWork(work, pool) {
     try {
       var res = await fetch(VALIDATE_URL, {
         method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(_edit.work),
+        body: JSON.stringify(work),
       });
-      if (_edit !== session) return;
       var d = await res.json();
-      if (_edit !== session) return;
       if (!d.valid) {
-        if (pv) {
-          pv.innerHTML = '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
+        return {
+          validated: false, code: 'invalid',
+          html: '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
             + '<ul class="mp-decisions">'
             + (d.issues || []).map(function (i) {
                 return '<li class="mono">' + esc(i) + '</li>';
               }).join('')
-            + '</ul>';
-        }
-        UI.toast('校验未通过 — 请按问题列表修正', 'error');
-        return;
+            + '</ul>',
+        };
       }
       var outs = [];
       for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
         var proto = ['openai', 'anthropic'][k];
         var r = await fetch(DRYRUN_URL, {
           method: 'POST', headers: UI.adminHeaders(),
-          body: JSON.stringify({ pool: _edit.pool, protocol: proto,
-                                 config: _edit.work }),
+          body: JSON.stringify({ pool: pool, protocol: proto,
+                                 config: work }),
         });
-        if (_edit !== session) return;
         var b = null;
         try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
-        if (_edit !== session) return;
         outs.push({ proto: proto, ok: r.ok, body: b || {} });
       }
-      var previewHtml = '<p>预览（编辑态，未应用）：</p>';
-      outs.forEach(function (o) {
+      var html = outs.map(function (o) {
         var b = o.body || {};
-        previewHtml += '<p class="mono">' + esc(o.proto) + ' → '
+        return '<p class="mono">' + esc(o.proto) + ' → '
           + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
-             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选') + '</span>'))
+             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选')
+                + '</span>'))
           + '</p>';
-      });
-      if (pv) pv.innerHTML = previewHtml;
-      // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
-      // （单协议无候选 = 黄灯，属合法状态，不阻止）
+      }).join('');
       var failed = outs.filter(function (o) { return !o.ok; });
       if (failed.length) {
-        if (pv) pv.innerHTML += '<p class="mp-issue">预览请求失败 · HTTP '
-          + esc(failed.map(function (o) { return o.proto; }).join('/'))
-          + ' — 已阻止应用</p>';
-        UI.toast('预览请求失败 — 已阻止应用', 'error');
-        return;
+        return { validated: false, code: 'http_fail',
+                 html: html + '<p class="mp-issue">预览请求失败 · HTTP '
+                   + esc(failed.map(function (o) { return o.proto; })
+                         .join('/'))
+                   + ' — 已阻止应用</p>' };
       }
       var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
       if (noneChosen.length === outs.length) {
-        if (pv) pv.innerHTML += '<p class="mp-issue">两个协议均无可用候选'
-          + ' — 已阻止应用</p>';
-        UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
-        return;
+        return { validated: false, code: 'none_chosen',
+                 html: html + '<p class="mp-issue">两个协议均无可用候选'
+                   + ' — 已阻止应用</p>' };
       }
-      _edit.validated = true;
-      UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
+      return { validated: true, code: 'ok', html: html };
     } catch (e) {
-      UI.toast('预览请求异常：' + (e && e.message), 'error');
+      return { validated: false, code: 'error', html: '',
+               message: (e && e.message) || String(e) };
     }
+  }
+
+  // 预览（模态）：结果写入 #mpPreview，toast 按 code 映射。
+  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
+  async function mpEditPreview() {
+    if (!_edit) return;
+    var session = _edit;
+    var pv = $('mpPreview');
+    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+    var out = await previewWork(_edit.work, _edit.pool);
+    if (_edit !== session) return;
+    if (out.code === 'error') {
+      UI.toast('预览请求异常：' + out.message, 'error');
+      return;
+    }
+    if (pv) pv.innerHTML = '<p>预览（编辑态，未应用）：</p>' + out.html;
+    if (out.code === 'invalid') {
+      UI.toast('校验未通过 — 请按问题列表修正', 'error');
+      return;
+    }
+    if (out.code === 'http_fail') {
+      UI.toast('预览请求失败 — 已阻止应用', 'error');
+      return;
+    }
+    if (out.code === 'none_chosen') {
+      UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
+      return;
+    }
+    _edit.validated = true;
+    UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
   }
 
   // 应用：CAS POST；成功 → 记录 _undo；409 → 冲突 toast + 重新拉取。
@@ -1190,6 +1418,12 @@
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
     if (pool) { doMpToggle(pool, !!t.checked); return; }
+    var inl = t.getAttribute('data-mp-inline-replace');
+    if (inl && t.value) {
+      var bar = inl.split('|');   // 'pool|candId'
+      doMpInlineSelect(bar[0], bar[1], t.value);
+      return;
+    }
     var wsel = t.getAttribute('data-mp-wizard-sel');
     if (wsel && _wizard && _wizard.roles[wsel]) {
       _wizard.roles[wsel].selected = t.value || null;
@@ -1286,6 +1520,9 @@
     // A3：行动横幅（重试原操作 / 关闭）
     if (t.getAttribute('data-mp-banner-action')) { doMpBannerAction(); return; }
     if (t.getAttribute('data-mp-banner-dismiss')) { doMpBannerDismiss(); return; }
+    // A2：行内 diff 条（应用 / 撤销）
+    if (t.getAttribute('data-mp-inline-apply')) { doMpInlineApply(); return; }
+    if (t.getAttribute('data-mp-inline-cancel')) { doMpInlineCancel(); return; }
     var edit = t.getAttribute('data-mp-edit');
     if (edit) { doMpEdit(edit); return; }
     var snip = t.getAttribute('data-mp-snippet');
@@ -1301,6 +1538,10 @@
   if (box && typeof box.addEventListener === 'function') {
     box.addEventListener('change', onBoxChange);
     box.addEventListener('click', onBoxClick);
+    // A2 目录惰性预热（Task 1 裁决）：鼠标掠过/键盘聚焦面板即拉取，
+    // 用户点开下拉前选项已就绪 — 普通渲染/轮询不产生目录请求
+    box.addEventListener('mouseover', function () { primeInline(); });
+    box.addEventListener('focusin', function () { primeInline(); });
   }
 
   /* ── 5s 轮询（spec §6）：与首屏同一刷新函数（定义+状态+运行态合并拉取）。
@@ -1335,6 +1576,10 @@
   window.doMpUndo = doMpUndo;
   window.doMpBannerAction = doMpBannerAction;
   window.doMpBannerDismiss = doMpBannerDismiss;
+  window.doMpInlineSelect = doMpInlineSelect;
+  window.doMpInlineApply = doMpInlineApply;
+  window.doMpInlineCancel = doMpInlineCancel;
+  window.mpPrimeInline = primeInline;
   window.mpEditReplace = mpEditReplace;
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
