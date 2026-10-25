@@ -750,6 +750,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   .switch-spinner { animation: none; border-top-color: var(--accent); }
   .mp-busy::after { animation: none; opacity: .45; }   /* B2：静态半透明 */
   .mp-wizard-done { animation: none; }                 /* A4：成果卡直接呈现 */
+  /* B3：状态过渡逐类显式关停（全局一刀切之外的审计性收录） */
+  .mp-dot, .mp-lamp, .mp-cand-card, .mp-chosen, .mp-nochosen,
+  .mp-cand-degraded { transition: none; }
 }
 
 /* ── 总览页组件 ───────────────────────────────────────────────── */
@@ -1435,6 +1438,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-lamp {
   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
   background: var(--if-text-dim, #888); vertical-align: middle;
+  transition: background var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }
 .mp-lamp-ok { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, .5); }
 .mp-lamp-warn { background: #ffd60a; box-shadow: 0 0 6px rgba(255, 214, 10, .5); }
@@ -1499,7 +1504,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   transition: border-color var(--dur) var(--ease),
               opacity var(--dur) var(--ease);
 }
-.mp-cand-degraded { border-style: dashed; opacity: .85; }
+.mp-cand-degraded { border-style: dashed; opacity: .85;
+  transition: opacity var(--dur) var(--ease); }
 .mp-cand-main { display: flex; align-items: center; gap: var(--sp-1);
   flex: 1; min-width: 0; flex-wrap: wrap; }
 .mp-cand-target { font-size: var(--fs-table); }
@@ -1513,6 +1519,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border: 1px solid rgba(100, 210, 255, .35);
   border-radius: var(--radius-pill); padding: 1px 8px;
 }
+.mp-chosen { color: #30d158;
+  transition: color var(--dur) var(--ease); }
+.mp-nochosen { color: var(--if-text-dim, #888);
+  transition: color var(--dur) var(--ease); }
 .mp-feat {
   font-size: 11px; color: var(--if-accent, #0a84ff);
   border: 1px solid color-mix(in srgb, var(--if-accent, #0a84ff) 35%, transparent);
@@ -1522,7 +1532,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   display: flex; align-items: center; gap: var(--sp-1); }
 
 .mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
-  background: var(--if-border, #444); }
+  background: var(--if-border, #444);
+  transition: background var(--dur) var(--ease),
+              opacity var(--dur) var(--ease); }
 .mp-dot-ok   { background: #30d158; }
 .mp-dot-flow { background: #30d158;
   box-shadow: 0 0 6px rgba(48, 209, 88, .5);

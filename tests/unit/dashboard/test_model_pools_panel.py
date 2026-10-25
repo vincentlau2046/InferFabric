@@ -1766,3 +1766,45 @@ class TestFixPassWizard:
         assert not [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
         assert any("向导未初始化" in t["message"] for t in out["toasts"])
+
+
+# ── UI/UX P2 Task 5：B3 状态过渡 + reduced-motion 收录 ──────────
+# 契约：
+# - .mp-dot/.mp-lamp/.mp-cand-card/.mp-chosen 状态切换（绿/黄/红、
+#   选中态、劣化态）有 var(--dur)/var(--ease) 过渡，杜绝硬切；
+# - .mp-cand-degraded（冷却中虚线）有过渡声明；
+# - 全部 P2 动效/过渡类出现在 prefers-reduced-motion 降级块内。
+
+
+def _css_rule(selector):
+    css = (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+        encoding="utf-8")
+    m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", css)
+    assert m, "rule {} missing".format(selector)
+    return m.group(1)
+
+
+class TestP2Transitions:
+    def test_state_transition_rules_present(self):
+        for sel in (".mp-dot", ".mp-lamp", ".mp-cand-card", ".mp-chosen"):
+            rule = _css_rule(sel)
+            assert "transition:" in rule, sel
+            assert "var(--dur)" in rule, sel
+            assert "var(--ease)" in rule, sel
+        # 劣化态（虚线 + 半透明）单独声明过渡
+        assert "transition:" in _css_rule(".mp-cand-degraded")
+
+    def test_all_p2_motion_classes_in_reduced_motion_block(self):
+        css = (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+            encoding="utf-8")
+        blocks = re.findall(
+            r"prefers-reduced-motion:\s*reduce\)\s*\{(.*?)\n\}", css, re.S)
+        assert blocks, "reduced-motion block missing"
+        joined = "\n".join(blocks)
+        # 动效类（B2 骨架扫光、A4 成果卡淡入）
+        for cls in ("mp-busy", "mp-wizard-done"):
+            assert cls in joined, cls
+        # B3 过渡类 — 显式收录（全局一刀切之外的逐类声明，可审计）
+        for cls in ("mp-dot", "mp-lamp", "mp-cand-card", "mp-chosen",
+                    "mp-cand-degraded"):
+            assert cls in joined, cls
