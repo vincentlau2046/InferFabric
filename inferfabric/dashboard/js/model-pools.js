@@ -898,11 +898,20 @@
     return _catPromise;
   }
 
+  // 目录失败冷却（终审 I3）：目录不可用时 mouseover 高频触发不得逐次
+  // 重放 fetch+render — 失败后 5s（= 轮询周期）内至多重试一次
+  var PRIME_RETRY_MS = 5000;
+  var _catFailTs = null;   // 失败时刻（null=未失败；0 是合法时钟值，不作哨兵）
+
   // 手势入口（box mouseover/focusin）：取目录 → 重渲染出选项
   async function primeInline() {
     if (_catalog) return;
-    await ensureCatalog();
-    await renderModelPools();
+    if (_catPromise) return;   // 在途不叠加（首个手势已发起）
+    if (_catFailTs !== null
+        && Date.now() - _catFailTs < PRIME_RETRY_MS) return;
+    var ok = await ensureCatalog();
+    if (!ok) _catFailTs = Date.now();
+    await renderModelPools();   // 失败也当轮渲染禁用态（契约不变）
   }
 
   async function doMpInlineSelect(pool, candId, spec) {

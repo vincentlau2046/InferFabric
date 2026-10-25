@@ -887,6 +887,17 @@ class TestP2InlineEdit:
         assert "目录不可用" in out["htmlFinal"]
         assert 'value="local:' not in out["htmlFinal"]
 
+    def test_prime_throttled_after_catalog_failure(self, run_panel):
+        # 终审 I3：目录不可用时 high-frequency 手势（mouseover 风暴）不得
+        # 逐次重放 fetch+render — 5s 冷却内至多 1 次目录请求；
+        # 失败后的禁用态仍须当轮渲染（契约不变）
+        out = run_panel(_editor_routes(),
+                        actions=[{"fn": "mpPrimeInline"}] * 5)
+        cat_gets = [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools/catalog"]
+        assert len(cat_gets) == 1
+        assert "目录不可用" in out["htmlFinal"]
+
     def test_inline_select_shows_diff_bar_with_auto_preview(self, run_panel):
         actions = [{"fn": "doMpInlineSelect",
                     "args": ["fast", "loc", "local:qwen3-4b"]}]
