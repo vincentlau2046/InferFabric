@@ -1578,6 +1578,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   font-size: var(--fs-table); }
 .mp-degrade-x { margin-left: auto; border: none; background: transparent;
   color: var(--if-text-dim, #888); font-size: 14px; cursor: pointer; }
+/* A2 行内 diff 预览条（UI/UX P2 Task 1）：旧→新 红/绿双编码 + 预览 + 应用/撤销 */
+.mp-inline-diff {
+  display: flex; align-items: center; gap: var(--sp-1);
+  margin-top: var(--sp-1); padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: var(--fs-table);
+}
+.mp-diff-old { color: var(--crit); opacity: .85; text-decoration: line-through; }
+.mp-diff-arrow { color: var(--ink-3); }
+.mp-diff-new { color: var(--ok); font-weight: 600; }
+.mp-inline-preview {
+  color: var(--ink-2); flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-inline-sel {
+  margin-top: var(--sp-1); font-size: var(--fs-table);
+  color: var(--if-text, #eee); background: transparent;
+  border: 1px dashed var(--if-border, #444); border-radius: 6px;
+  padding: 2px 8px; max-width: 100%;
+}
+.mp-inline-sel:disabled { opacity: .55; }
 .mp-highlight { animation: mp-highlight-pulse 1.6s var(--ease) 2;
   outline: 2px solid color-mix(in srgb, #ffd60a 70%, transparent);
   outline-offset: 2px; }

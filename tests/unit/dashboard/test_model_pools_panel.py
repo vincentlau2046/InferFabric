@@ -1818,6 +1818,23 @@ class TestP2Transitions:
             assert cls in joined, cls
 
 
+class TestP2InlineDiffCss:
+    """A2 行内 diff 预览条 CSS（P2 Task 1 终审补漏）：spec 要求
+    「旧→新，红/绿」双编码 — 规则缺失时 diff 条渲染为无样式默认色文本。"""
+
+    def test_diff_bar_rules_present(self):
+        for sel in (".mp-inline-diff", ".mp-diff-old", ".mp-diff-new",
+                    ".mp-inline-sel"):
+            _css_rule(sel)   # 内部 assert 规则存在
+
+    def test_diff_old_red_new_green_dual_encoding(self):
+        # 双编码契约：旧目标红（--crit）/ 新目标绿（--ok）
+        assert "var(--crit)" in _css_rule(".mp-diff-old")
+        assert "var(--ok)" in _css_rule(".mp-diff-new")
+        # 预览结果文案为辅助信息（次级色）
+        assert "var(--ink-2)" in _css_rule(".mp-inline-preview")
+
+
 # ── UI/UX P3 Task 8：C1 延迟心跳迷你图 ──────────────────────────
 # 契约：
 # - renderModelPools 第 4 个 best-effort fetch（latency；失败 → null 降级）
