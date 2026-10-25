@@ -21,6 +21,7 @@ deadline 覆盖等待。本模块不 import handler 内部状态、不发客户�
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 log = logging.getLogger("inferfabric.model_pool.pool_forward")
@@ -29,6 +30,8 @@ DEFAULT_COOLDOWN_TTL_S = 60.0
 # 每指纹最近尝试记录上限（终审 M8）：池配置规模远低于此，仅防配置
 # 演变导致的指纹累积
 MAX_LAST_ATTEMPTS = 512
+# 事件环全局上限（P3 C2 时间线）：跨指纹共享，新在后，超限淘汰最旧
+MAX_EVENTS = 256
 # 404 隔离 TTL：模型/路由已不存在，长冷却避免每请求都撞 404（终审 #18）
 QUARANTINE_TTL_S = 1800.0
 # 429 无 Retry-After 头时的默认等待（受 deadline 截断）
@@ -61,21 +64,39 @@ class CooldownStore:
         # 展示「最近失败」；admission 跳过不算尝试
         self._last: dict[str, tuple[bool, int | None, float]] = {}
         self._probing: set[str] = set()
+        # 事件环（P3 C2 时间线）：{mono, wall, fingerprint, type, reason}，
+        # 新在后，全局 deque(maxlen) 封顶
+        self._events: deque = deque(maxlen=MAX_EVENTS)
         self._lock = threading.Lock()
 
     def _now(self, now: float | None) -> float:
         return time.monotonic() if now is None else now
 
+    def _record_event(self, fingerprint: str, type_: str,
+                      reason: str | None, mono: float) -> None:
+        """锁内追加事件（调用方必须已持锁）。wall = 真实墙钟（展示用）。"""
+        self._events.append({
+            "mono": mono, "wall": time.time(),
+            "fingerprint": fingerprint, "type": type_, "reason": reason,
+        })
+
     def add(self, fingerprint: str, now: float | None = None,
-            ttl: float | None = None, reason: str | None = None) -> None:
+            ttl: float | None = None, reason: str | None = None,
+            *, _event_type: str = "cooldown") -> None:
         with self._lock:
-            self._until[fingerprint] = self._now(now) + (ttl if ttl is not None else self._ttl)
+            t = self._now(now)
+            self._until[fingerprint] = t + (ttl if ttl is not None else self._ttl)
             self._reason[fingerprint] = reason
             self._probing.discard(fingerprint)
+            self._record_event(fingerprint, _event_type, reason, t)
 
     def quarantine(self, fingerprint: str, now: float | None = None) -> None:
-        """404 隔离：长 TTL 冷却（模型不存在，换请求也无解）。"""
-        self.add(fingerprint, now=now, ttl=QUARANTINE_TTL_S, reason="quarantine_404")
+        """404 隔离：长 TTL 冷却（模型不存在，换请求也无解）。
+
+        事件记 quarantine（不双记 cooldown）。
+        """
+        self.add(fingerprint, now=now, ttl=QUARANTINE_TTL_S,
+                 reason="quarantine_404", _event_type="quarantine")
 
     def is_cooling(self, fingerprint: str, now: float | None = None) -> bool:
         with self._lock:
@@ -107,6 +128,9 @@ class CooldownStore:
             if fingerprint in self._probing:
                 return False
             self._probing.add(fingerprint)
+            # 授予到期探测（健康端点放行不在此路径，不记事件）
+            self._record_event(fingerprint, "probe_start",
+                               self._reason.get(fingerprint), self._now(now))
             return True
 
     def finish_probe(self, fingerprint: str, ok: bool,
@@ -117,6 +141,10 @@ class CooldownStore:
             if fingerprint not in self._probing:
                 return
             self._probing.discard(fingerprint)
+            # 注册态回写才记事件（非探测 no-op 不记）；失败重新冷却
+            # 直接写 _until（不 double 记 cooldown）
+            self._record_event(fingerprint, "probe_pass" if ok else "probe_fail",
+                               self._reason.get(fingerprint), self._now(now))
             if ok:
                 self._until.pop(fingerprint, None)
                 self._reason.pop(fingerprint, None)
@@ -166,6 +194,21 @@ class CooldownStore:
                 fp: {"ok": ok, "status": status, "age_s": t - at}
                 for fp, (ok, status, at) in self._last.items()
             }
+
+    def events(self, now: float | None = None) -> list[dict]:
+        """锁内快照（P3 C2 时间线）：事件环，新在后。
+
+        条目：{age_s, wall_ts, fingerprint, type, reason}；age_s 由注入
+        钟算（与 store 其余视图同源），wall_ts 为记录时刻真实墙钟。
+        """
+        with self._lock:
+            t = self._now(now)
+            return [
+                {"age_s": t - e["mono"], "wall_ts": e["wall"],
+                 "fingerprint": e["fingerprint"], "type": e["type"],
+                 "reason": e["reason"]}
+                for e in self._events
+            ]
 
 
 @dataclass
@@ -252,7 +295,8 @@ def _is_non_fallback(status: int | None) -> bool:
 
 
 def run_attempts(pool, candidates, transport, cooldowns=None, *,
-                 monotonic=None, sleep=None, deadline_start=None) -> AttemptOutcome:
+                 monotonic=None, sleep=None, deadline_start=None,
+                 history=None) -> AttemptOutcome:
     """按候选序（调用方已排序/过滤）在预算内执行传输并按动作表回退。
 
     Args:
@@ -329,6 +373,10 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             cooldowns.finish_probe(cand.endpoint_fingerprint, res.ok, now=mono())
 
         if res.ok:
+            # P3 数据底盘：延迟环旁录（只记成功且有 TTFT；缺省 None 不旁录）
+            if history is not None and res.ttft_ms is not None:
+                history.record(pool.name, cand.candidate.id, res.ttft_ms,
+                               records[-1].duration_ms, True)
             pm_id, prov = _physical_identity(cand)
             return AttemptOutcome(ok=True, committed=True,
                                   status=res.status or 200,

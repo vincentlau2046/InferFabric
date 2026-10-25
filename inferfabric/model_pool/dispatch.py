@@ -301,7 +301,8 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
         # P2：预算内回退循环（统一 max_attempts/deadline，spec §6.2–§6.4）
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
                                cooldowns=getattr(pm, "pool_cooldowns", None),
-                               deadline_start=budget_start)
+                               deadline_start=budget_start,
+                               history=getattr(pm, "pool_history", None))
         _log_failed_attempts(pm, handler, outcome, req_id=req_id,
                              key_name=key_name, model=model)
     finally:
@@ -420,7 +421,8 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
         outcome = run_attempts(pool_snap.pool, sel.ordered, transport,
                                cooldowns=getattr(pm, "pool_cooldowns", None),
-                               deadline_start=budget_start)
+                               deadline_start=budget_start,
+                               history=getattr(pm, "pool_history", None))
         _log_failed_attempts(pm, handler, outcome, req_id=req_id,
                              key_name=key_name, model=model)
     finally:

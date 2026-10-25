@@ -124,6 +124,10 @@ class ProxyManager:
         # 键 = endpoint_fingerprint，选择期排除 reason=cooldown）
         from inferfabric.model_pool.pool_forward import CooldownStore
         self.pool_cooldowns = CooldownStore()
+        # P3 数据底盘：每池每候选延迟环（run_attempts 成功路径旁录，
+        # 只读端点 /admin/model-pools/latency 消费）
+        from inferfabric.model_pool.history import PoolHistory
+        self.pool_history = PoolHistory()
         # R5: ResponseCache — 精确匹配响应缓存（IFF_CACHE_ENABLED 环境变量可覆盖 YAML）
         _cache_env = os.environ.get("IFF_CACHE_ENABLED")
         if _cache_env is not None:
