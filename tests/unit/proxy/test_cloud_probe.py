@@ -13,6 +13,7 @@ harness 范式照 test_provider_models.py（ProxyHandler.__new__ + stub _read_bo
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from inferfabric.cloud_discovery import CloudDiscovery, SecretsManager, ProviderConfig
@@ -278,3 +279,40 @@ class TestCloudTestHandler:
         assert status == 200
         assert data["pass"] is True
         assert data["status"] == "ok"
+
+
+class TestOpenApiSpecDrift:
+    """终审 Important #2：served OpenAPI spec 必须与实际端点契约一致
+    （v6.6 放宽 SSRF 策略 + provider-test 新端点），不得继续描述旧策略。"""
+
+    def _spec(self):
+        from inferfabric.api_spec import get_openapi_spec
+        return get_openapi_spec()
+
+    def _schemas(self):
+        # spec bundle 用外部 $ref（./components/schemas.yaml#/…），served
+        # openapi.yaml 不内联 schemas — 字段级断言直接读 schemas.yaml
+        import yaml
+        p = Path(__file__).resolve().parents[3] \
+            / "api-spec" / "components" / "schemas.yaml"
+        return yaml.safe_load(p.read_text(encoding="utf-8"))
+
+    def test_provider_test_route_documented(self):
+        spec = self._spec()
+        assert "/admin/cloud/provider-test" in spec["paths"]
+
+    def test_cloud_test_request_documents_new_fields(self):
+        props = self._schemas()["CloudTestRequest"]["properties"]
+        assert "protocol" in props
+        assert "probe_model" in props
+
+    def test_cloud_test_response_documents_probe_contract(self):
+        props = self._schemas()["CloudTestResponse"]["properties"]
+        for field in ("pass", "http_status", "message", "protocol", "url"):
+            assert field in props, field
+
+    def test_cloud_test_describes_relaxed_policy(self):
+        spec = self._spec()
+        desc = spec["paths"]["/admin/cloud/test"]["post"]["description"]
+        assert "http" in desc and "https" in desc      # 新策略允许 plain http
+        assert "unregistered" in desc.lower() or "not registered" in desc.lower()

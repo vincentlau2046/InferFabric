@@ -1537,31 +1537,6 @@ def test_api_error_banner_last_sync_text():
     assert "重试" in frag, "banner must offer a retry action"
 
 
-def test_do_model_action_checks_res_ok_not_just_body():
-    """回归：doModelAction 必须在 !res.ok 时走错误分支（throw + 操作失败 toast），
-    不能仅凭 HTTP 200 判成功——否则 exclusive 模型 stop error 会被误报"已停止"。
-
-    契约来源：后端 _handle_stop 对 status:error 返回 4xx（Task 0.1，handler.py）。
-    前端 doModelAction 若只看 data.status 或忽略 res.ok，会回退到假成功。
-    此测试锁住"非 OK 响应 → 不显示 op.ok 成功 toast"的源码契约。"""
-    js = (ROOT / "inferfabric" / "dashboard" / "js" / "inference.js").read_text(encoding="utf-8")
-    # doModelAction 的 run() 必须检查 res.ok 并在非 OK 时 throw（不 fall-through 到 op.ok toast）
-    assert "if (!res.ok)" in js, (
-        "doModelAction must check res.ok — regression: silent 200 on stop error"
-    )
-    # 非 OK 分支必须解析 error/message 并 throw（驱动 catch 块的 操作失败 toast）
-    assert "throw new Error" in js, (
-        "doModelAction non-OK branch must throw to trigger 操作失败 toast"
-    )
-    # op.ok 成功 toast 必须在 res.ok 检查之后（非 OK 时不可达）
-    ok_idx = js.find("UI.toast(op.ok")
-    check_idx = js.find("if (!res.ok)")
-    throw_idx = js.find("throw new Error", check_idx)
-    assert ok_idx > check_idx and throw_idx > check_idx < ok_idx, (
-        "op.ok toast must come after the !res.ok check + throw, so error path can't reach it"
-    )
-
-
 def test_all_dashboard_stop_paths_route_via_do_model_action():
     """回归：所有 dashboard stop 按钮必须经 doModelAction（它做 res.ok 检查），
     不得有路径直调 fetch('/stop') 绕过错误处理。

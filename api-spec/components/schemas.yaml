@@ -430,19 +430,73 @@ CloudTestRequest:
   properties:
     url:
       type: string
-      description: Provider API URL
+      description: Provider base URL (unregistered hosts allowed, v6.6 policy)
     api_key:
       type: string
+      description: API key for the probe (empty = bare/public-endpoint probe)
+    protocol:
+      type: string
+      enum: [openai, anthropic]
+      default: openai
+    probe_model:
+      type: string
+      description: Optional — when set, a real 1-token completion is used
+        instead of the /models listing (strongest availability signal)
   required: [url]
 
 CloudTestResponse:
   type: object
+  description: >-
+    In-band probe result (HTTP 200 envelope; connection problems are
+    reported as status=error, never as 5xx)
   properties:
     status:
       type: string
-      enum: [ok]
+      enum: [ok, ok_no_listing, rate_limited, auth_failed,
+             model_unavailable, error]
+    protocol:
+      type: string
+    url:
+      type: string
+    http_status:
+      type: integer
+      description: Upstream HTTP status (0 = no response)
     model_count:
       type: integer
+      description: Upstream /models listing size (-1 = unparseable, 0 = none)
+    message:
+      type: string
+      description: Human-readable detail (upstream error truncated to 160 chars)
+    pass:
+      type: boolean
+      description: status in (ok, ok_no_listing, rate_limited) — UI gate
+
+CloudProviderTestRequest:
+  type: object
+  properties:
+    provider:
+      type: string
+      description: Registered provider name
+    probe_model:
+      type: string
+      description: Optional probe model (see CloudTestRequest.probe_model)
+  required: [provider]
+
+CloudProviderTestResponse:
+  type: object
+  properties:
+    provider:
+      type: string
+    key_set:
+      type: boolean
+      description: Whether the stored API key is present (value never returned)
+    results:
+      type: array
+      items:
+        $ref: '#/CloudTestResponse'
+    ok:
+      type: boolean
+      description: true when every base URL result passed
 
 PresetsResponse:
   type: object
@@ -712,7 +766,9 @@ UnauthorizedResponse:
 
 TokenStatsResponse:
   type: object
-  description: Token usage state: top-level keys are dates (YYYY-MM-DD), values map model.
+  description: >-
+    Token usage state. Top-level keys are dates (YYYY-MM-DD),
+    values map model.
   additionalProperties:
     type: object
     additionalProperties:

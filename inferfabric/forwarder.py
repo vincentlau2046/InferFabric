@@ -29,6 +29,7 @@ from inferfabric.proxy.usage import normalize_usage
 # 仅作用于云分支（本地转发路径不受影响）。
 _CLOUD_UA = "inferfabric/6.1.6"
 
+
 @dataclass
 class CloudResult:
     """cloud 路由请求结果 — 供 RequestLog 补全"""

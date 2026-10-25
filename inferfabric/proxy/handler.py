@@ -224,7 +224,9 @@ _GET_ROUTES = {
     "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
     "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
     "/admin/model-pools/runtime": _admin(lambda h, pm: mp_admin.handle_get_model_pools_runtime(h, pm)),
-    "/admin/model-pools/catalog": _admin(lambda h, pm: mp_admin.handle_get_model_pools_catalog(h, pm)),
+    "/admin/model-pools/catalog":   _admin(lambda h, pm: mp_admin.handle_get_model_pools_catalog(h, pm)),
+    "/admin/model-pools/latency":   _admin(lambda h, pm: mp_admin.handle_get_model_pools_latency(h, pm)),
+    "/admin/model-pools/events":    _admin(lambda h, pm: mp_admin.handle_get_model_pools_events(h, pm)),
     "/api/openapi.json":        _serve_api_spec,
 }
 

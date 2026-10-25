@@ -645,13 +645,21 @@ paths:
   /admin/cloud/test:
     post:
       tags: [Cloud Admin]
-      summary: Test cloud provider connection
+      summary: Probe a cloud provider base URL (v6.6 relaxed policy)
       description: |
-        Test connectivity to a cloud provider URL. Includes SSRF protection:
-        - Only HTTPS URLs allowed
-        - Hostname must not resolve to private/internal IPs
-        - Hostname must match a registered cloud provider
-        - DNS-rebinding protection via TOCTOU-safe connection
+        Probe connectivity to a provider base URL BEFORE it is registered,
+        so no registry whitelist is applied. SSRF boundary (admin-gated,
+        localhost-reachable endpoint):
+        - scheme must be http or https (plain http allowed for intranet relay stations)
+        - unregistered / not-yet-known hostnames are allowed
+        - private / LAN / loopback targets are ALLOWED and warning-logged
+          (admin-initiated intranet relay scenario)
+        - cloud metadata address 169.254.169.254 is still rejected
+        - DNS-rebinding protection via TOCTOU-safe pinned connection
+          (TCP connects to the validated IP, TLS SNI against the original host)
+        Result classification (HTTP 200 envelope; connection problems are
+        reported in-band via `status: error`, never as 5xx):
+        ok | ok_no_listing | rate_limited | auth_failed | model_unavailable | error
       operationId: testCloudProvider
       security:
         - AdminToken: []
@@ -663,25 +671,59 @@ paths:
               $ref: ./components/schemas.yaml#/CloudTestRequest
       responses:
         "200":
-          description: Connection test OK
+          description: Probe result (see status enum)
           content:
             application/json:
               schema:
                 $ref: ./components/schemas.yaml#/CloudTestResponse
         "400":
-          description: SSRF check failed or missing URL
+          description: Missing url / invalid protocol / URL check failed
           content:
             application/json:
               schema:
                 $ref: ./components/schemas.yaml#/ErrorResponse
         "401":
           $ref: '#/components/responses/Unauthorized'
-        "502":
-          description: Connection failed
+
+  /admin/cloud/provider-test:
+    post:
+      tags: [Cloud Admin]
+      summary: Test a registered provider's base URLs with its stored key
+      description: |
+        Probe all configured base URLs (openai_base / anthropic_base) of an
+        already-registered provider using the stored API key. The key value is
+        never returned — only `key_set: bool`. Same SSRF boundary and pinned
+        connection as /admin/cloud/test.
+      operationId: testCloudProviderStored
+      security:
+        - AdminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ./components/schemas.yaml#/CloudProviderTestRequest
+      responses:
+        "200":
+          description: Probe results for each base URL (`ok` = all passed)
+          content:
+            application/json:
+              schema:
+                $ref: ./components/schemas.yaml#/CloudProviderTestResponse
+        "400":
+          description: Missing provider, or provider has no base URLs configured
           content:
             application/json:
               schema:
                 $ref: ./components/schemas.yaml#/ErrorResponse
+        "404":
+          description: Provider not registered
+          content:
+            application/json:
+              schema:
+                $ref: ./components/schemas.yaml#/ErrorResponse
+        "401":
+          $ref: '#/components/responses/Unauthorized'
 
   # ═══════════════════════════════════════════════════════════════
   # 2.5 Monitoring

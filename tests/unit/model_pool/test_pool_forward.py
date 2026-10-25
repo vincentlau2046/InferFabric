@@ -501,3 +501,30 @@ class TestCommittedStreamBoundary:
         out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
         assert out.committed is True and out.ok is False
         assert t.calls == ["c1"]
+
+
+class TestRunAttemptsHistory:
+    """P3 数据底盘：run_attempts 旁录 PoolHistory（可选、向后兼容）。"""
+
+    def test_run_attempts_calls_history_on_success_only(self):
+        # 前置一次连接失败（真实尝试但不成功）→ 不旁录；成功 → 旁录一次
+        pool = SimpleNamespace(name="p", max_attempts=3, deadline_ms=60000)
+        t = Recorder([
+            AttemptResult(status=None, error="conn"),
+            AttemptResult(ok=True, status=200, committed=True, ttft_ms=123.0),
+        ])
+        calls = []
+        history = SimpleNamespace(record=lambda *a: calls.append(a))
+        out = run_attempts(pool, [_cand("c1"), _cand("c2")], t,
+                           history=history)
+        assert out.ok is True
+        assert len(calls) == 1
+        pool_name, cand_id, ttft, total, ok = calls[0]
+        assert (pool_name, cand_id, ttft, ok) == ("p", "c2", 123.0, True)
+        assert total >= 0.0            # duration_ms（真实单调钟）
+
+    def test_run_attempts_history_none_backward_compatible(self):
+        # 缺省 history=None：既有路径零变化（不触碰 pool.name）
+        t = Recorder([_ok()])
+        out = run_attempts(_pool(), [_cand("c1")], t)
+        assert out.ok is True

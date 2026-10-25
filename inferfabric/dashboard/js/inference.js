@@ -346,7 +346,7 @@
           title: '切换模型',
           body: '将切换到 ' + name + '。这是一项重型操作，可能需要数十秒加载权重。确定？',
         },
-        ok: name + ' 切换中',
+        ok: name + ' 已切换',
       },
       stop: {
         url: '/stop',
@@ -393,8 +393,24 @@
           } catch (_) {}
           throw new Error(msg);
         }
-        // switch 依赖后端设置 switch_target → store 既有 overlay 机制自动出现
-        UI.toast(op.ok, 'ok');
+        var message = op.ok;
+        if (action === 'switch') {
+          var result = await res.json();
+          var status = result && result.status;
+          if (status !== 'switched' && status !== 'already_active') {
+            throw new Error((result && (result.error || result.message)) || '切换结果无效，请刷新状态确认');
+          }
+          if (result.rollback === 'succeeded') {
+            store.forceRefresh();
+            throw new Error('切换到 ' + name + ' 失败，已恢复 ' + (result.model || '原模型'));
+          }
+          if (result.model && result.model !== name) {
+            store.forceRefresh();
+            throw new Error('切换未完成：当前模型为 ' + result.model);
+          }
+          if (status === 'already_active') message = name + ' 已在运行';
+        }
+        UI.toast(message, 'ok');
         store.forceRefresh();
       } catch (e) {
         UI.toast('操作失败: ' + (e && e.message ? e.message : e), 'error');

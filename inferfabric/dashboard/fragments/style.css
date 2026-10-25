@@ -47,6 +47,21 @@
 
   --t-fast: 120ms ease;
   --t-mid:  200ms ease;
+
+  /* UI/UX P1：Motion 令牌 — 时长 + macOS 质感缓动曲线（v7.2.0）。
+     组件动效一律引用这四个令牌；reduced-motion 降级见文件尾。 */
+  --dur-fast: 120ms;
+  --dur:      200ms;
+  --dur-slow: 400ms;
+  --ease:     cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* UI/UX P1：无障碍 — 用户偏好减动效时全局一刀切关停（无零散例外） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 /* ── L2: Semantic 令牌 — DARK（:root 默认，主力主题） ──────────── */
@@ -733,6 +748,15 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   }
   .skeleton-row::after { display: none; }
   .switch-spinner { animation: none; border-top-color: var(--accent); }
+  .mp-busy::after { animation: none; opacity: .45; }   /* B2：静态半透明 */
+  .mp-wizard-done { animation: none; }                 /* A4：成果卡直接呈现 */
+  /* B3：状态过渡逐类显式关停（全局一刀切之外的审计性收录） */
+  .mp-dot, .mp-lamp, .mp-cand-card, .mp-chosen, .mp-nochosen,
+  .mp-cand-degraded { transition: none; }
+  /* C3：光带停止流动（静态实色）；C4：高亮呼吸停止（静态描边） */
+  .mp-beam-flow { animation: none;
+    background: var(--if-accent, #0a84ff); }
+  .mp-highlight { animation: none; }
 }
 
 /* ── 总览页组件 ───────────────────────────────────────────────── */
@@ -1418,6 +1442,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-lamp {
   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
   background: var(--if-text-dim, #888); vertical-align: middle;
+  transition: background var(--dur) var(--ease),
+              box-shadow var(--dur) var(--ease);
 }
 .mp-lamp-ok { background: #30d158; box-shadow: 0 0 6px rgba(48, 209, 88, .5); }
 .mp-lamp-warn { background: #ffd60a; box-shadow: 0 0 6px rgba(255, 214, 10, .5); }
@@ -1469,3 +1495,175 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--if-text-dim, #999); }
 .mp-snippet { background: rgba(0, 0, 0, .25); border-radius: 8px;
   padding: 10px 12px; font-size: 12px; overflow-x: auto; margin: 4px 0 8px; }
+
+/* ── UI/UX P1：候选体检卡 + 状态灯五态 + 环形倒计时（v7.2.0）──
+   灯语义（用户拍板 #3）：flow=真实数据交换（呼吸流动）；ok=routable 空闲；
+   cool=冷却/隔离（暗态，卡边框虚线 = unroutable 区分）；probe=半开探测。 */
+.mp-cands { display: flex; flex-direction: column; gap: var(--sp-1);
+  margin: var(--sp-1) 0; }
+.mp-cand-card {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: 10px var(--sp-2); background: var(--surface-2, #1c242e);
+  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  transition: border-color var(--dur) var(--ease),
+              opacity var(--dur) var(--ease);
+}
+.mp-cand-degraded { border-style: dashed; opacity: .85;
+  transition: opacity var(--dur) var(--ease); }
+.mp-cand-main { display: flex; align-items: center; gap: var(--sp-1);
+  flex: 1; min-width: 0; flex-wrap: wrap; }
+.mp-cand-target { font-size: var(--fs-table); }
+.mp-cand-kind, .mp-cand-pri {
+  font-size: 11px; color: var(--if-text-dim, #999);
+}
+.mp-cand-kind { border: 1px solid var(--if-border, #444);
+  border-radius: var(--radius-pill); padding: 1px 8px; }
+.mp-proto-badge {
+  font-size: 11px; font-family: var(--font-mono); color: #64d2ff;
+  border: 1px solid rgba(100, 210, 255, .35);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+}
+.mp-chosen { color: #30d158;
+  transition: color var(--dur) var(--ease); }
+.mp-nochosen { color: var(--if-text-dim, #888);
+  transition: color var(--dur) var(--ease); }
+.mp-feat {
+  font-size: 11px; color: var(--if-accent, #0a84ff);
+  border: 1px solid color-mix(in srgb, var(--if-accent, #0a84ff) 35%, transparent);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+}
+.mp-cand-rt { font-size: var(--fs-table); color: var(--if-text-dim, #999);
+  display: flex; align-items: center; gap: var(--sp-1); }
+/* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */
+.mp-spark-wrap { display: inline-flex; align-items: center;
+  margin-left: auto; flex: none; }
+.mp-spark { display: block; }
+/* C2 故障时间线：横向 4px 轴线 + 事件点着色，hover 用原生 title */
+.mp-tl-row { display: flex; flex-direction: column; align-items: flex-start;
+  gap: var(--sp-1); margin-top: var(--sp-2); }
+.mp-tl { position: relative; height: 16px; width: 100%; }
+.mp-tl::after { content: ''; position: absolute; left: 0; right: 0;
+  bottom: 4px; height: 4px; border-radius: 2px;
+  background: color-mix(in srgb, var(--if-accent, #0a84ff) 16%, transparent); }
+.mp-tl-dot { position: absolute; bottom: 2px; width: 8px; height: 8px;
+  border-radius: 50%; transform: translateX(-50%); flex: none; }
+.mp-tl-cooldown { background: #ffd60a; }
+.mp-tl-quarantine { background: #ff453a; }
+.mp-tl-probe_start { background: #64d2ff; }
+.mp-tl-probe_pass { background: #30d158; }
+.mp-tl-probe_fail { background: #ff453a; }
+/* C3 活体光带：池顶三态 — flow 流动/ idle 静默/ dark 不可路由虚线 */
+.mp-beam { height: 3px; border-radius: 2px; margin-bottom: var(--sp-2); }
+.mp-beam-flow {
+  background: linear-gradient(90deg, transparent,
+              var(--if-accent, #0a84ff), transparent);
+  background-size: 200% 100%;
+  animation: mp-beam-flow 2.4s linear infinite;
+}
+@keyframes mp-beam-flow {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.mp-beam-idle {
+  background: color-mix(in srgb, var(--if-accent, #0a84ff) 25%, transparent);
+}
+.mp-beam-dark { background: transparent; height: 0; border-radius: 0;
+  border-top: 2px dashed var(--if-border, #444); }
+/* C4 劣化提示：首候选降级而服务由回退候选提供 */
+.mp-degrade { display: flex; align-items: center; gap: var(--sp-2);
+  padding: 6px 10px; margin-bottom: var(--sp-2);
+  border: 1px solid color-mix(in srgb, #ffd60a 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, #ffd60a 10%, transparent);
+  font-size: var(--fs-table); }
+.mp-degrade-x { margin-left: auto; border: none; background: transparent;
+  color: var(--if-text-dim, #888); font-size: 14px; cursor: pointer; }
+/* A2 行内 diff 预览条（UI/UX P2 Task 1）：旧→新 红/绿双编码 + 预览 + 应用/撤销 */
+.mp-inline-diff {
+  display: flex; align-items: center; gap: var(--sp-1);
+  margin-top: var(--sp-1); padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: var(--fs-table);
+}
+.mp-diff-old { color: var(--crit); opacity: .85; text-decoration: line-through; }
+.mp-diff-arrow { color: var(--ink-3); }
+.mp-diff-new { color: var(--ok); font-weight: 600; }
+.mp-inline-preview {
+  color: var(--ink-2); flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-inline-sel {
+  margin-top: var(--sp-1); font-size: var(--fs-table);
+  color: var(--if-text, #eee); background: transparent;
+  border: 1px dashed var(--if-border, #444); border-radius: 6px;
+  padding: 2px 8px; max-width: 100%;
+}
+.mp-inline-sel:disabled { opacity: .55; }
+.mp-highlight { animation: mp-highlight-pulse 1.6s var(--ease) 2;
+  outline: 2px solid color-mix(in srgb, #ffd60a 70%, transparent);
+  outline-offset: 2px; }
+@keyframes mp-highlight-pulse {
+  0%, 100% { outline-color: transparent; }
+  50% { outline-color: color-mix(in srgb, #ffd60a 70%, transparent); }
+}
+
+.mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
+  background: var(--if-border, #444);
+  transition: background var(--dur) var(--ease),
+              opacity var(--dur) var(--ease); }
+.mp-dot-ok   { background: #30d158; }
+.mp-dot-flow { background: #30d158;
+  box-shadow: 0 0 6px rgba(48, 209, 88, .5);
+  animation: mp-breathe 2.4s var(--ease) infinite; }
+.mp-dot-probe { background: #ffd60a;
+  animation: mp-breathe .9s var(--ease) infinite; }
+.mp-dot-cool { background: #ffd60a; opacity: .5; }
+.mp-dot-off  { background: var(--if-border, #444); }
+
+@keyframes mp-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .45; transform: scale(.82); }
+}
+
+/* 环形倒计时：--p = 剩余百分比（0-100），由局部渲染任务 JS 驱动 */
+.mp-ring { width: 14px; height: 14px; border-radius: 50%; flex: none;
+  background: conic-gradient(#ffd60a calc(var(--p, 100) * 1%),
+                             var(--if-border, #444) 0);
+  position: relative; }
+.mp-ring::after { content: ''; position: absolute; inset: 3px;
+  border-radius: 50%; background: var(--surface-2, #1c242e); }
+
+/* B2 切换中骨架态（UI/UX P2）：应用/开关在途时池卡微光扫过 — 进度感 */
+.mp-busy { position: relative; overflow: hidden; }
+.mp-busy::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(105deg, transparent 42%,
+      color-mix(in srgb, var(--if-accent, #0a84ff) 10%, transparent) 50%,
+      transparent 58%);
+  animation: mp-sweep var(--dur-slow) var(--ease) infinite;
+}
+@keyframes mp-sweep {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+
+/* A4 向导出口成果卡（UI/UX P2）：创建成功先展示成果 + 片段直通，
+   「完成」手动返回（用户拍板：不自动淡出 — 复制会被打断） */
+.mp-wizard-done {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  background: var(--surface-2, #1c242e);
+  animation: mp-fade-in var(--dur-slow) var(--ease);
+}
+.mp-wizard-done-hdr { font-size: var(--fs-body); font-weight: 600; }
+.mp-wizard-done-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--sp-2); padding: 6px var(--sp-2);
+  border: 1px solid var(--if-border, #444); border-radius: 8px;
+}
+@keyframes mp-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

@@ -34,6 +34,8 @@
   var POOLS_URL = '/admin/model-pools';
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
+  var LATENCY_URL = '/admin/model-pools/latency';
+  var EVENTS_URL = '/admin/model-pools/events';
   var CATALOG_URL = '/admin/model-pools/catalog';
   var TOGGLE_URL = '/admin/model-pools/toggle';
   var VALIDATE_URL = '/admin/model-pools/validate';
@@ -44,12 +46,34 @@
   var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
   // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
   // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
-  var _state = { def: null, status: null, runtime: null };
+  var _state = { def: null, status: null, runtime: null, latency: null,
+                 events: null };
+  // C2：故障时间线展开态（pool → true；进 structSig — 开合是结构）
+  var _timelineOpen = {};
+  // C4：劣化提示关闭态（pool → true；进 structSig；劣化解除时清键重新武装）
+  var _degradeDismissed = {};
+  // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
+  var BEAM_FRESH_S = 30;
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
   var _edit = null;
   var _undo = null;
+  // A3 错误即导航（UI/UX P1 Task 3）：常驻行动横幅 — toast 即时反馈，
+  // banner 承担「常驻 + 去哪修」；action = {label, run} 闭包（重试原操作）
+  var _actionError = null;
+  // B1 局部渲染（UI/UX P1 Task 4）：结构签名 + 定点更新 + 本地倒计时
+  var _lastSig = null;    // 最近一次整块重建时的结构签名
+  var _cd = {};           // 'pool|candId' → {pool, candId, total, base, rt}
+  var _rtAt = 0;          // runtime 拉取时刻（Date.now()，倒计时锚点，评审 I7）
+  var _cdTimer = null;
+  // A2 行内 diff 编辑（UI/UX P2 Task 1）：目录缓存（null=未取/不可用，
+  // 每次渲染 best-effort 重试；应用成功后置 null 触发重取）+ 行内会话
+  var _catalog = null;
+  //   _inline = {pool, candId, spec, base, work, base_revision, validated,
+  //              previewHtml, rev} — spec/rev 进结构签名：换目标或预览
+  //   完成 完成（启用应用按钮）都必须重建
+  var _inline = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
   function esc(s) {
@@ -78,35 +102,255 @@
     return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2);
   }
 
-  // 候选行运行态：可用性徽标 + 冷却/隔离 + 最近失败
-  function runtimeBadge(rt) {
+  // 候选行运行态（纯文本 — innerHTML 路径 esc 包裹，局部更新走 textContent）
+  function runtimeBadgeText(rt) {
     if (!rt) return '—';
     var parts = [];
     if (rt.cooling) {
       var label = rt.cooling.reason === 'quarantine_404' ? '隔离'
         : (rt.cooling.probing ? '探测中' : '冷却');
       parts.push(label + ' ' + fmtRemaining(rt.cooling.remaining_s)
-        + (rt.cooling.reason ? ' (' + esc(rt.cooling.reason) + ')' : ''));
+        + (rt.cooling.reason ? ' (' + rt.cooling.reason + ')' : ''));
     }
     parts.push(rt.active
       ? (rt.kind === 'local' ? '服务中' : '已发现')
       : (rt.kind === 'local' ? '未启动' : '未发现'));
     if (rt.last_attempt && !rt.last_attempt.ok) {
-      parts.push('HTTP ' + esc(rt.last_attempt.status));
+      parts.push('HTTP ' + rt.last_attempt.status);
     }
     return parts.join(' · ');
+  }
+
+  // 状态灯五态（UI/UX P1，用户拍板 #3）：
+  // probe（半开探测）> cool（冷却/隔离）> flow（真实数据交换：last_attempt
+  // 成功且 <30s）> ok（routable 空闲）> off（未启动/未发现，unroutable）
+  function candDotClass(rt) {
+    if (!rt) return 'mp-dot-off';
+    if (rt.cooling) {
+      return rt.cooling.probing ? 'mp-dot-probe' : 'mp-dot-cool';
+    }
+    var la = rt.last_attempt;
+    if (la && la.ok && typeof la.age_s === 'number' && la.age_s < 30) {
+      return 'mp-dot-flow';
+    }
+    return rt.active ? 'mp-dot-ok' : 'mp-dot-off';
+  }
+
+  // 协议徽章来源：声明协议优先，回退 evidence 键（GET 视图无 declared 字段时）
+  function candProtocols(c) {
+    if (Array.isArray(c.declared_protocols) && c.declared_protocols.length) {
+      return c.declared_protocols;
+    }
+    return Object.keys(c.evidence || {});
+  }
+
+  // A2 行内下拉选项（与编辑器 opts 同源同格式 — 目录是唯一元数据总线）
+  function inlineOptions() {
+    var o = '';
+    (_catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (_catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '">云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // A2 行内 diff 预览条：旧→新（红/绿）+ 自动预览结果 + 应用/撤销。
+  // validated 经 _inline.rev 进结构签名 — 预览完成 → 重建以启用应用按钮
+  function inlineDiffBar(pool, oldCand) {
+    var n = _inline;
+    var newC = candFromCatalogValue(n.spec, n.candId, _catalog);
+    var newTarget = newC.kind === 'local' ? newC.model_name
+      : (newC.provider + '/' + newC.model_id);
+    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开
+    var oldTarget = oldCand.target
+      ? oldCand.target
+      : (oldCand.kind === 'local' ? oldCand.model_name
+         : (oldCand.provider + '/' + oldCand.model_id));
+    return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
+      + '|' + esc(n.candId) + '">'
+      + '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
+      + '<span class="mp-diff-arrow">→</span>'
+      + '<span class="mp-diff-new mono">' + esc(newTarget) + '</span>'
+      + '<span class="mp-inline-preview" id="mp-inline-preview-'
+      + esc(pool) + '-' + esc(n.candId) + '">'
+      + (n.previewHtml || '预览中…') + '</span>'
+      + '<button type="button" data-mp-inline-apply="' + esc(pool) + '|'
+      + esc(n.candId) + '"'
+      + (n.validated ? '' : ' disabled title="需先通过预览"')
+      + '>应用</button>'
+      + '<button type="button" data-mp-inline-cancel="1">撤销</button>'
+      + '</div>';
+  }
+
+  // 候选体检卡（UI/UX P1 Task 2：表格 → 横向卡片，状态一眼可读）
+  /* ── C1 延迟心跳迷你图（P3 Task 8）── */
+  // 60×24 内联 SVG：polyline + 末点圆；x 按序铺满、y 按 TTFT 归一反演
+  //（越低越高位）。points = latency 端点该候选环（新在后）。
+  function sparkSvg(points) {
+    var W = 60, H = 24, PAD = 2;
+    var pts = (points || []).filter(function (p) {
+      return p && typeof p.ttft_ms === 'number' && isFinite(p.ttft_ms);
+    });
+    if (!pts.length) return '';
+    var lo = Infinity, hi = -Infinity;
+    pts.forEach(function (p) {
+      if (p.ttft_ms < lo) lo = p.ttft_ms;
+      if (p.ttft_ms > hi) hi = p.ttft_ms;
+    });
+    if (hi === lo) hi = lo + 1;   // 全平 → 置顶直线（不除零）
+    var n = pts.length;
+    var coords = pts.map(function (p, i) {
+      var x = (n === 1) ? W / 2 : PAD + (W - 2 * PAD) * i / (n - 1);
+      var y = PAD + (H - 2 * PAD) * (1 - (p.ttft_ms - lo) / (hi - lo));
+      return [x, y];
+    });
+    var last = coords[n - 1];
+    return '<svg class="mp-spark" width="' + W + '" height="' + H
+      + '" viewBox="0 0 ' + W + ' ' + H + '" aria-hidden="true">'
+      + '<polyline points="' + coords.map(function (cd) {
+          return cd[0].toFixed(1) + ',' + cd[1].toFixed(1);
+        }).join(' ')
+      + '" fill="none" style="stroke:var(--accent)" stroke-width="1.5"'
+      + ' stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1)
+      + '" r="2" fill="var(--accent)"/></svg>';
+  }
+
+  // 候选延迟环（新在后，端点已按 20 封顶）；无数据 → []
+  function latRing(pool, candId) {
+    var lat = _state.latency;
+    var ring = (lat && lat.pools && lat.pools[pool] && lat.pools[pool][candId]);
+    return Array.isArray(ring) ? ring : [];
+  }
+
+  /* ── C2 失败时间线（P3 Task 9）── */
+  // 池事件列表（新在后，端点已按 50 封顶）；无数据 → []
+  function poolEvents(pool) {
+    var ev = _state.events;
+    var list = (ev && ev.pools && ev.pools[pool]);
+    return Array.isArray(list) ? list : [];
+  }
+
+  // 轴内事件点（不含外壳）：最近 30min 窗口，新在右；
+  // left% = (1 - age/1800)·100，越界夹紧；title 原生气泡（YAGNI）
+  function timelineDots(pool) {
+    return poolEvents(pool).map(function (e) {
+      var age = (typeof e.age_s === 'number' && isFinite(e.age_s))
+        ? e.age_s : 1800;
+      var left = Math.max(0, Math.min(100, (1 - age / 1800) * 100));
+      var title = (e.type || '') + ' · ' + (e.target || '')
+        + (e.reason ? ' · ' + e.reason : '')
+        + ' · ' + Math.round(age) + 's 前';
+      return '<span class="mp-tl-dot mp-tl-' + esc(e.type || 'cooldown')
+        + '" style="left:' + left.toFixed(1) + '%" title="' + esc(title)
+        + '"></span>';
+    }).join('');
+  }
+
+  function candCard(pool, c, rt) {
+    var dot = candDotClass(rt);
+    var ev = c.evidence || {};
+    var html = '<div class="mp-cand-card'
+      + ((rt && rt.cooling) ? ' mp-cand-degraded' : '')
+      + '" data-mp-cand-card="' + esc(c.id) + '">'
+      + '<span class="mp-dot ' + dot + '" id="mp-dot-'
+      + esc(pool) + '-' + esc(c.id) + '"></span>'
+      + '<span class="mp-cand-main">'
+      + '<span class="mono mp-cand-target">' + esc(c.target) + '</span>'
+      + '<span class="mp-cand-kind">'
+      + esc(c.kind === 'local' ? '本地' : '云') + '</span>'
+      + '<span class="mono mp-cand-pri">P' + esc(c.priority) + '</span>'
+      + candProtocols(c).map(function (p) {
+          return '<span class="mp-proto-badge" title="'
+            + (ev[p] ? esc(ev[p]) : '') + '">' + esc(p) + '</span>';
+        }).join('')
+      + (c.features || []).map(function (f) {
+          return '<span class="mp-feat">' + esc(f) + '</span>';
+        }).join('')
+      + '</span>'
+      + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
+      + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>'
+      // C1：延迟心跳迷你图容器常驻（by-id 更新锚点），有数据才出 SVG
+      + '<span class="mp-spark-wrap" id="mp-spark-' + esc(pool) + '-'
+      + esc(c.id) + '">' + sparkSvg(latRing(pool, c.id).slice(-20))
+      + '</span>';
+    // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
+    if (rt && rt.cooling) {
+      html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
+        + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
+        + esc(c.id) + '"></span>';
+    }
+    // A2 行内编辑入口：卡内「替换为…」下拉。目录手势惰性预热（Task 1
+    // 裁决）：null=未预热（占位可选，mouseover/focusin 即拉取）；
+    // false=拉取失败（禁用 + 明示）；object=就绪出选项
+    html += '<select class="mp-inline-sel" data-mp-inline-replace="'
+      + esc(pool) + '|' + esc(c.id) + '"'
+      + (_catalog === false ? ' disabled' : '') + '>'
+      + (_catalog
+          ? '<option value="">替换为…</option>' + inlineOptions()
+          : _catalog === false
+            ? '<option value="">目录不可用 — 请用编辑器</option>'
+            : '<option value="">替换为…</option>')
+      + '</select>';
+    html += '</div>';
+    return html;
+  }
+
+  /* ── C3 活体光带（P3 Task 10）：三态纯函数（渲染/applyDynamic 同源） ── */
+  // flow：任一候选 last_attempt.ok 且新鲜（<BEAM_FRESH_S）— 真实数据交换中；
+  // dark：全协议无 chosen（不可路由/全冷却）；idle：其余（可路由但静默）
+  function beamClass(stP, rtP) {
+    // 不可路由优先于新鲜交换（unroutable 是当前事实，交换是 30s 内历史）
+    var protocols = ((stP || {}).protocols) || {};
+    var anyChosen = ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
+    if (!anyChosen) return 'mp-beam-dark';
+    var fresh = false;
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && la.ok && typeof la.age_s === 'number'
+          && la.age_s < BEAM_FRESH_S) fresh = true;
+    });
+    return fresh ? 'mp-beam-flow' : 'mp-beam-idle';
+  }
+
+  /* ── C4 劣化判定（纯函数）：首候选冷却/隔离 && 任一协议仍有 chosen
+     （服务由回退候选提供 — 用户应知道首选已降级）── */
+  function isDegraded(poolDef, stP, rtP) {
+    var cands = (poolDef && poolDef.candidates) || [];
+    if (!cands.length) return false;
+    var rtById = {};
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      rtById[rc.id] = rc;
+    });
+    var rtC = rtById[cands[0].id];
+    if (!rtC || !rtC.cooling) return false;
+    var protocols = ((stP || {}).protocols) || {};
+    return ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
   }
 
   /* ── 池卡片 ── */
   function poolCard(name, def, st, rt) {
     var checked = def.enabled ? ' checked' : '';
-    var html = '<div class="if-card mp-pool" data-mp-card="' + esc(name) + '">'
+    var html = '<div class="if-card mp-pool" id="mp-card-' + esc(name)
+      + '" data-mp-card="' + esc(name) + '">'
+      // C3：池顶活体光带（三态由 beamClass 纯函数定，applyDynamic 同源更新）
+      + '<div class="mp-beam ' + beamClass(st, rt) + '" id="mp-beam-'
+      + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
       + '<span class="mp-lamps">'
       + ['openai', 'anthropic'].map(function (proto) {
           var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
-          return '<span class="mp-lamp ' + cls + '" data-mp-lamp="' + esc(proto)
+          return '<span class="mp-lamp ' + cls + '" id="mp-lamp-' + esc(name)
+            + '-' + esc(proto) + '" data-mp-lamp="' + esc(proto)
             + '" title="' + esc(proto) + '"></span>';
         }).join('')
       + '</span>'
@@ -119,28 +363,29 @@
       + '"' + checked + '><span>启用</span></label>'
       + '</span>'
       + '</div>';
+    // C4：首候选降级而服务仍由回退候选提供 → 引导条（关闭后同态不重现）
+    if (isDegraded(def, st, rt) && !_degradeDismissed[name]) {
+      html += '<div class="mp-degrade"><span>首选已降级 — 当前服务经回退候选提供</span>'
+        + '<button type="button" class="mp-edit-btn" data-mp-degrade-view="'
+        + esc(name) + '">查看回退链</button>'
+        + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
+        + esc(name) + '" title="关闭">×</button></div>';
+    }
 
     // 候选链（id / 优先级 / 类型 / 目标 / 证据态 / 运行态）
     var cands = def.candidates || [];
     var rtById = {};
     (((rt || {}).candidates) || []).forEach(function (rc) { rtById[rc.id] = rc; });
     if (cands.length) {
-      html += '<div class="cp-table-wrap"><table class="if-table">'
-        + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th><th>证据</th><th>运行态</th></tr></thead>'
-        + '<tbody>';
+      html += '<div class="mp-cands">';
       cands.forEach(function (c) {
-        var evKeys = Object.keys(c.evidence || {});
-        var evTxt = evKeys.length
-          ? evKeys.map(function (k) { return esc(k) + ':' + esc(c.evidence[k]); }).join(' · ')
-          : '—';
-        html += '<tr><td class="mono">' + esc(c.id) + '</td>'
-          + '<td class="mono">' + esc(c.priority) + '</td>'
-          + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
-          + '<td class="mono">' + esc(c.target) + '</td>'
-          + '<td class="mono">' + evTxt + '</td>'
-          + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td></tr>';
+        html += candCard(name, c, rtById[c.id]);
+        // A2：命中行内编辑会话 → 卡后渲染 diff 预览条
+        if (_inline && _inline.pool === name && _inline.candId === c.id) {
+          html += inlineDiffBar(name, c);
+        }
       });
-      html += '</tbody></table></div>';
+      html += '</div>';
     } else {
       html += '<p class="mp-empty">无可解析候选（目标悬空或未配置）</p>';
     }
@@ -157,9 +402,11 @@
       html += '<div class="mp-proto" data-mp-proto="' + esc(proto) + '">'
         + '<span class="mp-proto-name mono">' + esc(proto) + '</span>';
       if (pv.chosen) {
-        html += '<span class="mp-chosen mono">当前选择：' + esc(pv.chosen) + '</span>';
+        html += '<span class="mp-chosen mono" id="mp-chosen-' + esc(name)
+          + '-' + esc(proto) + '">当前选择：' + esc(pv.chosen) + '</span>';
       } else {
-        html += '<span class="mp-nochosen mono">' + esc(pv.error || '无可用候选') + '</span>';
+        html += '<span class="mp-nochosen mono" id="mp-chosen-' + esc(name)
+          + '-' + esc(proto) + '">' + esc(pv.error || '无可用候选') + '</span>';
       }
       var decisions = pv.decisions || [];
       if (decisions.length) {
@@ -173,20 +420,235 @@
       html += '</div>';
     });
 
+    // C2：故障时间线（池有事件才出 toggle；展开态重建出轴）
+    var evs = poolEvents(name);
+    if (evs.length) {
+      html += '<div class="mp-tl-row">'
+        + '<button type="button" class="mp-edit-btn" id="mp-tl-toggle-'
+        + esc(name) + '" data-mp-tl-toggle="' + esc(name)
+        + '">故障时间线 · ' + evs.length + '</button>'
+        + (_timelineOpen[name]
+            ? '<div class="mp-tl" id="mp-tl-' + esc(name) + '">'
+              + timelineDots(name) + '</div>'
+            : '')
+        + '</div>';
+    }
+
     html += '</div>';
     return html;
+  }
+
+  /* ── B1 局部渲染（Task 4）：结构签名 + applyDynamic 定点更新 + 本地倒计时 ── */
+
+  // 结构签名（评审 I2/I3/I4 扩展）：池名 + enabled + issues 全文 +
+  // 每候选（id/kind/优先级/目标/声明协议/能力/冷却在否）+ 每协议
+  // （chosen + decisions 全文）+ 冷却在否。运行态展示字段 applyDynamic
+  // 不全更新的（issues/target/decisions/环/降级）一律进签名 → 变化即重建。
+  // 签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁），只走 applyDynamic。
+  function structSig(def, stPools, rtPools) {
+    return Object.keys(def.pools || {}).map(function (n) {
+      var p = def.pools[n];
+      var stP = (stPools || {})[n] || {};
+      var rtP = (rtPools || {})[n] || {};
+      var rtById = {};
+      (rtP.candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
+      return n + ':' + (p.enabled ? 1 : 0)
+        + ':' + (p.issues || []).join(';')
+        + ':' + (p.candidates || []).map(function (c) {
+            var rt = rtById[c.id];
+            var tgt = c.target
+              || (c.kind === 'local' ? (c.model_name || '')
+                  : ((c.provider || '') + '/' + (c.model_id || '')));
+            return [c.id, c.kind || '', c.priority || 0, tgt,
+                    (c.declared_protocols || []).join(','),
+                    (c.features || []).join(','),
+                    (rt && rt.cooling) ? 'cool' : 'live'].join('~');
+          }).join(',')
+        + ':' + ['openai', 'anthropic'].map(function (proto) {
+            var pv = (stP.protocols || {})[proto] || {};
+            // chosen 不进签名（applyDynamic 定点更新）；decisions 进签名
+            //（评审 I4 — 纳入/排除原因变化必须重建，否则解释停留首屏快照）
+            return proto + '>' + (pv.decisions || []).map(function (d) {
+                  return d.id + (d.included ? '+' : '-') + (d.reason || '');
+                }).join(',');
+          }).join('|');
+    }).join('#');
+  }
+
+  // 冷却快照：首见锚定总时长 total；runtime 重取 → base 重锚（评审 I8a：
+  // 更长剩余 = 新一轮冷却 → 重锚 total，环形百分比不超 100%）+ 锚点时刻刷新；
+  // 冷却结束的条目清除。
+  function cdSnapshot(rtPools) {
+    var live = {};
+    Object.keys(rtPools || {}).forEach(function (n) {
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        if (!rc.cooling || typeof rc.cooling.remaining_s !== 'number') return;
+        var key = n + '|' + rc.id;
+        live[key] = true;
+        if (!_cd[key]) {
+          _cd[key] = {pool: n, candId: rc.id, total: rc.cooling.remaining_s,
+                      base: rc.cooling.remaining_s, rt: rc};
+        } else {
+          if (rc.cooling.remaining_s > _cd[key].base) {
+            _cd[key].total = rc.cooling.remaining_s;
+          }
+          _cd[key].base = rc.cooling.remaining_s;
+          _cd[key].rt = rc;
+        }
+      });
+    });
+    Object.keys(_cd).forEach(function (k) { if (!live[k]) delete _cd[k]; });
+    _rtAt = Date.now();   // 评审 I7：以 runtime 拉取时刻为锚
+  }
+
+  // 按 id 定点更新（签名不变的轮询路径）：灯 className / 状态灯 / 运行态文本 /
+  // 当前选择 / revision — 零 innerHTML 重写
+  function applyDynamic(def, stPools, rtPools) {
+    Object.keys(def.pools || {}).forEach(function (n) {
+      var poolDef = def.pools[n];
+      var protocols = (stPools[n] && stPools[n].protocols) || {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var lamp = $('mp-lamp-' + n + '-' + proto);
+        if (lamp) {
+          lamp.className = 'mp-lamp '
+            + lampForProtocol(poolDef, protocols[proto]);
+        }
+        var pv = protocols[proto] || {};
+        var chosen = $('mp-chosen-' + n + '-' + proto);
+        if (chosen) {
+          chosen.className = pv.chosen ? 'mp-chosen mono' : 'mp-nochosen mono';
+          chosen.textContent = pv.chosen ? ('当前选择：' + pv.chosen)
+            : (pv.error || '无可用候选');
+        }
+      });
+      var rtById = {};
+      ((rtPools[n] || {}).candidates || []).forEach(function (rc) {
+        rtById[rc.id] = rc;
+      });
+      (poolDef.candidates || []).forEach(function (c) {
+        var rt = rtById[c.id];
+        var dot = $('mp-dot-' + n + '-' + c.id);
+        if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
+        var rtEl = $('mp-rt-' + n + '-' + c.id);
+        if (rtEl) rtEl.textContent = runtimeBadgeText(rt);
+        // C1：延迟数据不进签名（变化不重建）→ spark by-id 更新
+        var spark = $('mp-spark-' + n + '-' + c.id);
+        if (spark) spark.innerHTML = sparkSvg(latRing(n, c.id).slice(-20));
+      });
+      // C2：事件数据不进签名 → toggle 计数 + 展开轴 by-id 更新
+      var evsN = poolEvents(n).length;
+      var tgl = $('mp-tl-toggle-' + n);
+      if (tgl && evsN) tgl.textContent = '故障时间线 · ' + evsN;
+      if (_timelineOpen[n]) {
+        var tl = $('mp-tl-' + n);
+        if (tl) tl.innerHTML = timelineDots(n);
+      }
+      // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
+      var beam = $('mp-beam-' + n);
+      if (beam) beam.className = 'mp-beam ' + beamClass(stPools[n], rtPools[n]);
+    });
+    var revEl = $('mpRevision');
+    if (revEl && typeof def.revision !== 'undefined') {
+      revEl.textContent = String(def.revision);
+    }
+  }
+
+  // 本地倒计时（1s interval）：以 runtime 拉取时刻为锚按流逝秒数递减
+  // remaining_s，更新 mp-rt-* 文本与环形 --p，不发出任何 fetch
+  function applyCountdown(elapsed) {
+    Object.keys(_cd).forEach(function (key) {
+      var e = _cd[key];
+      if (!e.rt) return;
+      var remaining = Math.max(0, e.base - elapsed);
+      var rt2 = Object.assign({}, e.rt, {
+        cooling: Object.assign({}, e.rt.cooling, {remaining_s: remaining}),
+      });
+      var rtEl = $('mp-rt-' + e.pool + '-' + e.candId);
+      if (rtEl) rtEl.textContent = runtimeBadgeText(rt2);
+      var ring = $('mp-ring-' + e.pool + '-' + e.candId);
+      if (ring && ring.style && ring.style.setProperty) {
+        // (e.total || 1)：remaining_s=0 首见时 total=0，除零防护（评审 I8b）
+        ring.style.setProperty('--p',
+          String(Math.round(remaining / (e.total || 1) * 100)));
+      }
+    });
+  }
+
+  function cdTick() {
+    try {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (window.store && typeof window.store.get === 'function'
+          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      if (_wizard) return;
+      if (_wizardDone) return;   // A4：成果卡在屏 — 倒计时定点更新无的放矢
+      // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
+      // 计时器被节流，锚点差值仍反映真实时间）
+      var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
+      if (elapsed <= 0) return;
+      applyCountdown(elapsed);
+    } catch (e) { /* 倒计时失败静默 — 下个滴答重试 */ }
+  }
+
+  // 懒启动：首次整块重建后才开始（无池渲染不空转）
+  function startCountdown() {
+    if (_cdTimer || typeof setInterval !== 'function') return;
+    _cdTimer = setInterval(cdTick, 1000);
+  }
+
+  /* ── A3 行动横幅（Task 3）：常驻 + 去哪修；样式复用 mp-error-banner ── */
+  function setActionError(message, hint, action) {
+    _actionError = {message: message, hint: hint || null, action: action || null};
+    return renderModelPools();   // 立即可见（不等 5s 轮询）
+  }
+
+  function clearActionError() {
+    _actionError = null;
+  }
+
+  function bannerHtml() {
+    var a = _actionError;
+    var html = '<div class="mp-error-banner mp-action-banner" id="mp-action-banner">'
+      + '<p><span class="mp-action-msg">' + esc(a.message) + '</span>'
+      + (a.hint ? ' <span class="mp-action-hint">' + esc(a.hint) + '</span>' : '')
+      + '</p>';
+    if (a.action) {
+      html += '<button type="button" data-mp-banner-action="1">'
+        + esc(a.action.label || '重试') + '</button>';
+    }
+    html += '<button type="button" data-mp-banner-dismiss="1">关闭</button>';
+    return html + '</div>';
+  }
+
+  async function doMpBannerAction() {
+    if (!_actionError || !_actionError.action) return;
+    var run = _actionError.action.run;
+    _actionError = null;   // 先清（重试成功保持清；失败会重新置）
+    await run();
+  }
+
+  function doMpBannerDismiss() {
+    _actionError = null;
+    return renderModelPools();
   }
 
   /* ── 渲染（拉取：定义 + 双协议状态 + 运行态；三态空态分支） ── */
   async function renderModelPools() {
     var box = $('mpPools');
     if (!box || _loading) return;
+    // A4 成果卡在屏：面板锁定为成果卡（轮询/重激活不得冲掉 — 完成
+    // 按钮先清 _wizardDone 再走正常渲染），也不发无谓请求
+    if (_wizardDone) { renderWizardDone(); return; }
     _loading = true;
     try {
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
       var stRes = await fetch(STATUS_URL, { headers: UI.adminHeaders() });
       var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
+      // C1：延迟环 best-effort（同 rt 模式 — 失败 → null 降级，不挡面板）
+      var latRes = await fetch(LATENCY_URL, { headers: UI.adminHeaders() });
+      // C2：事件时间线 best-effort（同上）
+      var evRes = await fetch(EVENTS_URL, { headers: UI.adminHeaders() });
       if (!defRes.ok || !stRes.ok) {
+        _lastSig = null;   // 评审 I5：错误页替换了面板 → 失效签名，恢复后必须重建
         box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
           + esc(defRes.status) + '/' + esc(stRes.status) + '</p>';
         return;
@@ -197,9 +659,19 @@
       if (rtRes.ok) {
         try { rt = await rtRes.json(); } catch (e) { rt = null; }
       }
+      var lat = null;
+      if (latRes.ok) {
+        try { lat = await latRes.json(); } catch (e) { lat = null; }
+      }
+      var evs = null;
+      if (evRes.ok) {
+        try { evs = await evRes.json(); } catch (e) { evs = null; }
+      }
       _state.def = def;
       _state.status = st;
       _state.runtime = rt;
+      _state.latency = lat;
+      _state.events = evs;
       _revision = def.revision;
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
@@ -210,6 +682,7 @@
       // 残留 _wizard 既挡轮询又让「创建这些池」提交陈旧选择（终审修复）
       _wizard = null;   // 向导分支内 renderWizard() 会重新建立
       if (def.load_error) {
+        _lastSig = null;   // 评审 I5：错误横幅替换面板 → 失效签名
         box.innerHTML = '<div class="mp-error-banner">'
           + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
           + '<p class="mono">' + esc(def.load_error) + '</p>'
@@ -220,22 +693,69 @@
       var names = Object.keys(def.pools || {});
       // 2) 从未配置（无文件）→ 初始化向导（Task 7）
       if (def.configured === false && def.raw == null && !names.length) {
+        _lastSig = null;   // 评审 I5：向导页替换面板 → 失效签名，恢复后必须重建
         await renderWizard();
         return;
       }
       // 3) 配置了零个池 → 普通空态
       if (!names.length) {
+        _lastSig = null;
         box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
         return;
       }
+      // A2：目录不做渲染期拉取（Task 1 裁决 — 既有轮询 GET 计数是契约），
+      // 手势惰性预热：box mouseover/focusin → primeInline()
       var stPools = (st && st.pools) || {};
       var rtPools = (rt && rt.pools) || {};
+      cdSnapshot(rtPools);
+      // C4 重新武装：劣化解除（首候选恢复健康/无 chosen）→ 清关闭键，
+      // 下次劣化再现引导条
+      Object.keys(def.pools || {}).forEach(function (n) {
+        if (_degradeDismissed[n]
+            && !isDegraded(def.pools[n], stPools[n], rtPools[n])) {
+          delete _degradeDismissed[n];
+        }
+      });
+      // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
+      // 不重写 innerHTML（轮询零闪烁）；banner 消息/提示计入签名（评审 I6 —
+      // 内容变了的横幅必须重建，否则旧原因配新行动闭包）；A2 目录在否与
+      // 行内会话（池|候选|spec|rev）计入签名 — 下拉出现/diff 条/应用按钮
+      // 启用都是结构变化
+      var sig = structSig(def, stPools, rtPools)
+        + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
+        // C2：toggle 在否（池事件有无）+ 展开池列表都是结构 — 变化即重建；
+        // 事件数据本身不进 sig（by-id 更新）
+        + '|tl:' + Object.keys(def.pools || {}).filter(function (n) {
+            return poolEvents(n).length > 0;
+          }).join(',')
+          + '/' + Object.keys(_timelineOpen).join(',')
+        // C4：引导条在否（劣化在 + 未关闭）与关闭态都是结构 — 变化即重建
+        + '|dg:' + Object.keys(def.pools || {}).filter(function (n) {
+            return isDegraded(def.pools[n], stPools[n], rtPools[n]);
+          }).join(',')
+          + '/' + Object.keys(_degradeDismissed).join(',')
+        + '|inline:' + (_inline
+            ? _inline.pool + '|' + _inline.candId + '|' + _inline.spec
+              + '|' + _inline.rev
+            : '')
+        + '|'
+        + (_actionError
+            ? 'banner:' + _actionError.message + '|' + (_actionError.hint || '')
+            : '');
+      if (sig === _lastSig) {
+        applyDynamic(def, stPools, rtPools);
+        return;
+      }
+      _lastSig = sig;
       var html = '';
+      if (_actionError) html += bannerHtml();   // A3：渲染池列表前输出行动横幅
       names.forEach(function (n) {
         html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
       });
       box.innerHTML = html;
+      startCountdown();
     } catch (e) {
+      _lastSig = null;   // 评审 I5：异常页替换面板 → 失效签名
       box.innerHTML = '<p class="mp-empty">拉取异常：' + esc(e && e.message) + '</p>';
     } finally {
       _loading = false;
@@ -243,39 +763,268 @@
   }
 
   /* ── 单池 enabled 开关（服务端原子翻转 + CAS） ── */
+  /* ── B2 乐观 UI + 切换中骨架态（UI/UX P2 Task 2）──
+     请求在途：池卡外壳 mp-busy（CSS 微光扫过）+ 协议灯直写乐观目标类；
+     响应到达（fetch 段 finally）即清除 — 成败均由后续重渲染回服务端真值
+     （真实浏览器全量重建自然覆盖；签名不变的局部渲染路径由清除兜底）。 */
+
+  function markBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c && (' ' + c.className + ' ').indexOf(' mp-busy ') < 0) {
+      c.className = (c.className ? c.className + ' ' : '') + 'mp-busy';
+    }
+  }
+
+  function clearBusy(pool) {
+    var c = $('mp-card-' + pool);
+    if (c) {
+      c.className = (' ' + c.className + ' ')
+        .split(' mp-busy ').join(' ').trim();
+    }
+  }
+
+  // 乐观灯：与 lampForProtocol 同词表（启用→ok / 停用→warn）
+  var _optLamps = null;
+
+  function optimisticLamps(pool, enable) {
+    var prev = [];
+    ['openai', 'anthropic'].forEach(function (proto) {
+      var id = 'mp-lamp-' + pool + '-' + proto;
+      var e = $(id);
+      if (!e) return;
+      prev.push({ id: id, cls: e.className });
+      e.className = 'mp-lamp ' + (enable ? 'mp-lamp-ok' : 'mp-lamp-warn');
+    });
+    _optLamps = prev.length ? prev : null;
+  }
+
+  function restoreLamps() {
+    if (!_optLamps) return;
+    _optLamps.forEach(function (o) {
+      var e = $(o.id);
+      if (e) e.className = o.cls;
+    });
+    _optLamps = null;
+  }
+
+  // C2：故障时间线开合 — 展开态变化走重建（轴出现/消失是结构变化）
+  async function doMpTimelineToggle(pool) {
+    if (_timelineOpen[pool]) delete _timelineOpen[pool];
+    else _timelineOpen[pool] = true;
+    await renderModelPools();
+  }
+
+  // C4：查看回退链 — 池卡加高亮类（定位滚动交给 CSS scroll-margin）
+  function doMpDegradeView(pool) {
+    var card = $('mp-card-' + pool);
+    if (!card) return;
+    card.className = (card.className + ' mp-highlight').trim();
+  }
+
+  // C4：关闭引导条 — 同态不重现；劣化解除后清键重新武装（见渲染主路径）
+  async function doMpDegradeDismiss(pool) {
+    if (!_degradeDismissed[pool]) _degradeDismissed[pool] = true;
+    await renderModelPools();
+  }
+
   async function doMpToggle(pool, enable) {
     if (_revision == null) {
       UI.toast('配置尚未加载完成，请稍后重试', 'error');
       return;
     }
+    markBusy(pool);
+    optimisticLamps(pool, enable);
     try {
-      var res = await fetch(TOGGLE_URL, {
-        method: 'POST',
-        headers: UI.adminHeaders(),
-        body: JSON.stringify({
-          pool: pool,
-          enabled: enable,
-          expected_revision: _revision,
-        }),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      var res, d = null;
+      try {
+        res = await fetch(TOGGLE_URL, {
+          method: 'POST',
+          headers: UI.adminHeaders(),
+          body: JSON.stringify({
+            pool: pool,
+            enabled: enable,
+            expected_revision: _revision,
+          }),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        // B2：响应到达即清骨架 + 回滚乐观灯 — 成败分支的重渲染前完成
+        clearBusy(pool);
+        restoreLamps();
+      }
       if (res.ok) {
+        clearActionError();
         _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
         UI.toast('已' + (enable ? '启用' : '停用') + ' iff/' + pool, 'ok');
         await renderModelPools();
         return;
       }
       if (res.status === 409) {
-        // revision 冲突：配置已被其他修改更新 — 提示 + 重新拉取让用户看到最新状态
+        // revision 冲突：配置已被其他修改更新 — 常驻横幅（重试原操作）+ 重新拉取
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpToggle(pool, enable); }});
         UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        return;
+      }
+      var msg = (d && d.error) || ('开关失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
+    } catch (e) {
+      UI.toast('开关请求异常：' + (e && e.message), 'error');
+      await setActionError('开关请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpToggle(pool, enable); }});
+    }
+  }
+
+  /* ── A2 行内 diff 编辑（UI/UX P2 Task 1）：两步换模，不离开列表 ── */
+
+  // 目录惰性预热（Task 1 裁决）：并发共享一个在途 promise；
+  // 成功 → object，失败 → false（下次手势可重试）
+  var _catPromise = null;
+
+  function ensureCatalog() {
+    if (_catalog) return Promise.resolve(_catalog);
+    if (!_catPromise) {
+      _catPromise = fetchCandidateCatalog()
+        // null（fetchCatalog 层失败 — 404/解析失败等）与 false 同义：
+        // 目录不可用，不得回落「未预热」占位态（真实浏览器 404 即此路径）
+        .then(function (c) { _catalog = c || false; _catPromise = null; return _catalog; })
+        .catch(function () {
+          _catalog = false; _catPromise = null; return false;
+        });
+    }
+    return _catPromise;
+  }
+
+  // 目录失败冷却（终审 I3）：目录不可用时 mouseover 高频触发不得逐次
+  // 重放 fetch+render — 失败后 5s（= 轮询周期）内至多重试一次
+  var PRIME_RETRY_MS = 5000;
+  var _catFailTs = null;   // 失败时刻（null=未失败；0 是合法时钟值，不作哨兵）
+
+  // 手势入口（box mouseover/focusin）：取目录 → 重渲染出选项
+  async function primeInline() {
+    if (_catalog) return;
+    if (_catPromise) return;   // 在途不叠加（首个手势已发起）
+    if (_catFailTs !== null
+        && Date.now() - _catFailTs < PRIME_RETRY_MS) return;
+    var ok = await ensureCatalog();
+    if (!ok) _catFailTs = Date.now();
+    await renderModelPools();   // 失败也当轮渲染禁用态（契约不变）
+  }
+
+  async function doMpInlineSelect(pool, candId, spec) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    var cands = (base.pools[pool] || {}).candidates;
+    if (!Array.isArray(cands)) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var i = cands.findIndex(function (c) { return c.id === candId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return;
+    }
+    var nc = candFromCatalogValue(spec, candId, _catalog);
+    nc.priority = cands[i].priority;   // D4 一键换模：继承原优先级
+    var work = deepCopy(base);
+    work.pools[pool].candidates[i] = deepCopy(nc);
+    // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
+    // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
+    _inline = { pool: pool, candId: candId, spec: spec, base: base,
+                work: work, base_revision: _state.def.revision,
+                validated: false, previewHtml: '', rev: 0 };
+    await renderModelPools();          // 重建出 diff 条
+    var session = _inline;
+    var out = await previewWork(work, pool);   // 自动预览（三段式门禁）
+    if (_inline !== session) return;
+    _inline.previewHtml = out.code === 'error'
+      ? '<span class="mp-issue">预览请求异常：' + esc(out.message) + '</span>'
+      : out.html;
+    _inline.validated = out.validated;
+    _inline.rev += 1;                  // 进签名 → 重建（启用/禁用应用按钮）
+    await renderModelPools();
+  }
+
+  async function doMpInlineApply() {
+    if (!_inline) return;
+    if (!_inline.validated) {
+      UI.toast('请先通过预览，再应用', 'error');
+      return;
+    }
+    var session = _inline;   // 会话令牌：在途时可能被取消/重选
+    var poolName = session.pool;
+    var body = deepCopy(session.work);
+    body.expected_revision = session.base_revision;
+    markBusy(poolName);      // B2：应用在途骨架态
+    try {
+      var res, d = null;
+      try {
+        res = await fetch(UPDATE_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify(body),
+        });
+        try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      } finally {
+        clearBusy(poolName);   // B2：响应到达即清（分支渲染前）
+      }
+      if (_inline !== session) {
+        // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
+        if (res.ok) {
+          UI.toast('已更新 iff/' + poolName, 'ok');
+          await renderModelPools();
+        }
+        return;
+      }
+      if (res.ok) {
+        _undo = session.base;
+        _inline = null;
+        _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
+        clearActionError();
+        UI.toast('已更新 iff/' + poolName, 'ok');
         await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('开关失败 · HTTP ' + res.status), 'error');
+      if (res.status === 409) {
+        // 基点过期：本 work 不可再应用（重试仍 409）— 横幅引导基于最新
+        // 配置重新选择；diff 条保留供对照
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，请重新选择替换目标',
+          {label: '重新选择', run: function () {
+             _inline = null;
+             return renderModelPools();
+           }});
+        UI.toast('配置已被其他修改更新（冲突），请重新选择', 'error');
+        await renderModelPools();
+        return;
+      }
+      var msg = (d && d.error) || ('更新失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
     } catch (e) {
-      UI.toast('开关请求异常：' + (e && e.message), 'error');
+      UI.toast('更新请求异常：' + (e && e.message), 'error');
+      await setActionError('更新请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpInlineApply(); }});
     }
+  }
+
+  async function doMpInlineCancel() {
+    if (!_inline) return;
+    _inline = null;
+    await renderModelPools();
   }
 
   /* ── 三段式编辑器（Task 6）：编辑 → 预览 → 应用/回滚 ── */
@@ -295,6 +1044,8 @@
   /* ── 空态初始化向导（Task 7）：从未配置 → 四角色引导创建 ── */
 
   var _wizard = null;   // {roles:{name:{desc,selected}}, removed:{}, catalog}
+  // A4 向导出口：提交成功的成果卡在屏（{pools:[names]}）— 完成/离开才清
+  var _wizardDone = null;
 
   var _ROLE_DEFS = [
     { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
@@ -360,7 +1111,8 @@
   function renderWizardHtml() {
     var box = $('mpPools');
     if (!box || !_wizard) return;
-    var html = '<div class="mp-wizard">'
+    var html = _actionError ? bannerHtml() : '';   // A3：向导模式同样常驻横幅
+    html += '<div class="mp-wizard">'
       + '<p class="mp-wizard-intro">逻辑模型池尚未配置。为常用角色创建池后，'
       + 'agent 产品只需配置一次 <span class="mono">iff/&lt;角色&gt;</span>，'
       + '日后换模型在这里改，客户端零改动。</p>';
@@ -453,6 +1205,7 @@
       if (_wizard !== session) {
         // 向导态已变（被重渲染清除/重建）— 只提示 + 刷新，不碰当前状态
         if (res.ok) {
+          clearActionError();
           UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
           await renderModelPools();
         }
@@ -460,19 +1213,67 @@
       }
       if (res.ok) {
         _wizard = null;
+        _wizardDone = { pools: Object.keys(pools) };   // A4：成果卡在屏
+        clearActionError();
         UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-        await renderModelPools();
+        renderWizardDone();   // 不直接跳回列表 — 先展示成果 + 片段直通
         return;
       }
       if (res.status === 409) {
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpWizardSubmit(); }});
         UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
-        await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('创建失败 · HTTP ' + res.status), 'error');
+      var msg = (d && d.error) || ('创建失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpWizardSubmit(); }});
     } catch (e) {
       UI.toast('创建请求异常：' + (e && e.message), 'error');
+      await setActionError('创建请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpWizardSubmit(); }});
     }
+  }
+
+  /* ── A4 向导出口（UI/UX P2 Task 3）：成果卡 + 接入片段直通 ──
+     用户拍板：不自动淡出返回（复制会被打断）—「完成」按钮手动返回。 */
+
+  function renderWizardDone() {
+    var b = $('mpPools');
+    if (!b || !_wizardDone) return;
+    var names = _wizardDone.pools || [];
+    b.innerHTML = '<div class="mp-wizard-done">'
+      + '<div class="mp-wizard-done-hdr">已创建 ' + names.length
+      + ' 个逻辑模型池</div>'
+      + '<p class="mp-hint">agent 产品只需配置一次 '
+      + '<span class="mono">iff/&lt;池名&gt;</span> — 复制片段即可接入，'
+      + '之后换模型无需改客户端。</p>'
+      + names.map(function (n) {
+          return '<div class="mp-wizard-done-row">'
+            + '<span class="mono">iff/' + esc(n) + '</span>'
+            + '<button type="button" data-mp-copy-pool="' + esc(n)
+            + '" data-mp-copy="openai">复制 OpenAI 片段</button>'
+            + '</div>';
+        }).join('')
+      + '<div class="mp-edit-actions">'
+      + '<button type="button" data-mp-wizard-done="1">完成</button>'
+      + '</div>'
+      + '</div>';
+  }
+
+  async function doMpWizardDone() {
+    if (!_wizardDone) return;
+    _wizardDone = null;
+    await renderModelPools();   // 正常池列表（服务端此刻已配置）
+  }
+
+  // 成果卡直通复制：按池现组 _snippet（snippetText 同源），复用剪贴板路径
+  function doMpWizardDoneCopy(pool) {
+    _snippet = { pool: pool, openai: snippetText(pool, 'openai'),
+                 anthropic: snippetText(pool, 'anthropic') };
+    return doMpSnippetCopy('openai');
   }
 
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
@@ -540,7 +1341,8 @@
 
     var html = '<div class="mp-editor" data-mp-editor="' + esc(_edit.pool) + '">'
       + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(_edit.pool)
-      + '</b><span>编辑候选链（改完先预览，再应用）</span></div>';
+      + '</b><span>编辑候选链（改完先预览，再应用）</span>'
+      + '<button type="button" data-mp-act="close">关闭</button></div>';
 
     // 候选链：id / 优先级 / 目标 / 运行态 / 操作（替换=行内下拉选中即换）
     var cands = wp.candidates || [];
@@ -571,7 +1373,7 @@
         + '<td class="mono">' + esc(c.priority) + '</td>'
         + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
         + '<td class="mono">' + esc(target) + '</td>'
-        + '<td class="mono">' + runtimeBadge(rtById[c.id]) + '</td>'
+        + '<td class="mono">' + esc(runtimeBadgeText(rtById[c.id])) + '</td>'
         + '<td class="mp-edit-ops">'
         + '<select data-mp-replace="' + esc(c.id) + '">'
         + '<option value="">替换为…</option>' + opts(sel) + '</select>'
@@ -602,10 +1404,18 @@
       + '<div class="mp-edit-actions">'
       + '<button type="button" data-mp-act="preview">预览</button>'
       + '<button type="button" data-mp-act="apply"'
-      + (_edit.validated ? '' : ' disabled') + '>应用</button>'
+      + (_edit.validated ? '' : ' disabled title="需先通过预览"')
+      + '>应用</button>'
       + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
       + '</div></div>';
     modal.innerHTML = html;
+  }
+
+  // 关闭编辑器（B4：Esc 二级出口 + 头部关闭钮 — 此前模态无鼠标出口）
+  function mpModalClose() {
+    _edit = null;
+    var modal = $('mpModal');
+    if (modal) modal.innerHTML = '';
   }
 
   // 打开编辑器：基底 = raw（视图有损，防丢数据 — spec §4.3）；池不存在 → 新建骨架
@@ -693,78 +1503,99 @@
     _edit.validated = false;
   }
 
-  // 预览：validate（静态）→ 不通过阻止一切；通过 → dry-run×2 携带编辑态 config。
-  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
-  async function mpEditPreview() {
-    if (!_edit) return;
-    var session = _edit;
-    var pv = $('mpPreview');
-    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+  // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
+  // 阻止一切；通过 → dry-run×2 携带编辑态 config。
+  // 返回 {validated, code, html, message}；code ∈ ok | invalid | http_fail |
+  // none_chosen | error（调用方决定 toast 文案与容器前缀）。
+  // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
+  // （单协议无候选 = 黄灯，属合法状态，不阻止）
+  async function previewWork(work, pool) {
     try {
       var res = await fetch(VALIDATE_URL, {
         method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(_edit.work),
+        body: JSON.stringify(work),
       });
-      if (_edit !== session) return;
       var d = await res.json();
-      if (_edit !== session) return;
       if (!d.valid) {
-        if (pv) {
-          pv.innerHTML = '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
+        return {
+          validated: false, code: 'invalid',
+          html: '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
             + '<ul class="mp-decisions">'
             + (d.issues || []).map(function (i) {
                 return '<li class="mono">' + esc(i) + '</li>';
               }).join('')
-            + '</ul>';
-        }
-        UI.toast('校验未通过 — 请按问题列表修正', 'error');
-        return;
+            + '</ul>',
+        };
       }
       var outs = [];
       for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
         var proto = ['openai', 'anthropic'][k];
         var r = await fetch(DRYRUN_URL, {
           method: 'POST', headers: UI.adminHeaders(),
-          body: JSON.stringify({ pool: _edit.pool, protocol: proto,
-                                 config: _edit.work }),
+          body: JSON.stringify({ pool: pool, protocol: proto,
+                                 config: work }),
         });
-        if (_edit !== session) return;
         var b = null;
         try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
-        if (_edit !== session) return;
         outs.push({ proto: proto, ok: r.ok, body: b || {} });
       }
-      var previewHtml = '<p>预览（编辑态，未应用）：</p>';
-      outs.forEach(function (o) {
+      var html = outs.map(function (o) {
         var b = o.body || {};
-        previewHtml += '<p class="mono">' + esc(o.proto) + ' → '
+        return '<p class="mono">' + esc(o.proto) + ' → '
           + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
-             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选') + '</span>'))
+             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选')
+                + '</span>'))
           + '</p>';
-      });
-      if (pv) pv.innerHTML = previewHtml;
-      // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
-      // （单协议无候选 = 黄灯，属合法状态，不阻止）
+      }).join('');
       var failed = outs.filter(function (o) { return !o.ok; });
       if (failed.length) {
-        if (pv) pv.innerHTML += '<p class="mp-issue">预览请求失败 · HTTP '
-          + esc(failed.map(function (o) { return o.proto; }).join('/'))
-          + ' — 已阻止应用</p>';
-        UI.toast('预览请求失败 — 已阻止应用', 'error');
-        return;
+        return { validated: false, code: 'http_fail',
+                 html: html + '<p class="mp-issue">预览请求失败 · HTTP '
+                   + esc(failed.map(function (o) { return o.proto; })
+                         .join('/'))
+                   + ' — 已阻止应用</p>' };
       }
       var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
       if (noneChosen.length === outs.length) {
-        if (pv) pv.innerHTML += '<p class="mp-issue">两个协议均无可用候选'
-          + ' — 已阻止应用</p>';
-        UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
-        return;
+        return { validated: false, code: 'none_chosen',
+                 html: html + '<p class="mp-issue">两个协议均无可用候选'
+                   + ' — 已阻止应用</p>' };
       }
-      _edit.validated = true;
-      UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
+      return { validated: true, code: 'ok', html: html };
     } catch (e) {
-      UI.toast('预览请求异常：' + (e && e.message), 'error');
+      return { validated: false, code: 'error', html: '',
+               message: (e && e.message) || String(e) };
     }
+  }
+
+  // 预览（模态）：结果写入 #mpPreview，toast 按 code 映射。
+  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
+  async function mpEditPreview() {
+    if (!_edit) return;
+    var session = _edit;
+    var pv = $('mpPreview');
+    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+    var out = await previewWork(_edit.work, _edit.pool);
+    if (_edit !== session) return;
+    if (out.code === 'error') {
+      UI.toast('预览请求异常：' + out.message, 'error');
+      return;
+    }
+    if (pv) pv.innerHTML = '<p>预览（编辑态，未应用）：</p>' + out.html;
+    if (out.code === 'invalid') {
+      UI.toast('校验未通过 — 请按问题列表修正', 'error');
+      return;
+    }
+    if (out.code === 'http_fail') {
+      UI.toast('预览请求失败 — 已阻止应用', 'error');
+      return;
+    }
+    if (out.code === 'none_chosen') {
+      UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
+      return;
+    }
+    _edit.validated = true;
+    UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
   }
 
   // 应用：CAS POST；成功 → 记录 _undo；409 → 冲突 toast + 重新拉取。
@@ -844,18 +1675,26 @@
       }
       if (res.ok) {
         _undo = null;
+        clearActionError();
         UI.toast('已回滚到上次编辑前的配置', 'ok');
         await renderModelPools();
         return;
       }
       if (res.status === 409) {
+        await setActionError('回滚遇到冲突（配置又有新修改）',
+          '已刷新，请重试',
+          {label: '重试', run: function () { return doMpUndo(); }});
         UI.toast('回滚遇到冲突（配置又有新修改），已刷新，请重试', 'error');
-        await renderModelPools();
         return;
       }
-      UI.toast((d && d.error) || ('回滚失败 · HTTP ' + res.status), 'error');
+      var msg = (d && d.error) || ('回滚失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpUndo(); }});
     } catch (e) {
       UI.toast('回滚请求异常：' + (e && e.message), 'error');
+      await setActionError('回滚请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpUndo(); }});
     }
   }
 
@@ -890,6 +1729,7 @@
     if (!act) return;
     var cand = t.getAttribute('data-mp-cand');
     if (act === 'preview') mpEditPreview();
+    else if (act === 'close') mpModalClose();
     else if (act === 'apply') mpEditApply();
     else if (act === 'undo') doMpUndo();
     else if (act === 'del' && cand) mpEditRemove(cand);
@@ -909,6 +1749,12 @@
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
     if (pool) { doMpToggle(pool, !!t.checked); return; }
+    var inl = t.getAttribute('data-mp-inline-replace');
+    if (inl && t.value) {
+      var bar = inl.split('|');   // 'pool|candId'
+      doMpInlineSelect(bar[0], bar[1], t.value);
+      return;
+    }
     var wsel = t.getAttribute('data-mp-wizard-sel');
     if (wsel && _wizard && _wizard.roles[wsel]) {
       _wizard.roles[wsel].selected = t.value || null;
@@ -1002,10 +1848,28 @@
   function onBoxClick(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
+    // A3：行动横幅（重试原操作 / 关闭）
+    if (t.getAttribute('data-mp-banner-action')) { doMpBannerAction(); return; }
+    if (t.getAttribute('data-mp-banner-dismiss')) { doMpBannerDismiss(); return; }
+    // A2：行内 diff 条（应用 / 撤销）
+    if (t.getAttribute('data-mp-inline-apply')) { doMpInlineApply(); return; }
+    if (t.getAttribute('data-mp-inline-cancel')) { doMpInlineCancel(); return; }
     var edit = t.getAttribute('data-mp-edit');
     if (edit) { doMpEdit(edit); return; }
     var snip = t.getAttribute('data-mp-snippet');
     if (snip) { doMpSnippet(snip); return; }
+    // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
+    var tlPool = t.getAttribute('data-mp-tl-toggle');
+    if (tlPool) { doMpTimelineToggle(tlPool); return; }
+    // C4：劣化引导条（查看回退链 / 关闭）
+    var dgView = t.getAttribute('data-mp-degrade-view');
+    if (dgView) { doMpDegradeView(dgView); return; }
+    var dgDismiss = t.getAttribute('data-mp-degrade-dismiss');
+    if (dgDismiss) { doMpDegradeDismiss(dgDismiss); return; }
+    // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
+    var cpool = t.getAttribute('data-mp-copy-pool');
+    if (cpool) { doMpWizardDoneCopy(cpool); return; }
+    if (t.getAttribute('data-mp-wizard-done')) { doMpWizardDone(); return; }
     var del = t.getAttribute('data-mp-wizard-del');
     if (del) { doMpWizardToggle(del); return; }
     var add = t.getAttribute('data-mp-wizard-add');
@@ -1017,6 +1881,43 @@
   if (box && typeof box.addEventListener === 'function') {
     box.addEventListener('change', onBoxChange);
     box.addEventListener('click', onBoxClick);
+    // A2 目录惰性预热（Task 1 裁决）：鼠标掠过/键盘聚焦面板即拉取，
+    // 用户点开下拉前选项已就绪 — 普通渲染/轮询不产生目录请求
+    box.addEventListener('mouseover', function () { primeInline(); });
+    box.addEventListener('focusin', function () { primeInline(); });
+  }
+
+  /* ── B4 键盘流（UI/UX P2 Task 4）：E 进编辑 / Esc 分级退出 ──
+     仅本 tab 激活、焦点不在表单控件、无修饰键时生效；
+     向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
+  function onKeyDown(ev) {
+    if (!ev || !ev.key) return;
+    if (_wizard || _wizardDone) return;
+    if (window.store && typeof window.store.get === 'function'
+        && window.store.get('tab_active') !== 'tab-model-pools') return;
+    var t = ev.target;
+    if (t && t.tagName
+        && ['INPUT', 'SELECT', 'TEXTAREA']
+            .indexOf(t.tagName.toUpperCase()) >= 0) return;
+    if (ev.key === 'Escape') {
+      if (_inline) return doMpInlineCancel();   // 一级：行内 diff 条
+      if (_edit) { mpModalClose(); return; }    // 二级：编辑器模态
+      return;
+    }
+    if ((ev.key === 'e' || ev.key === 'E')
+        && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      if (!_state.def) return;
+      var card = (t && typeof t.closest === 'function')
+        ? t.closest('[data-mp-card]') : null;
+      var pool = (card && typeof card.getAttribute === 'function')
+        ? card.getAttribute('data-mp-card') : null;
+      if (pool) return doMpEdit(pool);
+    }
+  }
+
+  if (typeof document !== 'undefined'
+      && typeof document.addEventListener === 'function') {
+    document.addEventListener('keydown', onKeyDown);
   }
 
   /* ── 5s 轮询（spec §6）：与首屏同一刷新函数（定义+状态+运行态合并拉取）。
@@ -1030,6 +1931,7 @@
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
       if (_wizard) return;
+      if (_wizardDone) return;   // A4：成果卡在屏 — 轮询不得冲掉
       return renderModelPools();   // 返回 promise 供测试/调用方等待
     } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
   }
@@ -1049,12 +1951,23 @@
   window.doMpToggle = doMpToggle;
   window.doMpEdit = doMpEdit;
   window.doMpUndo = doMpUndo;
+  window.doMpBannerAction = doMpBannerAction;
+  window.doMpBannerDismiss = doMpBannerDismiss;
+  window.doMpInlineSelect = doMpInlineSelect;
+  window.doMpInlineApply = doMpInlineApply;
+  window.doMpInlineCancel = doMpInlineCancel;
+  window.mpPrimeInline = primeInline;
+  window.doMpTimelineToggle = doMpTimelineToggle;
+  window.doMpDegradeView = doMpDegradeView;
+  window.doMpDegradeDismiss = doMpDegradeDismiss;
   window.mpEditReplace = mpEditReplace;
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
   window.mpEditApply = mpEditApply;
   window.doMpWizardToggle = doMpWizardToggle;
   window.doMpWizardSubmit = doMpWizardSubmit;
+  window.doMpWizardDone = doMpWizardDone;
+  window.doMpWizardDoneCopy = doMpWizardDoneCopy;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();

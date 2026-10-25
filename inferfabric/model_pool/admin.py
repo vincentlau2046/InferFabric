@@ -289,3 +289,51 @@ def handle_get_model_pools_runtime(handler, pm):
             })
         pools[name] = {"candidates": cands}
     handler._send_json({"revision": snap.revision, "pools": pools})
+
+
+def handle_get_model_pools_latency(handler, pm):
+    """GET /admin/model-pools/latency — 每池每候选延迟环（P3 C1，只读）。
+
+    数据源 PoolHistory（run_attempts 成功路径旁录）；每候选最近 20 点，
+    新在后。pm 未挂 history（旧实例/测试）→ 空 pools（200，不 500）。
+    """
+    history = getattr(pm, "pool_history", None)
+    snap = history.snapshot() if history is not None else {}
+    pools = {
+        name: {cid: ring[-20:] for cid, ring in cands.items()}
+        for name, cands in snap.items()
+    }
+    handler._send_json({"pools": pools})
+
+
+def handle_get_model_pools_events(handler, pm):
+    """GET /admin/model-pools/events — 每池事件时间线（P3 C2，只读）。
+
+    数据源 CooldownStore 事件环；fp → 池/候选映射同 runtime 写法，
+    孤儿指纹（配置已移除的候选）丢弃；每池最近 50 条，新在后。
+    """
+    reg = pm.pool_registry
+    snap = reg.snapshot()
+    # fp → (pool_name, candidate_id, target)
+    fp_map: dict[str, tuple[str, str, str]] = {}
+    for name, ps in snap.pools.items():
+        for rc in ps.candidates:
+            c = rc.candidate
+            fp_map[rc.endpoint_fingerprint] = (
+                name, c.id,
+                c.model_name if c.kind == "local"
+                else f"{c.provider}/{c.model_id}")
+    cooldowns = getattr(pm, "pool_cooldowns", None)
+    events = cooldowns.events() if cooldowns is not None else []
+    pools: dict = {}
+    for e in events:
+        hit = fp_map.get(e["fingerprint"])
+        if hit is None:
+            continue          # 孤儿指纹：候选已不在任何池配置里
+        name, cid, target = hit
+        pools.setdefault(name, []).append({
+            "age_s": e["age_s"], "wall_ts": e["wall_ts"],
+            "type": e["type"], "candidate_id": cid, "target": target,
+            "reason": e["reason"],
+        })
+    handler._send_json({"pools": {n: evs[-50:] for n, evs in pools.items()}})
