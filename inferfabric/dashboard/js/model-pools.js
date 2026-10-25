@@ -427,6 +427,7 @@
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
       if (_wizard) return;
+      if (_wizardDone) return;   // A4：成果卡在屏 — 倒计时定点更新无的放矢
       // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
       // 计时器被节流，锚点差值仍反映真实时间）
       var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
@@ -481,6 +482,9 @@
   async function renderModelPools() {
     var box = $('mpPools');
     if (!box || _loading) return;
+    // A4 成果卡在屏：面板锁定为成果卡（轮询/重激活不得冲掉 — 完成
+    // 按钮先清 _wizardDone 再走正常渲染），也不发无谓请求
+    if (_wizardDone) { renderWizardDone(); return; }
     _loading = true;
     try {
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
@@ -823,6 +827,8 @@
   /* ── 空态初始化向导（Task 7）：从未配置 → 四角色引导创建 ── */
 
   var _wizard = null;   // {roles:{name:{desc,selected}}, removed:{}, catalog}
+  // A4 向导出口：提交成功的成果卡在屏（{pools:[names]}）— 完成/离开才清
+  var _wizardDone = null;
 
   var _ROLE_DEFS = [
     { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
@@ -990,9 +996,10 @@
       }
       if (res.ok) {
         _wizard = null;
+        _wizardDone = { pools: Object.keys(pools) };   // A4：成果卡在屏
         clearActionError();
         UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-        await renderModelPools();
+        renderWizardDone();   // 不直接跳回列表 — 先展示成果 + 片段直通
         return;
       }
       if (res.status === 409) {
@@ -1011,6 +1018,45 @@
       await setActionError('创建请求异常：' + (e && e.message), null,
         {label: '重试', run: function () { return doMpWizardSubmit(); }});
     }
+  }
+
+  /* ── A4 向导出口（UI/UX P2 Task 3）：成果卡 + 接入片段直通 ──
+     用户拍板：不自动淡出返回（复制会被打断）—「完成」按钮手动返回。 */
+
+  function renderWizardDone() {
+    var b = $('mpPools');
+    if (!b || !_wizardDone) return;
+    var names = _wizardDone.pools || [];
+    b.innerHTML = '<div class="mp-wizard-done">'
+      + '<div class="mp-wizard-done-hdr">已创建 ' + names.length
+      + ' 个逻辑模型池</div>'
+      + '<p class="mp-hint">agent 产品只需配置一次 '
+      + '<span class="mono">iff/&lt;池名&gt;</span> — 复制片段即可接入，'
+      + '之后换模型无需改客户端。</p>'
+      + names.map(function (n) {
+          return '<div class="mp-wizard-done-row">'
+            + '<span class="mono">iff/' + esc(n) + '</span>'
+            + '<button type="button" data-mp-copy-pool="' + esc(n)
+            + '" data-mp-copy="openai">复制 OpenAI 片段</button>'
+            + '</div>';
+        }).join('')
+      + '<div class="mp-edit-actions">'
+      + '<button type="button" data-mp-wizard-done="1">完成</button>'
+      + '</div>'
+      + '</div>';
+  }
+
+  async function doMpWizardDone() {
+    if (!_wizardDone) return;
+    _wizardDone = null;
+    await renderModelPools();   // 正常池列表（服务端此刻已配置）
+  }
+
+  // 成果卡直通复制：按池现组 _snippet（snippetText 同源），复用剪贴板路径
+  function doMpWizardDoneCopy(pool) {
+    _snippet = { pool: pool, openai: snippetText(pool, 'openai'),
+                 anthropic: snippetText(pool, 'anthropic') };
+    return doMpSnippetCopy('openai');
   }
 
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
@@ -1585,6 +1631,10 @@
     if (edit) { doMpEdit(edit); return; }
     var snip = t.getAttribute('data-mp-snippet');
     if (snip) { doMpSnippet(snip); return; }
+    // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
+    var cpool = t.getAttribute('data-mp-copy-pool');
+    if (cpool) { doMpWizardDoneCopy(cpool); return; }
+    if (t.getAttribute('data-mp-wizard-done')) { doMpWizardDone(); return; }
     var del = t.getAttribute('data-mp-wizard-del');
     if (del) { doMpWizardToggle(del); return; }
     var add = t.getAttribute('data-mp-wizard-add');
@@ -1613,6 +1663,7 @@
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
       if (_wizard) return;
+      if (_wizardDone) return;   // A4：成果卡在屏 — 轮询不得冲掉
       return renderModelPools();   // 返回 promise 供测试/调用方等待
     } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
   }
@@ -1644,6 +1695,8 @@
   window.mpEditApply = mpEditApply;
   window.doMpWizardToggle = doMpWizardToggle;
   window.doMpWizardSubmit = doMpWizardSubmit;
+  window.doMpWizardDone = doMpWizardDone;
+  window.doMpWizardDoneCopy = doMpWizardDoneCopy;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();

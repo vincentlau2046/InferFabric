@@ -1023,6 +1023,67 @@ class TestP2Optimistic:
         assert "mp-busy" not in gets[-1]["cls"]["mp-card-fast"]
 
 
+class TestP2WizardExit:
+    """A4 向导出口衔接：提交成功 → 成果卡（不直接跳走），手动「完成」返回。
+
+    契约：
+    - 成果卡：mp-wizard-done + 「已创建 N 个逻辑模型池」+ 每池 iff/<pool>
+      一行 + 每池「复制 OpenAI 片段」直通按钮（data-mp-copy-pool）+ 完成
+      按钮（data-mp-wizard-done）；用户拍板：不自动淡出（复制会被打断）
+    - 直通复制 = snippetText(pool, 'openai') 入剪贴板
+    - 完成 → 正常池列表重渲染（服务端已配置）
+    - Review Focus #5：成果卡在屏时 5s 轮询必须跳过，不得冲掉成果卡
+    """
+
+    def test_wizard_submit_success_shows_result_card(self, run_panel):
+        out = run_panel(_wizard_routes(),
+                        actions=[{"fn": "doMpWizardSubmit"}])
+        h = out["htmlFinal"]
+        assert "mp-wizard-done" in h
+        assert "已创建 4 个逻辑模型池" in h
+        for pool in ("fast", "premium", "small", "classifier"):
+            assert "iff/" + pool in h, pool
+        assert h.count("data-mp-copy-pool=") == 4
+        assert "复制 OpenAI 片段" in h
+        assert 'data-mp-wizard-done' in h          # 「完成」按钮
+        # 不直接跳走：列表未渲染
+        assert "data-mp-pool=" not in h
+
+    def test_result_card_copy_uses_snippet_text(self, run_panel):
+        actions = [
+            {"fn": "doMpWizardSubmit"},
+            {"fn": "doMpWizardDoneCopy", "args": ["fast"]},
+        ]
+        out = run_panel(_wizard_routes(), actions=actions)
+        assert out["clipboardWrites"]
+        text = out["clipboardWrites"][-1]
+        assert "iff/fast" in text                   # 该池的片段
+        assert "from openai import OpenAI" in text  # OpenAI 直通
+        assert "127.0.0.1:8999/v1" in text
+
+    def test_result_card_done_returns_to_list(self, run_panel):
+        # 完成后服务端已有配置（第 2 次 GET 返回已配置池）
+        routes = _wizard_routes()
+        routes["/admin/model-pools"] = {
+            "status": 200, "bodies": [_WIZARD_POOLS_BODY, _POOLS_BODY]}
+        actions = [
+            {"fn": "doMpWizardSubmit"},
+            {"fn": "doMpWizardDone"},
+        ]
+        out = run_panel(routes, actions=actions)
+        h = out["htmlFinal"]
+        assert "mp-wizard-done" not in h
+        assert 'data-mp-pool="fast"' in h           # 正常池列表回来
+
+    def test_poll_skips_while_result_card_shown(self, run_panel):
+        out = run_panel(_wizard_routes(),
+                        actions=[{"fn": "doMpWizardSubmit"}],
+                        poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"})
+        # Review Focus #5：轮询推进不冲掉成果卡
+        assert "mp-wizard-done" in out["htmlFinal"]
+
+
 class TestCatalogConsumption:
     """v7.1.2 候选目录：向导/编辑器只消费 /admin/model-pools/catalog。"""
 
