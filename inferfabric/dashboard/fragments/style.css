@@ -1530,6 +1530,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .mp-cand-rt { font-size: var(--fs-table); color: var(--if-text-dim, #999);
   display: flex; align-items: center; gap: var(--sp-1); }
+/* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */
+.mp-spark-wrap { display: inline-flex; align-items: center;
+  margin-left: auto; flex: none; }
+.mp-spark { display: block; }
 
 .mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
   background: var(--if-border, #444);

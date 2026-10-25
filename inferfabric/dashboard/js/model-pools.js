@@ -34,6 +34,7 @@
   var POOLS_URL = '/admin/model-pools';
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
+  var LATENCY_URL = '/admin/model-pools/latency';
   var CATALOG_URL = '/admin/model-pools/catalog';
   var TOGGLE_URL = '/admin/model-pools/toggle';
   var VALIDATE_URL = '/admin/model-pools/validate';
@@ -44,7 +45,7 @@
   var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
   // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
   // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
-  var _state = { def: null, status: null, runtime: null };
+  var _state = { def: null, status: null, runtime: null, latency: null };
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -178,6 +179,46 @@
   }
 
   // 候选体检卡（UI/UX P1 Task 2：表格 → 横向卡片，状态一眼可读）
+  /* ── C1 延迟心跳迷你图（P3 Task 8）── */
+  // 60×24 内联 SVG：polyline + 末点圆；x 按序铺满、y 按 TTFT 归一反演
+  //（越低越高位）。points = latency 端点该候选环（新在后）。
+  function sparkSvg(points) {
+    var W = 60, H = 24, PAD = 2;
+    var pts = (points || []).filter(function (p) {
+      return p && typeof p.ttft_ms === 'number' && isFinite(p.ttft_ms);
+    });
+    if (!pts.length) return '';
+    var lo = Infinity, hi = -Infinity;
+    pts.forEach(function (p) {
+      if (p.ttft_ms < lo) lo = p.ttft_ms;
+      if (p.ttft_ms > hi) hi = p.ttft_ms;
+    });
+    if (hi === lo) hi = lo + 1;   // 全平 → 置顶直线（不除零）
+    var n = pts.length;
+    var coords = pts.map(function (p, i) {
+      var x = (n === 1) ? W / 2 : PAD + (W - 2 * PAD) * i / (n - 1);
+      var y = PAD + (H - 2 * PAD) * (1 - (p.ttft_ms - lo) / (hi - lo));
+      return [x, y];
+    });
+    var last = coords[n - 1];
+    return '<svg class="mp-spark" width="' + W + '" height="' + H
+      + '" viewBox="0 0 ' + W + ' ' + H + '" aria-hidden="true">'
+      + '<polyline points="' + coords.map(function (cd) {
+          return cd[0].toFixed(1) + ',' + cd[1].toFixed(1);
+        }).join(' ')
+      + '" fill="none" style="stroke:var(--accent)" stroke-width="1.5"'
+      + ' stroke-linecap="round" stroke-linejoin="round"/>'
+      + '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1)
+      + '" r="2" fill="var(--accent)"/></svg>';
+  }
+
+  // 候选延迟环（新在后，端点已按 20 封顶）；无数据 → []
+  function latRing(pool, candId) {
+    var lat = _state.latency;
+    var ring = (lat && lat.pools && lat.pools[pool] && lat.pools[pool][candId]);
+    return Array.isArray(ring) ? ring : [];
+  }
+
   function candCard(pool, c, rt) {
     var dot = candDotClass(rt);
     var ev = c.evidence || {};
@@ -200,7 +241,11 @@
         }).join('')
       + '</span>'
       + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
-      + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>';
+      + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>'
+      // C1：延迟心跳迷你图容器常驻（by-id 更新锚点），有数据才出 SVG
+      + '<span class="mp-spark-wrap" id="mp-spark-' + esc(pool) + '-'
+      + esc(c.id) + '">' + sparkSvg(latRing(pool, c.id).slice(-20))
+      + '</span>';
     // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
     if (rt && rt.cooling) {
       html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
@@ -393,6 +438,9 @@
         if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
         var rtEl = $('mp-rt-' + n + '-' + c.id);
         if (rtEl) rtEl.textContent = runtimeBadgeText(rt);
+        // C1：延迟数据不进签名（变化不重建）→ spark by-id 更新
+        var spark = $('mp-spark-' + n + '-' + c.id);
+        if (spark) spark.innerHTML = sparkSvg(latRing(n, c.id).slice(-20));
       });
     });
     var revEl = $('mpRevision');
@@ -491,6 +539,8 @@
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
       var stRes = await fetch(STATUS_URL, { headers: UI.adminHeaders() });
       var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
+      // C1：延迟环 best-effort（同 rt 模式 — 失败 → null 降级，不挡面板）
+      var latRes = await fetch(LATENCY_URL, { headers: UI.adminHeaders() });
       if (!defRes.ok || !stRes.ok) {
         _lastSig = null;   // 评审 I5：错误页替换了面板 → 失效签名，恢复后必须重建
         box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
@@ -503,9 +553,14 @@
       if (rtRes.ok) {
         try { rt = await rtRes.json(); } catch (e) { rt = null; }
       }
+      var lat = null;
+      if (latRes.ok) {
+        try { lat = await latRes.json(); } catch (e) { lat = null; }
+      }
       _state.def = def;
       _state.status = st;
       _state.runtime = rt;
+      _state.latency = lat;
       _revision = def.revision;
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
@@ -683,7 +738,9 @@
     if (_catalog) return Promise.resolve(_catalog);
     if (!_catPromise) {
       _catPromise = fetchCandidateCatalog()
-        .then(function (c) { _catalog = c; _catPromise = null; return c; })
+        // null（fetchCatalog 层失败 — 404/解析失败等）与 false 同义：
+        // 目录不可用，不得回落「未预热」占位态（真实浏览器 404 即此路径）
+        .then(function (c) { _catalog = c || false; _catPromise = null; return _catalog; })
         .catch(function () {
           _catalog = false; _catPromise = null; return false;
         });

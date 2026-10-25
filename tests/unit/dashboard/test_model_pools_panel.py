@@ -147,8 +147,12 @@ const fetch = async (url, options) => {
     r = {status: route.status || 200,
          statuses: route.statuses,   // P1 Task 3 加法：保留时序 status
          body: route.bodies[Math.min(seen[mkey] - 1, route.bodies.length - 1)]};
-  } else {
+  } else if (route) {
     r = route;
+  } else {
+    // P3 Task 8：未 mock 的路由 → 404（真实浏览器语义；面板 best-effort
+    // 降级路径依赖 fetch 不抛异常）
+    r = {status: 404, body: null};
   }
   // P1 Task 3 加法：statuses 时序（按命中次序取 status，越界取最后一个）
   const status = Array.isArray(r.statuses)
@@ -228,8 +232,9 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
   const htmlFinal = elements['mpPools'] ? elements['mpPools'].innerHTML : '';
   const dyn = {};
   for (const [id, e] of Object.entries(elements)) {
+    // P3 Task 8 加法：innerHTML — by-id 定点更新（spark/时间线）的内容断言
     dyn[id] = {textContent: e.textContent, className: e.className,
-               style: e.style};
+               style: e.style, innerHTML: e.innerHTML};
   }
   console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
                               fetchSnapshots, clipboardWrites, htmlFinal,
@@ -730,9 +735,10 @@ class TestP1PartialRender:
             dyn["mp-rt-fast-loc"]["textContent"]
         # 环形 --p = 41/42 ≈ 98（首见锚定总时长，客户端递减）
         assert int(dyn["mp-ring-fast-loc"]["style"]["--p"]) == 98
-        # 倒计时不发出任何 fetch：初次渲染 3 GET + 1 次 poll tick 3 GET
+        # 倒计时不发出任何 fetch：初次渲染 4 GET（含 latency best-effort）
+        # + 1 次 poll tick 4 GET（P3 Task 8 起 latency 为第 4 个常规拉取）
         gets = [c for c in out["calls"] if c["method"] == "GET"]
-        assert len(gets) == 6
+        assert len(gets) == 8
 
 
 # ── UI/UX P1 修复 pass（交叉评审 glm-5.3-flash tathr/gpt-6.1-sol 发现，逐条 RED→GREEN）──
@@ -747,6 +753,8 @@ class TestP1FixPass:
         # I1：mp-rt textContent 更新不得删除 mp-ring —— 环必须是兄弟节点
         out = run_panel(_ops_routes())
         m = re.search(r'id="mp-rt-fast-loc">[^<]*</span>\s*'
+                      r'(?:<span class="mp-spark-wrap"[^>]*>[^<]*'
+                      r'(?:<svg.*?</svg>)?[^<]*</span>\s*)?'
                       r'<span class="mp-ring" id="mp-ring-fast-loc"',
                       out["html"])
         assert m, "ring must be a sibling after the closing mp-rt span"
@@ -1808,3 +1816,77 @@ class TestP2Transitions:
         for cls in ("mp-dot", "mp-lamp", "mp-cand-card", "mp-chosen",
                     "mp-cand-degraded"):
             assert cls in joined, cls
+
+
+# ── UI/UX P3 Task 8：C1 延迟心跳迷你图 ──────────────────────────
+# 契约：
+# - renderModelPools 第 4 个 best-effort fetch（latency；失败 → null 降级）
+# - 卡内 id="mp-spark-<pool>-<candId>" 容器常驻；有数据才出 SVG
+# - sparkSvg：60×24、polyline stroke var(--accent) + 末点圆、
+#   TTFT 反演（越低越高位）
+# - latency 数据不进 structSig → 轮询 by-id 更新，mpPools 零整写
+
+
+def _lat_body(points, pool="fast", cand="loc"):
+    return {"pools": {pool: {cand: points}}}
+
+
+_LAT3 = [
+    {"age_s": 30.0, "wall_ts": 1000.0, "ttft_ms": 200.0, "total_ms": 900.0},
+    {"age_s": 20.0, "wall_ts": 1010.0, "ttft_ms": 100.0, "total_ms": 800.0},
+    {"age_s": 10.0, "wall_ts": 1020.0, "ttft_ms": 300.0, "total_ms": 950.0},
+]
+
+
+class TestP3Spark:
+    def _routes(self, latency_body=None, **kw):
+        routes = _ops_routes(**kw)
+        if latency_body is not None:
+            routes["/admin/model-pools/latency"] = {
+                "status": 200, "body": latency_body}
+        return routes
+
+    def test_spark_renders_polyline_from_latency_data(self, run_panel):
+        out = run_panel(self._routes(latency_body=_lat_body(_LAT3)))
+        html = out["htmlFinal"]
+        assert 'id="mp-spark-fast-loc"' in html
+        m = re.search(r'<polyline points="([^"]*)"', html)
+        assert m, "polyline missing"
+        assert len(m.group(1).split()) == 3      # 3 点
+        assert "stroke:var(--accent)" in html
+        assert "<circle" in html                 # 末点圆
+
+    def test_spark_updates_by_id_without_rebuild(self, run_panel):
+        lat4 = _LAT3 + [{"age_s": 1.0, "wall_ts": 1029.0,
+                         "ttft_ms": 150.0, "total_ms": 700.0}]
+        routes = self._routes()
+        routes["/admin/model-pools/latency"] = {"status": 200, "bodies": [
+            _lat_body(_LAT3), _lat_body(lat4)]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        wc = out["writeCounts"]
+        assert wc.get("mpPools") == 1            # 结构不变 → 零整写
+        assert wc.get("mp-spark-fast-loc", 0) >= 1   # by-id 定点更新
+        # 末态内容 = 第 4 点后的 4 点折线
+        m = re.search(r'<polyline points="([^"]*)"',
+                      out["dyn"]["mp-spark-fast-loc"]["innerHTML"])
+        assert m and len(m.group(1).split()) == 4
+
+    def test_spark_hidden_without_data(self, run_panel):
+        # 无该候选 latency 数据（端点 200 空池）→ 容器常驻但无 SVG
+        out = run_panel(self._routes(latency_body={"pools": {}}))
+        html = out["htmlFinal"]
+        assert 'id="mp-spark-fast-loc"' in html
+        assert "<svg" not in html and "<polyline" not in html
+
+    def test_latency_fetch_failure_degrades(self, run_panel):
+        # latency 404 → 面板正常渲染，无 spark SVG（best-effort）
+        routes = self._routes()
+        routes["/admin/model-pools/latency"] = {"status": 404, "body": None}
+        out = run_panel(routes)
+        html = out["htmlFinal"]
+        assert "iff/fast" in html                # 池列表照常
+        assert "<svg" not in html
+        lat_gets = [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools/latency"]
+        assert len(lat_gets) == 1                # fetch 确实发生且被降级
