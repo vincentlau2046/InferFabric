@@ -1965,3 +1965,113 @@ class TestP3Timeline:
         ev_gets = [c for c in out["calls"]
                    if c["url"] == "/admin/model-pools/events"]
         assert len(ev_gets) == 1                # fetch 发生且空池 → 无 toggle
+
+
+# ── UI/UX P3 Task 10：C3 活体光带 + C4 劣化提示 ─────────────────
+# 契约：
+# - 池卡顶 mp-beam 三态纯函数 beamClass：候选 last_attempt.ok 且 <30s →
+#   flow（流动动画）；无新鲜交换但有 chosen → idle；全协议无 chosen →
+#   dark（虚线暗态）；applyDynamic by-id className 更新
+# - isDegraded 纯函数：首候选 cooling && 任一协议 chosen → 池卡引导条
+#   「首选已降级」+ 查看回退链（卡加 mp-highlight）+ × 关闭
+#   （_degradeDismissed；劣化解除清键重新武装）
+# - 引导条在否 + dismiss 态进 sig；动效进 reduced-motion 降级块
+
+
+def _rt_with_last_attempt(cand_idx, ok, age_s):
+    rt = json.loads(json.dumps(_RUNTIME_BODY))
+    rt["pools"]["fast"]["candidates"][cand_idx]["last_attempt"] = {
+        "ok": ok, "status": 200 if ok else 503, "age_s": age_s}
+    return rt
+
+
+def _status_no_chosen():
+    st = json.loads(json.dumps(_STATUS_BODY))
+    st["pools"]["fast"]["protocols"]["openai"] = {
+        "chosen": None, "error": "无可用候选", "decisions": []}
+    return st
+
+
+class TestP3Beam:
+    def test_beam_flows_only_on_recent_exchange(self, run_panel):
+        # cld 新鲜交换（age 5s）→ flow
+        out = run_panel(_ops_routes(
+            runtime_body=_rt_with_last_attempt(1, True, 5.0)))
+        assert 'id="mp-beam-fast"' in out["htmlFinal"]
+        assert "mp-beam-flow" in out["htmlFinal"]
+        # 交换太旧（120s）→ idle（有 chosen）
+        out = run_panel(_ops_routes(
+            runtime_body=_rt_with_last_attempt(1, True, 120.0)))
+        assert "mp-beam-idle" in out["htmlFinal"]
+        # 全协议无 chosen → dark（虚线暗态）
+        out = run_panel(_ops_routes(
+            status_body=_status_no_chosen(),
+            runtime_body=_rt_with_last_attempt(1, True, 5.0)))
+        assert "mp-beam-dark" in out["htmlFinal"]
+
+    def test_beam_class_updates_by_id(self, run_panel):
+        # 轮询中 last_attempt 变新鲜 → beam className by-id 更新，零整写
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            _RUNTIME_BODY, _rt_with_last_attempt(1, True, 5.0)]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert out["writeCounts"].get("mpPools") == 1
+        assert out["dyn"]["mp-beam-fast"]["className"] \
+            == "mp-beam mp-beam-flow"
+
+
+class TestP3Degrade:
+    def test_degrade_hint_when_first_candidate_cooling_with_chosen(
+            self, run_panel):
+        # 默认夹具：loc 冷却（首候选）+ openai chosen=loc → 引导条
+        out = run_panel(_ops_routes())
+        html = out["htmlFinal"]
+        assert "mp-degrade" in html
+        assert "首选已降级" in html
+        assert 'data-mp-degrade-view="fast"' in html
+        assert 'data-mp-degrade-dismiss="fast"' in html
+        # 首候选健康 → 不出
+        rt_ok = json.loads(json.dumps(_RUNTIME_BODY))
+        rt_ok["pools"]["fast"]["candidates"][0]["cooling"] = None
+        out = run_panel(_ops_routes(runtime_body=rt_ok))
+        assert "mp-degrade" not in out["htmlFinal"]
+        # 无 chosen → 不出（劣化无服务对象）
+        out = run_panel(_ops_routes(status_body=_status_no_chosen()))
+        assert "mp-degrade" not in out["htmlFinal"]
+
+    def test_degrade_view_highlights_decisions(self, run_panel):
+        out = run_panel(_ops_routes(),
+                        actions=[{"fn": "doMpDegradeView", "args": ["fast"]}])
+        assert "mp-highlight" in out["dyn"]["mp-card-fast"]["className"]
+
+    def test_degrade_dismiss_until_state_changes(self, run_panel):
+        # 关闭 → 同态轮询不重现
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            _RUNTIME_BODY, _RUNTIME_BODY, _RUNTIME_BODY]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"},
+                        actions=[{"fn": "doMpDegradeDismiss",
+                                  "args": ["fast"]}])
+        assert "mp-degrade" not in out["htmlFinal"]
+        # 劣化解除（轮询见健康态清 dismiss 键）→ 再劣化 → 重现（重新武装）
+        rt_ok = json.loads(json.dumps(_RUNTIME_BODY))
+        rt_ok["pools"]["fast"]["candidates"][0]["cooling"] = None
+        routes = _ops_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            _RUNTIME_BODY, rt_ok, _RUNTIME_BODY]}
+        out = run_panel(routes, poll_ticks=2,
+                        store_state={"tab_active": "tab-model-pools"},
+                        actions=[{"fn": "doMpDegradeDismiss",
+                                  "args": ["fast"]}])
+        assert "mp-degrade" in out["htmlFinal"]
+
+    def test_p3_motion_in_reduced_motion_block(self):
+        css = (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+            encoding="utf-8")
+        blocks = re.findall(
+            r"prefers-reduced-motion:\s*reduce\)\s*\{(.*?)\n\}", css, re.S)
+        joined = "\n".join(blocks)
+        assert "mp-beam-flow" in joined
+        assert "mp-highlight" in joined

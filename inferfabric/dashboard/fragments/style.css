@@ -753,6 +753,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   /* B3：状态过渡逐类显式关停（全局一刀切之外的审计性收录） */
   .mp-dot, .mp-lamp, .mp-cand-card, .mp-chosen, .mp-nochosen,
   .mp-cand-degraded { transition: none; }
+  /* C3：光带停止流动（静态实色）；C4：高亮呼吸停止（静态描边） */
+  .mp-beam-flow { animation: none;
+    background: var(--if-accent, #0a84ff); }
+  .mp-highlight { animation: none; }
 }
 
 /* ── 总览页组件 ───────────────────────────────────────────────── */
@@ -1548,6 +1552,39 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-tl-probe_start { background: #64d2ff; }
 .mp-tl-probe_pass { background: #30d158; }
 .mp-tl-probe_fail { background: #ff453a; }
+/* C3 活体光带：池顶三态 — flow 流动/ idle 静默/ dark 不可路由虚线 */
+.mp-beam { height: 3px; border-radius: 2px; margin-bottom: var(--sp-2); }
+.mp-beam-flow {
+  background: linear-gradient(90deg, transparent,
+              var(--if-accent, #0a84ff), transparent);
+  background-size: 200% 100%;
+  animation: mp-beam-flow 2.4s linear infinite;
+}
+@keyframes mp-beam-flow {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.mp-beam-idle {
+  background: color-mix(in srgb, var(--if-accent, #0a84ff) 25%, transparent);
+}
+.mp-beam-dark { background: transparent; height: 0; border-radius: 0;
+  border-top: 2px dashed var(--if-border, #444); }
+/* C4 劣化提示：首候选降级而服务由回退候选提供 */
+.mp-degrade { display: flex; align-items: center; gap: var(--sp-2);
+  padding: 6px 10px; margin-bottom: var(--sp-2);
+  border: 1px solid color-mix(in srgb, #ffd60a 45%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, #ffd60a 10%, transparent);
+  font-size: var(--fs-table); }
+.mp-degrade-x { margin-left: auto; border: none; background: transparent;
+  color: var(--if-text-dim, #888); font-size: 14px; cursor: pointer; }
+.mp-highlight { animation: mp-highlight-pulse 1.6s var(--ease) 2;
+  outline: 2px solid color-mix(in srgb, #ffd60a 70%, transparent);
+  outline-offset: 2px; }
+@keyframes mp-highlight-pulse {
+  0%, 100% { outline-color: transparent; }
+  50% { outline-color: color-mix(in srgb, #ffd60a 70%, transparent); }
+}
 
 .mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
   background: var(--if-border, #444);

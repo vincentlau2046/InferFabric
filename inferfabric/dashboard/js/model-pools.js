@@ -50,6 +50,10 @@
                  events: null };
   // C2：故障时间线展开态（pool → true；进 structSig — 开合是结构）
   var _timelineOpen = {};
+  // C4：劣化提示关闭态（pool → true；进 structSig；劣化解除时清键重新武装）
+  var _degradeDismissed = {};
+  // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
+  var BEAM_FRESH_S = 30;
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -296,11 +300,50 @@
     return html;
   }
 
+  /* ── C3 活体光带（P3 Task 10）：三态纯函数（渲染/applyDynamic 同源） ── */
+  // flow：任一候选 last_attempt.ok 且新鲜（<BEAM_FRESH_S）— 真实数据交换中；
+  // dark：全协议无 chosen（不可路由/全冷却）；idle：其余（可路由但静默）
+  function beamClass(stP, rtP) {
+    // 不可路由优先于新鲜交换（unroutable 是当前事实，交换是 30s 内历史）
+    var protocols = ((stP || {}).protocols) || {};
+    var anyChosen = ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
+    if (!anyChosen) return 'mp-beam-dark';
+    var fresh = false;
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && la.ok && typeof la.age_s === 'number'
+          && la.age_s < BEAM_FRESH_S) fresh = true;
+    });
+    return fresh ? 'mp-beam-flow' : 'mp-beam-idle';
+  }
+
+  /* ── C4 劣化判定（纯函数）：首候选冷却/隔离 && 任一协议仍有 chosen
+     （服务由回退候选提供 — 用户应知道首选已降级）── */
+  function isDegraded(poolDef, stP, rtP) {
+    var cands = (poolDef && poolDef.candidates) || [];
+    if (!cands.length) return false;
+    var rtById = {};
+    (((rtP || {}).candidates) || []).forEach(function (rc) {
+      rtById[rc.id] = rc;
+    });
+    var rtC = rtById[cands[0].id];
+    if (!rtC || !rtC.cooling) return false;
+    var protocols = ((stP || {}).protocols) || {};
+    return ['openai', 'anthropic'].some(function (p) {
+      return protocols[p] && protocols[p].chosen;
+    });
+  }
+
   /* ── 池卡片 ── */
   function poolCard(name, def, st, rt) {
     var checked = def.enabled ? ' checked' : '';
     var html = '<div class="if-card mp-pool" id="mp-card-' + esc(name)
       + '" data-mp-card="' + esc(name) + '">'
+      // C3：池顶活体光带（三态由 beamClass 纯函数定，applyDynamic 同源更新）
+      + '<div class="mp-beam ' + beamClass(st, rt) + '" id="mp-beam-'
+      + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
       + '<span class="mp-lamps">'
@@ -320,6 +363,14 @@
       + '"' + checked + '><span>启用</span></label>'
       + '</span>'
       + '</div>';
+    // C4：首候选降级而服务仍由回退候选提供 → 引导条（关闭后同态不重现）
+    if (isDegraded(def, st, rt) && !_degradeDismissed[name]) {
+      html += '<div class="mp-degrade"><span>首选已降级 — 当前服务经回退候选提供</span>'
+        + '<button type="button" class="mp-edit-btn" data-mp-degrade-view="'
+        + esc(name) + '">查看回退链</button>'
+        + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
+        + esc(name) + '" title="关闭">×</button></div>';
+    }
 
     // 候选链（id / 优先级 / 类型 / 目标 / 证据态 / 运行态）
     var cands = def.candidates || [];
@@ -492,6 +543,9 @@
         var tl = $('mp-tl-' + n);
         if (tl) tl.innerHTML = timelineDots(n);
       }
+      // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
+      var beam = $('mp-beam-' + n);
+      if (beam) beam.className = 'mp-beam ' + beamClass(stPools[n], rtPools[n]);
     });
     var revEl = $('mpRevision');
     if (revEl && typeof def.revision !== 'undefined') {
@@ -654,6 +708,14 @@
       var stPools = (st && st.pools) || {};
       var rtPools = (rt && rt.pools) || {};
       cdSnapshot(rtPools);
+      // C4 重新武装：劣化解除（首候选恢复健康/无 chosen）→ 清关闭键，
+      // 下次劣化再现引导条
+      Object.keys(def.pools || {}).forEach(function (n) {
+        if (_degradeDismissed[n]
+            && !isDegraded(def.pools[n], stPools[n], rtPools[n])) {
+          delete _degradeDismissed[n];
+        }
+      });
       // B1 局部渲染（Task 4）：结构签名不变 → 只走 applyDynamic 定点更新，
       // 不重写 innerHTML（轮询零闪烁）；banner 消息/提示计入签名（评审 I6 —
       // 内容变了的横幅必须重建，否则旧原因配新行动闭包）；A2 目录在否与
@@ -667,6 +729,11 @@
             return poolEvents(n).length > 0;
           }).join(',')
           + '/' + Object.keys(_timelineOpen).join(',')
+        // C4：引导条在否（劣化在 + 未关闭）与关闭态都是结构 — 变化即重建
+        + '|dg:' + Object.keys(def.pools || {}).filter(function (n) {
+            return isDegraded(def.pools[n], stPools[n], rtPools[n]);
+          }).join(',')
+          + '/' + Object.keys(_degradeDismissed).join(',')
         + '|inline:' + (_inline
             ? _inline.pool + '|' + _inline.candId + '|' + _inline.spec
               + '|' + _inline.rev
@@ -744,6 +811,19 @@
   async function doMpTimelineToggle(pool) {
     if (_timelineOpen[pool]) delete _timelineOpen[pool];
     else _timelineOpen[pool] = true;
+    await renderModelPools();
+  }
+
+  // C4：查看回退链 — 池卡加高亮类（定位滚动交给 CSS scroll-margin）
+  function doMpDegradeView(pool) {
+    var card = $('mp-card-' + pool);
+    if (!card) return;
+    card.className = (card.className + ' mp-highlight').trim();
+  }
+
+  // C4：关闭引导条 — 同态不重现；劣化解除后清键重新武装（见渲染主路径）
+  async function doMpDegradeDismiss(pool) {
+    if (!_degradeDismissed[pool]) _degradeDismissed[pool] = true;
     await renderModelPools();
   }
 
@@ -1772,6 +1852,11 @@
     // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
     var tlPool = t.getAttribute('data-mp-tl-toggle');
     if (tlPool) { doMpTimelineToggle(tlPool); return; }
+    // C4：劣化引导条（查看回退链 / 关闭）
+    var dgView = t.getAttribute('data-mp-degrade-view');
+    if (dgView) { doMpDegradeView(dgView); return; }
+    var dgDismiss = t.getAttribute('data-mp-degrade-dismiss');
+    if (dgDismiss) { doMpDegradeDismiss(dgDismiss); return; }
     // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
     var cpool = t.getAttribute('data-mp-copy-pool');
     if (cpool) { doMpWizardDoneCopy(cpool); return; }
@@ -1864,6 +1949,8 @@
   window.doMpInlineCancel = doMpInlineCancel;
   window.mpPrimeInline = primeInline;
   window.doMpTimelineToggle = doMpTimelineToggle;
+  window.doMpDegradeView = doMpDegradeView;
+  window.doMpDegradeDismiss = doMpDegradeDismiss;
   window.mpEditReplace = mpEditReplace;
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
