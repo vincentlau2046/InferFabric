@@ -170,8 +170,9 @@
       + esc(pool) + '-' + esc(n.candId) + '">'
       + (n.previewHtml || '预览中…') + '</span>'
       + '<button type="button" data-mp-inline-apply="' + esc(pool) + '|'
-      + esc(n.candId) + '"' + (n.validated ? '' : ' disabled')
-      + ' title="需先通过预览">应用</button>'
+      + esc(n.candId) + '"'
+      + (n.validated ? '' : ' disabled title="需先通过预览"')
+      + '>应用</button>'
       + '<button type="button" data-mp-inline-cancel="1">撤销</button>'
       + '</div>';
   }
@@ -1124,7 +1125,8 @@
 
     var html = '<div class="mp-editor" data-mp-editor="' + esc(_edit.pool) + '">'
       + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(_edit.pool)
-      + '</b><span>编辑候选链（改完先预览，再应用）</span></div>';
+      + '</b><span>编辑候选链（改完先预览，再应用）</span>'
+      + '<button type="button" data-mp-act="close">关闭</button></div>';
 
     // 候选链：id / 优先级 / 目标 / 运行态 / 操作（替换=行内下拉选中即换）
     var cands = wp.candidates || [];
@@ -1186,10 +1188,18 @@
       + '<div class="mp-edit-actions">'
       + '<button type="button" data-mp-act="preview">预览</button>'
       + '<button type="button" data-mp-act="apply"'
-      + (_edit.validated ? '' : ' disabled') + '>应用</button>'
+      + (_edit.validated ? '' : ' disabled title="需先通过预览"')
+      + '>应用</button>'
       + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
       + '</div></div>';
     modal.innerHTML = html;
+  }
+
+  // 关闭编辑器（B4：Esc 二级出口 + 头部关闭钮 — 此前模态无鼠标出口）
+  function mpModalClose() {
+    _edit = null;
+    var modal = $('mpModal');
+    if (modal) modal.innerHTML = '';
   }
 
   // 打开编辑器：基底 = raw（视图有损，防丢数据 — spec §4.3）；池不存在 → 新建骨架
@@ -1503,6 +1513,7 @@
     if (!act) return;
     var cand = t.getAttribute('data-mp-cand');
     if (act === 'preview') mpEditPreview();
+    else if (act === 'close') mpModalClose();
     else if (act === 'apply') mpEditApply();
     else if (act === 'undo') doMpUndo();
     else if (act === 'del' && cand) mpEditRemove(cand);
@@ -1650,6 +1661,39 @@
     // 用户点开下拉前选项已就绪 — 普通渲染/轮询不产生目录请求
     box.addEventListener('mouseover', function () { primeInline(); });
     box.addEventListener('focusin', function () { primeInline(); });
+  }
+
+  /* ── B4 键盘流（UI/UX P2 Task 4）：E 进编辑 / Esc 分级退出 ──
+     仅本 tab 激活、焦点不在表单控件、无修饰键时生效；
+     向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
+  function onKeyDown(ev) {
+    if (!ev || !ev.key) return;
+    if (_wizard || _wizardDone) return;
+    if (window.store && typeof window.store.get === 'function'
+        && window.store.get('tab_active') !== 'tab-model-pools') return;
+    var t = ev.target;
+    if (t && t.tagName
+        && ['INPUT', 'SELECT', 'TEXTAREA']
+            .indexOf(t.tagName.toUpperCase()) >= 0) return;
+    if (ev.key === 'Escape') {
+      if (_inline) return doMpInlineCancel();   // 一级：行内 diff 条
+      if (_edit) { mpModalClose(); return; }    // 二级：编辑器模态
+      return;
+    }
+    if ((ev.key === 'e' || ev.key === 'E')
+        && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      if (!_state.def) return;
+      var card = (t && typeof t.closest === 'function')
+        ? t.closest('[data-mp-card]') : null;
+      var pool = (card && typeof card.getAttribute === 'function')
+        ? card.getAttribute('data-mp-card') : null;
+      if (pool) return doMpEdit(pool);
+    }
+  }
+
+  if (typeof document !== 'undefined'
+      && typeof document.addEventListener === 'function') {
+    document.addEventListener('keydown', onKeyDown);
   }
 
   /* ── 5s 轮询（spec §6）：与首屏同一刷新函数（定义+状态+运行态合并拉取）。

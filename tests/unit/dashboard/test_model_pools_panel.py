@@ -119,6 +119,7 @@ const timers = [];
 const navigator = {
   clipboard: {writeText: async (t) => { clipboardWrites.push(t); }},
 };
+const docListeners = {};   // P2 Task 4：document 级监听捕获（fireKey 派发用）
 const calls = [];
 const fetchSnapshots = [];   // P2 Task 2 加法：captureAtFetch — 每次请求
                              // 瞬间快照指定元素 className（乐观态在途断言）
@@ -159,9 +160,17 @@ const fetch = async (url, options) => {
     json: async () => r.body,
   };
 };
+const documentMock = {
+  getElementById: el,
+  hidden: !!input.documentHidden,
+  // P2 Task 4 加法：捕获 document 级监听（keydown）
+  addEventListener: (type, fn) => {
+    (docListeners[type] = docListeners[type] || []).push(fn);
+  },
+};
 vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   window,
-  document: {getElementById: el, hidden: !!input.documentHidden},
+  document: documentMock,
   fetch,
   navigator,
   location: input.location || {protocol: 'http:', hostname: '127.0.0.1'},
@@ -170,6 +179,26 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   Date: {now: () => fakeNow},
   console,
 });
+// P2 Task 4 加法：fireKey — 派发 keydown 到已注册 document 监听。
+// attrs 给 mock 元素播种 getAttribute/closest（扁平 mock 无 DOM 树，
+// closest 只近似自匹配）；tagName 模拟表单控件聚焦。
+window.fireKey = async (key, targetId, attrs, tagName) => {
+  const t = targetId ? el(targetId) : null;
+  if (t) {
+    if (tagName) t.tagName = tagName;
+    if (attrs) {
+      t._attrs = Object.assign(t._attrs || {}, attrs);
+      t.getAttribute = (k) => (k in t._attrs ? t._attrs[k] : null);
+      t.closest = (sel) => (String(sel).indexOf('data-mp-card') >= 0
+        && t._attrs['data-mp-card'] !== undefined ? t : null);
+    }
+  }
+  documentMock.activeElement = t;
+  // 等待监听器返回的 promise（onKeyDown 透传 doMpInlineCancel/doMpEdit
+  // 的 promise — 与 pollTick 返回渲染 promise 同模式，供调用方等待）
+  const rs = (docListeners['keydown'] || []).map((fn) => fn({key, target: t}));
+  await Promise.all(rs);
+};
 (async () => {
   assert.ok(window.tabRenderers['tab-model-pools'],
             'must register tabRenderers["tab-model-pools"]');
@@ -1082,6 +1111,95 @@ class TestP2WizardExit:
                         store_state={"tab_active": "tab-model-pools"})
         # Review Focus #5：轮询推进不冲掉成果卡
         assert "mp-wizard-done" in out["htmlFinal"]
+
+
+class TestP2Keyboard:
+    """B4 键盘流：E 进编辑 / Esc 分级退出；表单控件内不劫持输入。
+
+    契约（harness fireKey — 派发 keydown 到 document 监听）：
+    - E：焦点元素归属 data-mp-card 池 → doMpEdit(pool)；INPUT/SELECT/
+      TEXTAREA 聚焦时忽略（不劫持输入）；仅本 tab 激活时生效
+    - Esc 一级关行内 diff 条（模态不动）；二级关编辑器模态
+    - 未过预览的应用按钮（行内条 + 模态编辑器）disabled + title 原因
+    """
+
+    def _kb_routes(self):
+        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        return routes
+
+    def test_key_e_opens_editor_for_focused_pool(self, run_panel):
+        actions = [{"fn": "fireKey",
+                    "args": ["e", "mp-card-fast", {"data-mp-card": "fast"}]}]
+        out = run_panel(_routes(), actions=actions,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert 'data-mp-editor="fast"' in out["modalHtml"]
+
+    def test_key_e_ignored_in_form_controls(self, run_panel):
+        state = {"tab_active": "tab-model-pools"}
+        # SELECT/INPUT 聚焦 → E 被忽略（不劫持输入）
+        out = run_panel(_routes(),
+                        actions=[{"fn": "fireKey",
+                                  "args": ["e", "mp-any-sel", None, "SELECT"]},
+                                 {"fn": "fireKey",
+                                  "args": ["e", "mp-any-in", None, "INPUT"]}],
+                        store_state=state)
+        assert 'data-mp-editor=' not in out["modalHtml"]
+        # 对照组：非表单控件同键 → 打开（证明忽略是针对性的而非功能缺失）
+        out2 = run_panel(_routes(),
+                         actions=[{"fn": "fireKey",
+                                   "args": ["e", "mp-card-fast",
+                                            {"data-mp-card": "fast"}]}],
+                         store_state=state)
+        assert 'data-mp-editor="fast"' in out2["modalHtml"]
+
+    def test_esc_closes_inline_bar_first_then_modal(self, run_panel):
+        routes = self._kb_routes()
+        state = {"tab_active": "tab-model-pools"}
+        base = [
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpEdit", "args": ["fast"]},
+        ]
+        # 第一次 Esc：只关行内条（模态不动）
+        out1 = run_panel(routes, actions=base + [{"fn": "fireKey",
+                                                  "args": ["Escape"]}],
+                         store_state=state)
+        assert "mp-inline-diff" not in out1["htmlFinal"]
+        assert 'data-mp-editor="fast"' in out1["modalHtml"]
+        # 第二次 Esc：关模态
+        out2 = run_panel(routes, actions=base + [
+            {"fn": "fireKey", "args": ["Escape"]},
+            {"fn": "fireKey", "args": ["Escape"]}],
+            store_state=state)
+        assert 'data-mp-editor=' not in out2["modalHtml"]
+        assert out2["modalHtml"] == ""
+
+    def test_apply_button_disabled_has_reason_title(self, run_panel):
+        state = {"tab_active": "tab-model-pools"}
+        # 模态编辑器：刚打开未预览 → 应用 disabled + title 原因
+        out = run_panel(self._kb_routes(),
+                        actions=[{"fn": "doMpEdit", "args": ["fast"]}],
+                        store_state=state)
+        m = re.search(r'data-mp-act="apply"[^>]*>', out["modalHtml"])
+        assert m and "disabled" in m.group(0)
+        assert m and "预览" in m.group(0)
+        # 行内条：预览失败 → 应用 disabled + title 原因
+        routes = self._kb_routes()
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200,
+            "body": {"chosen": None, "error": "no_compatible_target",
+                     "decisions": [], "pool": "fast", "protocol": "openai"}}
+        out2 = run_panel(routes,
+                         actions=[{"fn": "doMpInlineSelect",
+                                   "args": ["fast", "loc",
+                                            "local:qwen3-4b"]}],
+                         store_state=state)
+        m2 = re.search(r'data-mp-inline-apply="fast\|loc"[^>]*>',
+                       out2["htmlFinal"])
+        assert m2 and "disabled" in m2.group(0)
+        assert m2 and "预览" in m2.group(0)
 
 
 class TestCatalogConsumption:
