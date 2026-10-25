@@ -17,7 +17,9 @@
  *   - POST   /admin/cloud/providers  — 预设 {preset, api_key}；手动 {name, api_key, openai_base, anthropic_base}
  *   - POST   /admin/cloud/provider-models — {provider, action: enable|disable|add|remove, model}
  *   - DELETE /admin/cloud/providers  — {name}
- *   - POST   /admin/cloud/test       — {url, api_key}
+ *   - POST   /admin/cloud/test       — {url(base 去尾斜杠, 不拼 /models), api_key, protocol, probe_model?}
+ *                                       → {status, pass, message, ...}（pass = 可添加门禁）
+ *   - POST   /admin/cloud/provider-test — {provider, probe_model?}（用服务端已存 key 测已注册 provider）
  *   - POST   /admin/cloud/discover   — 全部 {}；单个 {provider}
  *   - POST   /admin/cloud/reload     — {}
  *
@@ -29,7 +31,8 @@
  *
  * 暴露：
  *   - window.tabRenderers['tab-cloud'] = renderCloud；window.renderCloud
- *   - window.doCloudAdd() / doCloudAddPreset() / doCloudTest() / doCloudDiscover() / doCloudDelete() / doCloudReload()
+ *   - window.doCloudAdd() / doCloudAddPreset() / doCloudTest(opts) / doCloudDiscover() / doCloudDelete() / doCloudReload()
+ *       doCloudTest(opts)：opts={base,key,protocol,probeModel}，返回 Promise<{ok,pass,data,error}>
  *   - window.doCpmToggle() / doCpmAdd() / doCpmRemove() / doCpmRefresh()
  */
 (function () {
@@ -48,6 +51,23 @@
   var _selectedPreset = null; // 当前选中预设
   var _providers = [];        // provider 缓存（行内 测试 需查 openai_base）
   var _openProvider = null;   // 当前展开策展面板的 provider 名（一次只开一个）
+  var _manualTestOk = false;  // 手动表单测试通过门禁（R1/R2：通过才放行"添加"）
+  var _presetTestOk = false;  // 预设表单测试通过门禁
+  // R3：发现后自动展开策展面板。'first' = 首个有候选的 provider；provider 名 = 该行有候选才展开。
+  // 由刷新后的候选数据判定（发现响应的 cloud_models 是可路由注册表计数，≠ 候选数，不能作门控）。
+  var _autoOpen = null;
+  // 行内"测试"列状态（R4）：provider 名 → {pass, warn, ts, msg}；sessionStorage 持久化（刷新不丢）
+  var _testStatus = (function () {
+    try { var s = sessionStorage.getItem('iff.cloud.teststatus'); return s ? JSON.parse(s) : {}; }
+    catch (e) { return {}; }
+  })();
+  function saveTestStatus() {
+    try { sessionStorage.setItem('iff.cloud.teststatus', JSON.stringify(_testStatus)); } catch (e) {}
+  }
+  function fmtTime(ts) {
+    var d = new Date(ts), p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes());
+  }
 
   /* ── XSS-safe 转义（与 inference.js escHtml 一致） ── */
   function esc(s) {
@@ -153,6 +173,10 @@
       var env = p.env_var || ('IFF_' + String(p.id).toUpperCase().replace(/-/g, '_') + '_KEY');
       hint.textContent = 'Key 将存为 ' + env + '，写入 ~/.inferfabric/secrets.env';
     }
+    // 换预设 = 未测试：重置门禁 + 结果条
+    _presetTestOk = false;
+    setBtnBusy('preset-add', true);
+    resetTestResult('cpPresetTestResult', '先点「测试」验证 Key 与连接，通过后方可添加');
   }
 
   function cloudDeselectPreset() {
@@ -166,6 +190,9 @@
     }
     var form = $('presetForm');
     if (form) form.style.display = 'none';
+    _presetTestOk = false;
+    setBtnBusy('preset-add', true);
+    resetTestResult('cpPresetTestResult', '先点「测试」验证 Key 与连接，通过后方可添加');
   }
 
   /* ══ 预设添加：POST /admin/cloud/providers {preset, api_key} ══ */
@@ -176,6 +203,10 @@
     if (!apiKey) {
       UI.toast('请填写 API Key', 'error');
       if (keyEl) keyEl.focus();
+      return;
+    }
+    if (!_presetTestOk) {
+      UI.toast('请先点「测试」验证连接与 Key，通过后方可添加', 'error');
       return;
     }
     var preset = _selectedPreset;
@@ -213,7 +244,7 @@
     for (var i = 0; i < 3; i++) {
       var cell = document.createElement('div');
       UI.skeleton(cell, 1);
-      html += '<tr class="cp-skel"><td colspan="6">' + cell.innerHTML + '</td></tr>';
+      html += '<tr class="cp-skel"><td colspan="7">' + cell.innerHTML + '</td></tr>';
     }
     tbody.innerHTML = html;
   }
@@ -247,7 +278,24 @@
         (p.key_env_var ? '<span class="cp-sub">' + esc(p.key_env_var) + '</span>' : '') +
       '</div>';
     var nameAttr = esc(p.name);
-    var canTest = !!p.openai_base;
+    // "测试"列（R4）：读 _testStatus；未测试(灰点) / 通过(check+时间) / 警告(alert) / 失败(xmark+短msg)
+    var tst = _testStatus[p.name];
+    var testHtml;
+    if (!tst) {
+      testHtml = '<div class="cp-cell"><span class="cp-test untested">· 未测试</span></div>';
+    } else if (tst.warn) {
+      testHtml = '<div class="cp-cell"><span class="cp-test warn">' + icon('alert') + '警告</span>' +
+        (tst.msg ? '<span class="cp-sub">' + esc(tst.msg) + '</span>' : '') +
+        (tst.ts ? '<span class="cp-sub">' + fmtTime(tst.ts) + '</span>' : '') + '</div>';
+    } else if (tst.pass) {
+      testHtml = '<div class="cp-cell"><span class="cp-test ok">' + icon('check') + '通过</span>' +
+        (tst.ts ? '<span class="cp-sub">' + fmtTime(tst.ts) + '</span>' : '') + '</div>';
+    } else {
+      testHtml = '<div class="cp-cell"><span class="cp-test fail">' + icon('xmark') + '失败</span>' +
+        (tst.msg ? '<span class="cp-sub">' + esc(tst.msg) + '</span>' : '') +
+        (tst.ts ? '<span class="cp-sub">' + fmtTime(tst.ts) + '</span>' : '') + '</div>';
+    }
+    var canTest = !!(p.openai_base || p.anthropic_base);
     var isOpen = _openProvider === p.name;
     var modelsBtn =
       '<button type="button" class="btn btn-sec btn-sm" data-action="provider-models" data-provider="' + nameAttr + '"' +
@@ -255,7 +303,7 @@
     var opsHtml =
       '<div class="cp-ops">' +
         '<button type="button" class="btn btn-sec btn-sm" data-action="provider-test" data-provider="' + nameAttr + '"' +
-          (canTest ? '' : ' disabled title="该 Provider 无 OpenAI Base URL"') + '>测试</button>' +
+          (canTest ? '' : ' disabled title="该 Provider 无 Base URL"') + '>测试</button>' +
         '<button type="button" class="btn btn-sec btn-sm" data-action="provider-discover" data-provider="' + nameAttr + '">发现</button>' +
         modelsBtn +
         '<button type="button" class="btn btn-danger btn-sm" data-action="provider-delete" data-provider="' + nameAttr + '">删除</button>' +
@@ -269,6 +317,7 @@
       '<td>' + protoHtml + '</td>' +
       '<td class="num">' + countHtml + '</td>' +
       '<td>' + keyHtml + '</td>' +
+      '<td>' + testHtml + '</td>' +
       '<td>' + opsHtml + '</td>' +
       '</tr>';
   }
@@ -277,7 +326,7 @@
     var tbody = $('provTbody');
     if (!tbody) return;
     function fail(msg) {
-      tbody.innerHTML = '<tr class="cp-row-loading"><td colspan="6">' +
+      tbody.innerHTML = '<tr class="cp-row-loading"><td colspan="7">' +
         '<div class="if-empty">加载失败 · ' + esc(msg) + '</div></td></tr>';
     }
     // 首次加载（无缓存）→ skeleton（spec §5 全 TAB 骨架；重取不闪）
@@ -291,9 +340,26 @@
         return;
       }
       _providers = d.providers || [];
+      // R3：发现后自动展开策展面板——按刷新后的候选数据判定（"发现全部"不再是死胡同）
+      if (_autoOpen) {
+        var _openTarget = null;
+        if (_autoOpen === 'first') {
+          for (var i = 0; i < _providers.length; i++) {
+            if ((_providers[i].candidates || []).length > 0) { _openTarget = _providers[i].name; break; }
+          }
+        } else {
+          for (var j = 0; j < _providers.length; j++) {
+            if (_providers[j].name === _autoOpen && (_providers[j].candidates || []).length > 0) {
+              _openTarget = _providers[j].name; break;
+            }
+          }
+        }
+        if (_openTarget) _openProvider = _openTarget;
+        _autoOpen = null;
+      }
       ensureOpenProviderAlive();
       if (!_providers.length) {
-        tbody.innerHTML = '<tr class="cp-row-loading"><td colspan="6">' +
+        tbody.innerHTML = '<tr class="cp-row-loading"><td colspan="7">' +
           '<div class="if-empty">暂无 Provider — 使用预设或手动配置添加</div></td></tr>';
         _openProvider = null;
       } else {
@@ -326,7 +392,7 @@
     }
     if (!p) return '';
     var panel = renderModelPanel(p);
-    return '<tr class="cpm-tr"><td colspan="6">' + panel + '</td></tr>';
+    return '<tr class="cpm-tr"><td colspan="7">' + panel + '</td></tr>';
   }
 
   /* ══ 模型策展面板（行下内联展开，一次一个） ══
@@ -345,7 +411,8 @@
     if (!p.discovery_enabled) {
       candHtml = '<div class="if-empty">该 Provider 发现已关闭 — 在上方「发现」手动拉取候选，或直接用右栏手填模型名</div>';
     } else if (!cands.length) {
-      candHtml = '<div class="if-empty">暂无候选 — 点上方「发现」从上游 /models 拉取候选</div>';
+      // 千帆类厂商无 /models 列表端点（404）→ 发现永远拉不到候选，不再让用户重复点「发现」
+      candHtml = '<div class="if-empty">该厂商未提供 /models 列表（或上游未返回模型）— 在下方「已声明」添加模型名（恒可路由）</div>';
     } else {
       candHtml = cands.map(function (mid) {
         var checked = !!enableSet[mid];
@@ -544,6 +611,10 @@
     var anthropicBase = ($('cpAnthropicBase') || {}).value ? $('cpAnthropicBase').value.trim() : '';
     if (!name) { UI.toast('请填写 Provider 名称', 'error'); return; }
     if (!openaiBase && !anthropicBase) { UI.toast('至少填写一个 Base URL', 'error'); return; }
+    if (!_manualTestOk) {
+      UI.toast('请先测试连接并通过', 'error');
+      return;
+    }
     setBtnBusy('manual-add', true);
     try {
       var res = await fetch('/admin/cloud/providers', {
@@ -564,10 +635,13 @@
       }
       UI.toast('Provider ' + name + ' 已添加', 'success');
       await window.doCloudDiscover(name);  // 发现单个 + 刷新 Provider 表
-      ['cpName', 'cpApiKey', 'cpOpenaiBase', 'cpAnthropicBase'].forEach(function (id) {
+      ['cpName', 'cpApiKey', 'cpOpenaiBase', 'cpAnthropicBase', 'cpProbeModel'].forEach(function (id) {
         var el = $(id);
         if (el) el.value = '';
       });
+      _manualTestOk = false;
+      setBtnBusy('manual-add', true);
+      resetTestResult('cpManualTestResult', '先点「测试连接」，通过后方可添加');
     } catch (e) {
       UI.toast('添加失败: ' + (e.message || e), 'error');
     } finally {
@@ -575,36 +649,67 @@
     }
   };
 
-  /* ══ 测试连接：POST /admin/cloud/test {url, api_key}
-   * 不传 baseUrl 时读手动表单 #cpOpenaiBase；行内测试传 provider.openai_base。
-   * key 留空时后端不带 Authorization 头（公开端点可测）。 */
-  window.doCloudTest = async function (baseUrl, apiKey) {
-    var fromForm = baseUrl == null;
-    var base = fromForm
-      ? (($('cpOpenaiBase') ? $('cpOpenaiBase').value.trim() : ''))
-      : String(baseUrl || '');
-    var key = apiKey != null
-      ? String(apiKey)
-      : ($('cpApiKey') ? $('cpApiKey').value.trim() : '');
-    if (!base) { UI.toast('请填写 OpenAI Base URL', 'error'); return; }
-    UI.toast('正在测试连接...', 'info');
+  /* ══ 测试连接：POST /admin/cloud/test（v6.6 重做，允许未注册）
+   * doCloudTest(opts)：opts={base, key, protocol, probeModel}。
+   *   base 传去尾斜杠的 base（后端不再拼 /models）；probeModel 有则发 1-token 真实生成。
+   * 返回 Promise<{ok, pass, data, error}>：ok=请求成功，pass=可添加门禁（后端 CLOUD_TEST_PASS_STATUSES）。
+   * key 留空时后端不带鉴权头（公开端点可测）。 */
+  window.doCloudTest = async function (opts) {
+    opts = opts || {};
+    var base = String(opts.base || '').replace(/\/+$/, '');
+    if (!base) {
+      return { ok: false, pass: false, error: '请填写 Base URL' };
+    }
+    var body = { url: base, api_key: opts.key ? String(opts.key) : '', protocol: opts.protocol || 'openai' };
+    if (opts.probeModel) body.probe_model = String(opts.probeModel);
     try {
       var res = await fetch('/admin/cloud/test', {
         method: 'POST',
         headers: UI.adminHeaders(),
-        body: JSON.stringify({ url: base.replace(/\/+$/, '') + '/models', api_key: key }),
+        body: JSON.stringify(body),
       });
       var d = null;
       try { d = await res.json(); } catch (_) {}
       if (!res.ok || !d || d.error) {
-        UI.toast('连接失败: ' + ((d && d.error) || ('HTTP ' + res.status)), 'error');
-        return;
+        return { ok: false, pass: false, error: (d && d.error) || ('HTTP ' + res.status), data: d };
       }
-      UI.toast('连接成功 · 上游 ' + (d.model_count || 0) + ' 个模型', 'success');
+      return { ok: true, pass: !!d.pass, data: d };
     } catch (e) {
-      UI.toast('测试失败: ' + (e.message || e), 'error');
+      return { ok: false, pass: false, error: e.message || String(e) };
     }
   };
+
+  /* ── 测试结果条（ok/warn/fail：图标 + 文本双编码）。
+   * r = doCloudTest 返回值；model_unavailable 归为"警告"（连接与鉴权正常，仅该模型不在套餐）。 ── */
+  function renderTestResult(containerId, r) {
+    var el = $(containerId);
+    if (!el) return;
+    el.style.display = '';
+    if (!r || !r.ok) {
+      el.className = 'cp-test-result fail';
+      el.innerHTML = icon('xmark') + esc((r && r.error) || '连接失败');
+      return;
+    }
+    var st = (r.data && r.data.status) || '';
+    if (r.pass) {
+      el.className = 'cp-test-result ok';
+      el.innerHTML = icon('check') + esc((r.data && r.data.message) || '连接正常');
+    } else if (st === 'model_unavailable') {
+      el.className = 'cp-test-result warn';
+      el.innerHTML = icon('alert') + esc((r.data && r.data.message) || '探测模型不在套餐内（连接与鉴权正常）');
+    } else {
+      el.className = 'cp-test-result fail';
+      el.innerHTML = icon('xmark') + esc((r.data && r.data.message) || '连接失败');
+    }
+  }
+
+  function resetTestResult(containerId, msg) {
+    var el = $(containerId);
+    if (!el) return;
+    el.className = 'cp-test-result stale';
+    el.innerHTML = esc(msg || '');
+    el.style.display = '';
+  }
 
   /* ══ 模型发现：POST /admin/cloud/discover {} | {provider} ══ */
   window.doCloudDiscover = async function (name) {
@@ -620,8 +725,17 @@
         UI.toast((d && d.error) || ('发现失败 · HTTP ' + res.status), 'error');
         return;
       }
-      if (provider) UI.toast('Provider ' + provider + ': 发现 ' + (d.cloud_models || 0) + ' 个可路由候选', 'success');
-      else UI.toast('发现 ' + (d.cloud_models || 0) + ' 个可路由候选', 'success');
+      // R3：自动打开策展面板让用户勾选，不再是"toast 一下完事"的死胡同。
+      // 注意：响应里的 cloud_models 是可路由注册表计数（≠ 候选数），不能据此判断候选；
+      // 面板开不开由刷新后的候选数据判定（cloudLoadProviders 里的 _autoOpen 扫描）。
+      var n = d.cloud_models || 0;
+      if (provider) {
+        _autoOpen = provider;
+        UI.toast('Provider ' + provider + ' 发现完成' + (n ? ' · 可路由 ' + n + ' 个模型' : '') + ' · 有候选则自动打开勾选面板', 'success');
+      } else {
+        _autoOpen = 'first';
+        UI.toast('模型发现完成' + (n ? ' · 可路由 ' + n + ' 个模型' : '') + ' · 有候选则自动打开勾选面板', 'success');
+      }
     } catch (e) {
       UI.toast('发现失败: ' + (e.message || e), 'error');
     } finally {
@@ -703,7 +817,7 @@
    * checkbox 的动作挂 label：点击文本/控件都能命中（closest 上溯到 label），
    * label 原生切换 checkbox → 读 checked 得新状态。
    * 预设卡 / 添加输入为 div/input → keydown Enter/Space 亦触发。 */
-  function handleAction(el) {
+  async function handleAction(el) {
     var act = el.getAttribute('data-action');
     if (!act || el.disabled) return;
     var provider = el.getAttribute('data-provider');
@@ -722,12 +836,46 @@
       case 'preset-add':
         window.doCloudAddPreset();
         break;
-      case 'manual-test':
-        window.doCloudTest();
+      case 'manual-test': {
+        var ob = ($('cpOpenaiBase') ? $('cpOpenaiBase').value.trim() : '');
+        var ab = ($('cpAnthropicBase') ? $('cpAnthropicBase').value.trim() : '');
+        var key = ($('cpApiKey') ? $('cpApiKey').value.trim() : '');
+        var pm = ($('cpProbeModel') ? $('cpProbeModel').value.trim() : '');
+        // protocol 取填了 base 的那个；两个都填 → 默认 openai（primary signal）
+        var protocol, base;
+        if (ob && !ab) { protocol = 'openai'; base = ob; }
+        else if (!ob && ab) { protocol = 'anthropic'; base = ab; }
+        else if (ob && ab) { protocol = 'openai'; base = ob; }
+        if (!base) { UI.toast('请填写至少一个 Base URL', 'error'); return; }
+        setBtnBusy('manual-test', true);
+        var r = await window.doCloudTest({ base: base, key: key, protocol: protocol, probeModel: pm });
+        setBtnBusy('manual-test', false);
+        renderTestResult('cpManualTestResult', r);
+        if (r.pass) { _manualTestOk = true; setBtnBusy('manual-add', false); }
+        else { _manualTestOk = false; setBtnBusy('manual-add', true); }
         break;
+      }
       case 'manual-add':
         window.doCloudAdd();
         break;
+      case 'preset-test': {
+        if (!_selectedPreset) { UI.toast('请先选择预设', 'error'); return; }
+        var pp = _selectedPreset;
+        var pkey = ($('cpPresetApiKey') ? $('cpPresetApiKey').value.trim() : '');
+        if (!pkey) { UI.toast('请填写 API Key', 'error'); return; }
+        var pproto, pbase;
+        if (pp.openai_base && !pp.anthropic_base) { pproto = 'openai'; pbase = pp.openai_base; }
+        else if (!pp.openai_base && pp.anthropic_base) { pproto = 'anthropic'; pbase = pp.anthropic_base; }
+        else if (pp.openai_base && pp.anthropic_base) { pproto = 'openai'; pbase = pp.openai_base; }
+        if (!pbase) { UI.toast('该预设未配置 Base URL', 'error'); return; }
+        setBtnBusy('preset-test', true);
+        var pr = await window.doCloudTest({ base: pbase, key: pkey, protocol: pproto });
+        setBtnBusy('preset-test', false);
+        renderTestResult('cpPresetTestResult', pr);
+        if (pr.pass) { _presetTestOk = true; setBtnBusy('preset-add', false); }
+        else { _presetTestOk = false; setBtnBusy('preset-add', true); }
+        break;
+      }
       case 'reload':
         window.doCloudReload();
         break;
@@ -764,11 +912,46 @@
         for (var i = 0; i < _providers.length; i++) {
           if (_providers[i].name === provider) { p = _providers[i]; break; }
         }
-        if (!p || !p.openai_base) {
-          UI.toast('该 Provider 未配置 OpenAI Base URL', 'error');
+        if (!p || (!p.openai_base && !p.anthropic_base)) {
+          UI.toast('该 Provider 未配置 Base URL', 'error');
           return;
         }
-        window.doCloudTest(p.openai_base, '');
+        // R4：服务端用已存 key 测该 provider 全部 base（前端不传/不回显 key）
+        setBtnBusy('provider-test', true, provider);
+        try {
+          var res = await fetch('/admin/cloud/provider-test', {
+            method: 'POST',
+            headers: UI.adminHeaders(),
+            body: JSON.stringify({ provider: provider }),
+          });
+          var d = null;
+          try { d = await res.json(); } catch (_) {}
+          if (!res.ok || !d || d.error) {
+            UI.toast((d && d.error) || ('测试失败 · HTTP ' + res.status), 'error');
+          } else {
+            var statuses = (d.results || []).map(function (r) { return r.status; });
+            var anyFail = statuses.some(function (s) { return s === 'auth_failed' || s === 'error'; });
+            var anyWarn = statuses.some(function (s) { return s === 'model_unavailable'; });
+            var ok = !!d.ok;
+            var firstBad = (d.results || []).filter(function (r) { return !r.pass; })[0];
+            _testStatus[provider] = {
+              pass: ok,
+              warn: (!ok && anyWarn && !anyFail),
+              ts: Date.now(),
+              msg: ok ? (d.key_set ? '' : 'Key 未设置（未带鉴权）')
+                   : (firstBad ? (firstBad.message || '') : ''),
+            };
+            saveTestStatus();
+            if (!d.key_set) UI.toast('Key 未设置 — 本次测试未带鉴权', 'warn');
+            UI.toast(ok ? ('Provider ' + provider + ' 测试通过')
+                       : ('Provider ' + provider + ' 测试未通过'), ok ? 'success' : 'error');
+            await cloudLoadProviders();  // 重渲染"测试"列（读 _testStatus）
+          }
+        } catch (e) {
+          UI.toast('测试失败: ' + (e.message || e), 'error');
+        } finally {
+          setBtnBusy('provider-test', false, provider);
+        }
         break;
       }
       case 'provider-delete':
@@ -794,6 +977,27 @@
       if (!el || !root.contains(el) || el.tagName === 'BUTTON') return;
       ev.preventDefault();
       handleAction(el);
+    });
+
+    // R1/R2 失效规则：已通过的测试，任一表单字段 change → 重新禁用"添加" + 结果条提示
+    ['cpName', 'cpApiKey', 'cpOpenaiBase', 'cpAnthropicBase', 'cpProbeModel'].forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      el.addEventListener('change', function () {
+        if (_manualTestOk) {
+          _manualTestOk = false;
+          setBtnBusy('manual-add', true);
+          resetTestResult('cpManualTestResult', '配置已变更，请重新测试');
+        }
+      });
+    });
+    var pkeyEl = $('cpPresetApiKey');
+    if (pkeyEl) pkeyEl.addEventListener('change', function () {
+      if (_presetTestOk) {
+        _presetTestOk = false;
+        setBtnBusy('preset-add', true);
+        resetTestResult('cpPresetTestResult', '配置已变更，请重新测试');
+      }
     });
   }
 })();

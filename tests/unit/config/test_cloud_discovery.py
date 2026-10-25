@@ -302,3 +302,84 @@ class TestCloudDiscoveryRoute:
         }
         result = cd.resolve_route("qwen36-35b-vl", local_models={"qwen36-35b-vl"})
         assert result == "local"
+
+
+class TestSpecAliasAndDiscoveryUA:
+    """v6.6: model_specs 别名语义 + 发现请求 User-Agent。
+
+    别名语义（与 _serialize_providers 的写盘格式一致）：
+      yaml: models: {k3: {model_id: kimi/k3}}
+      → 注册表 key = "k3"（短名，routing 按 split("/")[-1] 查表）
+      → CloudModel.model_id = "kimi/k3"（上游真实 id，转发时覆盖 data["model"]）
+
+    回归背景：spec["model_id"] 曾只落进 extra（不参与注册/转发），
+    导致 kimi/k3 这类含 "/" 的上游模型必然 404/403。
+    """
+
+    def _cfg(self, tmp_path):
+        path = tmp_path / "cloud_provider.yaml"
+        _write_yaml(path, {
+            "providers": {
+                "tathr": {
+                    "openai_base": "https://api.tathr.com/v1",
+                    "anthropic_base": "https://api.tathr.com/v1",
+                    "api_key": "test-key",
+                    "discovery": {"enabled": False},
+                    "models": {
+                        "gpt-6.1-sol": {"model_id": "gpt-6.1-sol"},
+                        "k3": {"model_id": "kimi/k3", "context_window": 128000},
+                    },
+                }
+            }
+        })
+        return CloudDiscovery(path)
+
+    def test_alias_registers_short_key_with_upstream_model_id(self, tmp_path):
+        reg = self._cfg(tmp_path).discover_all()
+        assert "k3" in reg and "tathr/k3" in reg
+        assert reg["k3"].model_id == "kimi/k3"
+        assert reg["tathr/k3"].model_id == "kimi/k3"
+        # 无别名（key == model_id）时行为不变
+        assert reg["gpt-6.1-sol"].model_id == "gpt-6.1-sol"
+
+    def test_alias_merges_spec_attrs_via_spec_key(self, tmp_path):
+        reg = self._cfg(tmp_path).discover_all()
+        assert reg["k3"].context_window == 128000
+
+    def test_alias_routable_by_full_name_short_name_and_prefixed(self, tmp_path):
+        cd = self._cfg(tmp_path)
+        cd.discover_all()
+        assert cd.resolve_route("kimi/k3", set()) == "cloud:tathr"
+        assert cd.resolve_route("k3", set()) == "cloud:tathr"
+        assert cd.resolve_route("tathr/k3", set()) == "cloud:tathr"
+
+    def test_discovery_request_carries_explicit_user_agent(self, tmp_path, monkeypatch):
+        """urllib 默认 "Python-urllib/3.x" 会被 Cloudflare 403 (error 1010)。"""
+        from inferfabric import cloud_discovery as cdm
+        captured = {}
+
+        class _Resp:
+            def read(self):
+                return b'{"data": [{"id": "kimi/k3"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def _fake_urlopen(req, timeout=None):
+            captured["ua"] = req.get_header("User-agent")
+            return _Resp()
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        cfg = ProviderConfig(
+            name="tathr",
+            api_key="k",
+            openai_base="https://api.tathr.com/v1",
+            anthropic_base="https://api.tathr.com/v1",
+        )
+        models = cd._discover_provider(cfg)
+        assert [m.model_id for m in models] == ["kimi/k3"]
+        assert captured["ua"] == cdm._CLOUD_UA
