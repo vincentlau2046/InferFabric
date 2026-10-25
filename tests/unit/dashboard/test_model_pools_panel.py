@@ -735,10 +735,10 @@ class TestP1PartialRender:
             dyn["mp-rt-fast-loc"]["textContent"]
         # 环形 --p = 41/42 ≈ 98（首见锚定总时长，客户端递减）
         assert int(dyn["mp-ring-fast-loc"]["style"]["--p"]) == 98
-        # 倒计时不发出任何 fetch：初次渲染 4 GET（含 latency best-effort）
-        # + 1 次 poll tick 4 GET（P3 Task 8 起 latency 为第 4 个常规拉取）
+        # 倒计时不发出任何 fetch：初次渲染 5 GET（latency/events best-effort）
+        # + 1 次 poll tick 5 GET（P3 Task 9 起 events 为第 5 个常规拉取）
         gets = [c for c in out["calls"] if c["method"] == "GET"]
-        assert len(gets) == 8
+        assert len(gets) == 10
 
 
 # ── UI/UX P1 修复 pass（交叉评审 glm-5.3-flash tathr/gpt-6.1-sol 发现，逐条 RED→GREEN）──
@@ -1890,3 +1890,78 @@ class TestP3Spark:
         lat_gets = [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools/latency"]
         assert len(lat_gets) == 1                # fetch 确实发生且被降级
+
+
+# ── UI/UX P3 Task 9：C2 失败时间线 ──────────────────────────────
+# 契约：
+# - 第 5 个 best-effort fetch（events；失败 → null 降级）
+# - 池有事件 → 尾部「故障时间线 · N」toggle（默认折叠）；展开 → 横向轴
+#   （mp-tl-dot 按事件、left% 最近 30min 窗口、title 含 reason、
+#   mp-tl-cooldown/mp-tl-quarantine 着色）
+# - 展开态进 structSig（开合是结构）；事件数据不进 sig → by-id 更新
+
+
+def _events_body(events, pool="fast"):
+    return {"pools": {pool: events}}
+
+
+_EV2 = [
+    {"age_s": 1500.0, "wall_ts": 1000.0, "type": "cooldown",
+     "candidate_id": "loc", "target": "qwen-small", "reason": "cooldown_401"},
+    {"age_s": 300.0, "wall_ts": 2200.0, "type": "quarantine",
+     "candidate_id": "cld", "target": "prov/cloud-m", "reason": "quarantine_404"},
+]
+
+
+class TestP3Timeline:
+    def _routes(self, events_body=None, **kw):
+        routes = _ops_routes(**kw)
+        routes["/admin/model-pools/events"] = {
+            "status": 200, "body": events_body or {"pools": {}}}
+        return routes
+
+    def test_timeline_toggle_collapsed_by_default(self, run_panel):
+        out = run_panel(self._routes(events_body=_events_body(_EV2)))
+        html = out["htmlFinal"]
+        # 默认折叠：按钮在、轴不在
+        assert 'data-mp-tl-toggle="fast"' in html
+        assert "故障时间线 · 2" in html
+        assert 'id="mp-tl-fast"' not in html
+        # 展开 → 轴出现：事件点数 = 2、着色、title 含 reason、left% 在 0–100
+        out2 = run_panel(self._routes(events_body=_events_body(_EV2)),
+                         actions=[{"fn": "doMpTimelineToggle",
+                                   "args": ["fast"]}])
+        h2 = out2["htmlFinal"]
+        assert 'id="mp-tl-fast"' in h2
+        assert h2.count("mp-tl-dot") == 2
+        assert "mp-tl-cooldown" in h2 and "mp-tl-quarantine" in h2
+        assert "cooldown_401" in h2 and "quarantine_404" in h2
+        for m in re.finditer(r'left:([\d.]+)%', h2):
+            assert 0.0 <= float(m.group(1)) <= 100.0
+
+    def test_timeline_open_state_in_sig_no_flicker(self, run_panel):
+        # 展开 → 重建一次；之后轮询 events 数据变（2→3 条）→ 轴 by-id 更新，
+        # mpPools 零整写；toggle 计数文本 by-id 更新
+        ev3 = _EV2 + [{"age_s": 60.0, "wall_ts": 2440.0, "type": "probe_fail",
+                       "candidate_id": "loc", "target": "qwen-small",
+                       "reason": "cooldown_401"}]
+        routes = self._routes()
+        routes["/admin/model-pools/events"] = {"status": 200, "bodies": [
+            _events_body(_EV2), _events_body(_EV2), _events_body(ev3)]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"},
+                        actions=[{"fn": "doMpTimelineToggle",
+                                  "args": ["fast"]}])
+        wc = out["writeCounts"]
+        assert wc.get("mpPools") == 2          # 首屏 + 展开重建；轮询零整写
+        assert wc.get("mp-tl-fast", 0) == 1    # 轮询 by-id 轴更新
+        assert out["dyn"]["mp-tl-fast"]["innerHTML"].count("mp-tl-dot") == 3
+        assert out["dyn"]["mp-tl-toggle-fast"]["textContent"] == "故障时间线 · 3"
+
+    def test_timeline_hidden_without_events(self, run_panel):
+        out = run_panel(self._routes(events_body={"pools": {}}))
+        assert "data-mp-tl-toggle" not in out["htmlFinal"]
+        assert "mp-tl-dot" not in out["htmlFinal"]
+        ev_gets = [c for c in out["calls"]
+                   if c["url"] == "/admin/model-pools/events"]
+        assert len(ev_gets) == 1                # fetch 发生且空池 → 无 toggle

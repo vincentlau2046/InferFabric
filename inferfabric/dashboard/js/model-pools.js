@@ -35,6 +35,7 @@
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
   var LATENCY_URL = '/admin/model-pools/latency';
+  var EVENTS_URL = '/admin/model-pools/events';
   var CATALOG_URL = '/admin/model-pools/catalog';
   var TOGGLE_URL = '/admin/model-pools/toggle';
   var VALIDATE_URL = '/admin/model-pools/validate';
@@ -45,7 +46,10 @@
   var _loading = false;   // 在途渲染去重（避免连点刷新叠发请求）
   // v7.1.0 运营视图单一数据源：def（含 configured/load_error/raw）+ 双协议
   // 选择视图 + 候选运行态；编辑器（Task 6）以 _state.def.raw 为读-改-写基底
-  var _state = { def: null, status: null, runtime: null, latency: null };
+  var _state = { def: null, status: null, runtime: null, latency: null,
+                 events: null };
+  // C2：故障时间线展开态（pool → true；进 structSig — 开合是结构）
+  var _timelineOpen = {};
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -219,6 +223,30 @@
     return Array.isArray(ring) ? ring : [];
   }
 
+  /* ── C2 失败时间线（P3 Task 9）── */
+  // 池事件列表（新在后，端点已按 50 封顶）；无数据 → []
+  function poolEvents(pool) {
+    var ev = _state.events;
+    var list = (ev && ev.pools && ev.pools[pool]);
+    return Array.isArray(list) ? list : [];
+  }
+
+  // 轴内事件点（不含外壳）：最近 30min 窗口，新在右；
+  // left% = (1 - age/1800)·100，越界夹紧；title 原生气泡（YAGNI）
+  function timelineDots(pool) {
+    return poolEvents(pool).map(function (e) {
+      var age = (typeof e.age_s === 'number' && isFinite(e.age_s))
+        ? e.age_s : 1800;
+      var left = Math.max(0, Math.min(100, (1 - age / 1800) * 100));
+      var title = (e.type || '') + ' · ' + (e.target || '')
+        + (e.reason ? ' · ' + e.reason : '')
+        + ' · ' + Math.round(age) + 's 前';
+      return '<span class="mp-tl-dot mp-tl-' + esc(e.type || 'cooldown')
+        + '" style="left:' + left.toFixed(1) + '%" title="' + esc(title)
+        + '"></span>';
+    }).join('');
+  }
+
   function candCard(pool, c, rt) {
     var dot = candDotClass(rt);
     var ev = c.evidence || {};
@@ -341,6 +369,20 @@
       html += '</div>';
     });
 
+    // C2：故障时间线（池有事件才出 toggle；展开态重建出轴）
+    var evs = poolEvents(name);
+    if (evs.length) {
+      html += '<div class="mp-tl-row">'
+        + '<button type="button" class="mp-edit-btn" id="mp-tl-toggle-'
+        + esc(name) + '" data-mp-tl-toggle="' + esc(name)
+        + '">故障时间线 · ' + evs.length + '</button>'
+        + (_timelineOpen[name]
+            ? '<div class="mp-tl" id="mp-tl-' + esc(name) + '">'
+              + timelineDots(name) + '</div>'
+            : '')
+        + '</div>';
+    }
+
     html += '</div>';
     return html;
   }
@@ -442,6 +484,14 @@
         var spark = $('mp-spark-' + n + '-' + c.id);
         if (spark) spark.innerHTML = sparkSvg(latRing(n, c.id).slice(-20));
       });
+      // C2：事件数据不进签名 → toggle 计数 + 展开轴 by-id 更新
+      var evsN = poolEvents(n).length;
+      var tgl = $('mp-tl-toggle-' + n);
+      if (tgl && evsN) tgl.textContent = '故障时间线 · ' + evsN;
+      if (_timelineOpen[n]) {
+        var tl = $('mp-tl-' + n);
+        if (tl) tl.innerHTML = timelineDots(n);
+      }
     });
     var revEl = $('mpRevision');
     if (revEl && typeof def.revision !== 'undefined') {
@@ -541,6 +591,8 @@
       var rtRes = await fetch(RUNTIME_URL, { headers: UI.adminHeaders() });
       // C1：延迟环 best-effort（同 rt 模式 — 失败 → null 降级，不挡面板）
       var latRes = await fetch(LATENCY_URL, { headers: UI.adminHeaders() });
+      // C2：事件时间线 best-effort（同上）
+      var evRes = await fetch(EVENTS_URL, { headers: UI.adminHeaders() });
       if (!defRes.ok || !stRes.ok) {
         _lastSig = null;   // 评审 I5：错误页替换了面板 → 失效签名，恢复后必须重建
         box.innerHTML = '<p class="mp-empty">拉取失败 · HTTP '
@@ -557,10 +609,15 @@
       if (latRes.ok) {
         try { lat = await latRes.json(); } catch (e) { lat = null; }
       }
+      var evs = null;
+      if (evRes.ok) {
+        try { evs = await evRes.json(); } catch (e) { evs = null; }
+      }
       _state.def = def;
       _state.status = st;
       _state.runtime = rt;
       _state.latency = lat;
+      _state.events = evs;
       _revision = def.revision;
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
@@ -604,6 +661,12 @@
       // 启用都是结构变化
       var sig = structSig(def, stPools, rtPools)
         + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
+        // C2：toggle 在否（池事件有无）+ 展开池列表都是结构 — 变化即重建；
+        // 事件数据本身不进 sig（by-id 更新）
+        + '|tl:' + Object.keys(def.pools || {}).filter(function (n) {
+            return poolEvents(n).length > 0;
+          }).join(',')
+          + '/' + Object.keys(_timelineOpen).join(',')
         + '|inline:' + (_inline
             ? _inline.pool + '|' + _inline.candId + '|' + _inline.spec
               + '|' + _inline.rev
@@ -675,6 +738,13 @@
       if (e) e.className = o.cls;
     });
     _optLamps = null;
+  }
+
+  // C2：故障时间线开合 — 展开态变化走重建（轴出现/消失是结构变化）
+  async function doMpTimelineToggle(pool) {
+    if (_timelineOpen[pool]) delete _timelineOpen[pool];
+    else _timelineOpen[pool] = true;
+    await renderModelPools();
   }
 
   async function doMpToggle(pool, enable) {
@@ -1699,6 +1769,9 @@
     if (edit) { doMpEdit(edit); return; }
     var snip = t.getAttribute('data-mp-snippet');
     if (snip) { doMpSnippet(snip); return; }
+    // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
+    var tlPool = t.getAttribute('data-mp-tl-toggle');
+    if (tlPool) { doMpTimelineToggle(tlPool); return; }
     // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
     var cpool = t.getAttribute('data-mp-copy-pool');
     if (cpool) { doMpWizardDoneCopy(cpool); return; }
@@ -1790,6 +1863,7 @@
   window.doMpInlineApply = doMpInlineApply;
   window.doMpInlineCancel = doMpInlineCancel;
   window.mpPrimeInline = primeInline;
+  window.doMpTimelineToggle = doMpTimelineToggle;
   window.mpEditReplace = mpEditReplace;
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
