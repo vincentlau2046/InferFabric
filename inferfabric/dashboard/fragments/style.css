@@ -1182,30 +1182,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .cp-key svg { width: 12px; height: 12px; }
 .cp-key.on { color: var(--ok); }
 .cp-key.off { color: var(--warn); }
-/* 测试结果条（手动 / 预设表单用）：图标 + 文本双编码，状态色仅作强调不作唯一信号 */
-.cp-test-result {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 6px 10px;
-  margin-top: var(--sp-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-pill);
-  font-size: var(--fs-table);
-  line-height: 1.4;
-}
-.cp-test-result svg { width: 13px; height: 13px; flex: 0 0 auto; margin-top: 2px; }
-.cp-test-result.ok   { color: var(--ok);   background: color-mix(in srgb, var(--ok) 12%, transparent);   border-color: color-mix(in srgb, var(--ok) 30%, var(--border)); }
-.cp-test-result.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
-.cp-test-result.fail { color: var(--crit); background: color-mix(in srgb, var(--crit) 12%, transparent); border-color: color-mix(in srgb, var(--crit) 30%, var(--border)); }
-.cp-test-result.stale { color: var(--ink-2); }
-/* Provider 表"测试"列：图标 + 文本 + 时间（HH:MM）双编码 */
-.cp-test { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-table); }
-.cp-test svg { width: 12px; height: 12px; flex: 0 0 auto; }
-.cp-test.ok { color: var(--ok); }
-.cp-test.warn { color: var(--warn); }
-.cp-test.fail { color: var(--crit); }
-.cp-test.untested { color: var(--ink-3); }
 /* 行操作按钮 */
 .cp-ops { display: flex; gap: 4px; }
 
