@@ -511,3 +511,83 @@ class TestRuntimeEndpoint:
     def test_runtime_endpoint_registered_in_get_routes(self):
         from inferfabric.proxy.handler import _GET_ROUTES
         assert "/admin/model-pools/runtime" in _GET_ROUTES
+
+
+class TestLatencyEventsEndpoints:
+    """P3 只读端点：latency（延迟环）+ events（事件时间线）。"""
+
+    def _fp(self, pm, cand_id="loc"):
+        for rc in pm.pool_registry.snapshot().pools["fast"].candidates:
+            if rc.candidate.id == cand_id:
+                return rc.endpoint_fingerprint
+        raise AssertionError("candidate not found")
+
+    def test_latency_endpoint_shape_and_cap(self, pm):
+        import itertools
+        from inferfabric.model_pool.history import PoolHistory
+        hist = PoolHistory(clock=itertools.count(1000.0).__next__)
+        for i in range(25):
+            hist.record("fast", "loc", ttft_ms=float(10 + i), total_ms=100.0,
+                        ok=True)
+        pm.pool_history = hist
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools_latency(h, pm)
+        status, body = h.sent[-1]
+        assert status == 200
+        ring = body["pools"]["fast"]["loc"]
+        assert len(ring) == 20                     # 每候选最近 20
+        assert ring[0]["ttft_ms"] == 15.0          # 新在后：i=5..24
+        assert ring[-1]["ttft_ms"] == 34.0
+        pt = ring[-1]
+        assert set(pt) == {"age_s", "wall_ts", "ttft_ms", "total_ms"}
+        assert pt["wall_ts"] == 1024.0
+        assert pt["age_s"] == 1.0                  # 快照钟 = 下一个 count 值 1025
+
+    def test_events_endpoint_maps_fp_to_candidate(self, pm):
+        from inferfabric.model_pool.pool_forward import CooldownStore
+        cd = CooldownStore()
+        fp = self._fp(pm)
+        for i in range(55):                        # 超每池上限 → 只留最近 50
+            cd.add(fp, now=100.0 + i, reason="cooldown_401")
+        pm.pool_cooldowns = cd
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools_events(h, pm)
+        status, body = h.sent[-1]
+        assert status == 200
+        evs = body["pools"]["fast"]
+        assert len(evs) == 50
+        e = evs[-1]
+        assert e["type"] == "cooldown"
+        assert e["candidate_id"] == "loc"
+        assert e["target"] == "qwen-small"
+        assert e["reason"] == "cooldown_401"
+        assert set(e) == {"age_s", "wall_ts", "type", "candidate_id",
+                          "target", "reason"}
+        assert e["age_s"] >= 0.0
+
+    def test_events_orphan_fingerprints_dropped(self, pm):
+        from inferfabric.model_pool.pool_forward import CooldownStore
+        cd = CooldownStore()
+        cd.add("fp-ghost", now=100.0, reason="cooldown_401")   # 不在配置里
+        cd.add(self._fp(pm), now=101.0, reason="cooldown_403")
+        pm.pool_cooldowns = cd
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools_events(h, pm)
+        status, body = h.sent[-1]
+        assert status == 200
+        evs = body["pools"]["fast"]
+        assert len(evs) == 1                       # 孤儿指纹丢弃
+        assert evs[0]["candidate_id"] == "loc"
+        assert evs[0]["reason"] == "cooldown_403"
+
+    def test_both_endpoints_empty_when_unconfigured(self, tmp_path):
+        # Review Focus #2：registry 未配置 → 200 空 pools（不 500）
+        reg = PoolRegistry(config_path=tmp_path / "absent.yaml",
+                           evidence_path=tmp_path / "e.json")
+        reg.load()
+        bare = FakePM(reg)
+        h1, h2 = AdminHandler(), AdminHandler()
+        mp_admin.handle_get_model_pools_latency(h1, bare)
+        mp_admin.handle_get_model_pools_events(h2, bare)
+        assert h1.sent[-1][0] == 200 and h1.sent[-1][1] == {"pools": {}}
+        assert h2.sent[-1][0] == 200 and h2.sent[-1][1] == {"pools": {}}
