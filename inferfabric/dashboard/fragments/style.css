@@ -760,6 +760,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   .mp-beam-flow { animation: none;
     background: var(--accent); }
   .mp-highlight { animation: none; }
+  /* 调用树：流动停止（静态实色绿） */
+  .mp-link-flowing { animation: none; background: var(--ok); }
 }
 
 /* ── 总览页组件 ───────────────────────────────────────────────── */
@@ -1649,6 +1651,78 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 @keyframes mp-sweep {
   from { transform: translateX(-100%); }
   to   { transform: translateX(100%); }
+}
+
+/* ── 调用树 + 四组常驻卡（2026-10-26 大手术，v7.5.0）───────────────
+   树行链路五态与 linkState 纯函数同源：flowing 绿+流动（真实 ok 交换）/
+   idle 实线 / cooldown 虚线暗 / fail 红断链 / unconfigured 灰点线。
+   文本色全走主题令牌（双主题 ≥4.5:1 — 浏览器门禁钉住）；
+   --ink-3 仅用于非文本链路线（WCAG 非文本 3:1 达标）。 */
+.mp-tree {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  padding: var(--sp-2); margin-bottom: var(--sp-3);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.mp-tree-row {
+  display: flex; align-items: center; gap: var(--sp-1);
+  min-height: 28px;
+}
+.mp-tree-port, .mp-tree-role, .mp-tree-leaf {
+  font-size: var(--fs-table); color: var(--ink); white-space: nowrap;
+}
+.mp-tree-port { color: var(--ink-2); }
+.mp-tree-leaf { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.mp-link {
+  flex: 1 1 24px; min-width: 16px; height: 2px;
+  border-radius: 1px; background: var(--border);
+}
+.mp-link-flowing {
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--ok), transparent);
+  background-size: 200% 100%;
+  animation: mp-beam-flow 2.4s linear infinite;
+}
+.mp-link-idle { background: var(--ok); }
+.mp-link-cooldown {
+  background: transparent; height: 0; border-radius: 0;
+  border-top: 2px dashed var(--ink-3);
+}
+.mp-link-fail {
+  background: transparent; height: 0; border-radius: 0;
+  border-top: 2px dashed var(--crit);
+}
+.mp-link-unconfigured {
+  background: transparent; height: 0; border-radius: 0;
+  border-top: 2px dotted var(--ink-3); opacity: .6;
+}
+.mp-tree-state {
+  flex: none; font-size: 11px; padding: 1px 8px;
+  border-radius: var(--radius-pill); border: 1px solid var(--border);
+  color: var(--ink-2); background: var(--surface-2);
+}
+.mp-tree-state-flowing { color: var(--ok); border-color: var(--ok); }
+.mp-tree-state-cooldown { color: var(--warn); border-color: var(--warn); }
+.mp-tree-state-fail { color: var(--crit); border-color: var(--crit); }
+.mp-tree-state-unconfigured { color: var(--ink-2); border-style: dashed; }
+
+/* 四组常驻配置卡：2×2 栅格，窄屏堆叠 */
+.mp-cards {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+@media (max-width: 900px) {
+  .mp-cards { grid-template-columns: 1fr; }
+}
+.mp-role-desc { font-size: var(--fs-table); color: var(--ink-2); }
+.mp-unconfigured-badge {
+  flex: none; font-size: 11px; padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  color: var(--ink-2); border: 1px dashed var(--border);
+}
+.mp-config-line {
+  display: flex; align-items: center; gap: var(--sp-1);
+  margin-top: var(--sp-2);
 }
 
 /* A4 向导出口成果卡（UI/UX P2）：创建成功先展示成果 + 片段直通，

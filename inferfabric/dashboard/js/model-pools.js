@@ -124,6 +124,118 @@
     return '<div class="mp-tree" id="mpTree">' + rows.join('') + '</div>';
   }
 
+  // 角色描述（四角色表查名；额外池无描述返回 null）
+  function roleDesc(name) {
+    for (var i = 0; i < _ROLE_DEFS.length; i++) {
+      if (_ROLE_DEFS[i].name === name) return _ROLE_DEFS[i].desc;
+    }
+    return null;
+  }
+
+  // 未配置卡下拉默认值（原向导 _prefill 启发式按角色吸收；仅建议值）：
+  // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
+  // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
+  // （fetchCatalog 完整形态）。额外池无启发式。
+  function cardDefault(roleName, catalog) {
+    var cat = catalog || {};
+    var llms = cat.local || [];
+    var act = llms.filter(function (m) { return !!m.active; });
+    function pick(list, wantMax) {
+      if (!list.length) {
+        return (cat.cloudValues || []).length ? cat.cloudValues[0] : null;
+      }
+      var sorted = list.slice();
+      var allSized = sorted.every(function (m) {
+        return typeof m.context_window === 'number';
+      });
+      if (allSized) {
+        sorted.sort(function (a, b) {
+          return wantMax ? b.context_window - a.context_window
+            : a.context_window - b.context_window;
+        });
+      } else if (!wantMax) {
+        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
+      }
+      return 'local:' + sorted[0].name;
+    }
+    if (roleName === 'fast') return pick(act.length ? act : llms, false);
+    if (roleName === 'premium') return pick(llms, true);
+    if (roleName === 'small') return pick(llms, false);
+    if (roleName === 'classifier') {
+      return act.length ? 'local:' + act[0].name : pick(llms, false);
+    }
+    return null;
+  }
+
+  // 未配置卡下拉选项（与 A2 inlineOptions 同形 + defVal 预选）
+  function configOptions(catalog, defVal) {
+    var o = '';
+    (catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // 未配置卡：同形态 + 「未配置」徽标 + 预填下拉（首次 apply 建池）+
+  // 高级配置直通（openEditor 对缺失池走骨架）。无候选链/开关/接入片段
+  // — 那些是「已配置」才有的动作。
+  function unconfiguredCard(name, catalog) {
+    var desc = roleDesc(name);
+    var defVal = cardDefault(name, catalog);
+    var opts = catalog ? configOptions(catalog, defVal) : null;
+    return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
+      + esc(name) + '" data-mp-card="' + esc(name) + '">'
+      + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
+      + '"></div>'
+      + '<div class="if-card-hdr">'
+      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="mp-unconfigured-badge">未配置</span>'
+      + '<span class="mp-toggle-wrap">'
+      + '<button type="button" class="mp-edit-btn" data-mp-edit="'
+      + esc(name) + '">高级配置</button>'
+      + '</span>'
+      + '</div>'
+      + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
+      + '<div class="mp-config-line">'
+      + '<span class="mp-diff-old mono">（未配置）</span>'
+      + '<span class="mp-diff-arrow">→</span>'
+      + '<select class="mp-inline-sel mp-config-sel" data-mp-config-pool="'
+      + esc(name) + '"' + (opts ? '' : ' disabled') + '>'
+      + (opts
+          ? '<option value="">选择模型…</option>' + opts
+          : '<option value="">目录不可用 — 请用编辑器</option>')
+      + '</select>'
+      + '</div>'
+      + '</div>';
+  }
+
+  // 四组常驻配置卡：_ROLE_ORDER 固定序四卡 + 额外池追加（R3）。
+  // 已配置 → 现 poolCard 全部动作；未配置 → unconfiguredCard（待建）。
+  // 面板只有这一种形态 — 不存在会消失的配置窗口。
+  function cardsHtml(defs, st, rt, catalog) {
+    var pools = (defs && defs.pools) || {};
+    var stPools = (st && st.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var cards = order.map(function (name) {
+      var def = pools[name];
+      return def
+        ? poolCard(name, def, stPools[name], rtPools[name])
+        : unconfiguredCard(name, catalog);
+    });
+    return '<div class="mp-cards" id="mpCards">' + cards.join('') + '</div>';
+  }
+
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -416,6 +528,9 @@
       + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + (roleDesc(name)
+          ? '<span class="mp-role-desc">' + esc(roleDesc(name)) + '</span>'
+          : '')
       + '<span class="mp-lamps">'
       + ['openai', 'anthropic'].map(function (proto) {
           var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
@@ -2013,6 +2128,7 @@
   window.renderModelPools = renderModelPools;
   window.mpLinkState = linkState;
   window.mpTreeHtml = treeHtml;
+  window.mpCardsHtml = cardsHtml;
   window.doMpToggle = doMpToggle;
   window.doMpEdit = doMpEdit;
   window.doMpUndo = doMpUndo;

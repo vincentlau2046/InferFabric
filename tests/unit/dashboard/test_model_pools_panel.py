@@ -2247,3 +2247,120 @@ class TestCallTree:
                           json.loads(json.dumps(self._TREE_DEFS)), rt)
         assert "mp-link-flowing" in html
         assert "调用中" in html
+
+
+class TestPersistentCards:
+    """大手术 T3：四组常驻配置卡 — 面板只有一种形态，配置界面不再消失。
+
+    契约（用户 2026-10-25）：fast/premium/small/classifier 四卡永远在屏；
+    未配置卡同形态 + 「未配置」徽标 + 预填下拉（cardDefault 启发式）+
+    data-mp-config-pool（首次 apply 建池，Task 5 接线）；已配置卡保留
+    poolCard 全部动作；额外池追加四角色后。
+    """
+
+    _CARDS_DEFS = {"revision": 1, "pools": {
+        "small": {"enabled": True, "issues": [],
+                  "candidates": [{"id": "m1", "priority": 1, "kind": "local",
+                                  "target": "Qwen38-27B-TXT",
+                                  "features": ["tools"],
+                                  "evidence": {"openai": "declared"}}]},
+        "custom-x": {"enabled": True, "issues": [],
+                     "candidates": [{"id": "cx", "priority": 1, "kind": "cloud",
+                                     "target": "prov/x-m"}]},
+    }}
+
+    _CARDS_ST = {"revision": 1, "pools": {
+        "small": {"enabled": True, "issues": [], "protocols": {
+            "openai": {"chosen": "m1", "error": None,
+                       "decisions": [{"id": "m1", "included": True,
+                                      "reason": "ok"}]},
+            "anthropic": {"chosen": None, "error": "no_evidence",
+                          "decisions": []},
+        }},
+    }}
+
+    @staticmethod
+    def _catalog():
+        # fetchCatalog 完整形态（含 active/context_window — cardDefault
+        # 启发式消费；fetchCandidateCatalog 的裁剪形态不够，builder 裁定）
+        return {
+            "local": [
+                {"name": "qwen-turbo", "active": True,
+                 "context_window": 32000, "protocols": ["openai"],
+                 "features": []},
+                {"name": "qwen-max", "active": False,
+                 "context_window": 128000, "protocols": ["openai"],
+                 "features": []},
+            ],
+            "cloud": [{"provider": "prov", "model_id": "cloud-m",
+                       "protocols": ["openai"], "features": []}],
+            "localValues": ["local:qwen-turbo", "local:qwen-max"],
+            "cloudValues": ["cloud:prov/cloud-m"],
+            "index": {},
+        }
+
+    def _cards(self, run_panel, defs, st=None, rt=None, catalog=None):
+        out = run_panel(_routes(), actions=[
+            {"fn": "mpCardsHtml",
+             "args": [defs, st or {"pools": {}}, rt or {"pools": {}},
+                      catalog]},
+        ])
+        return out["results"][0]
+
+    def test_cards_fixed_four_plus_extras(self, run_panel):
+        html = self._cards(run_panel,
+                           json.loads(json.dumps(self._CARDS_DEFS)),
+                           json.loads(json.dumps(self._CARDS_ST)),
+                           catalog=self._catalog())
+        pos = {n: html.find('data-mp-card="%s"' % n)
+               for n in ("fast", "premium", "small", "classifier", "custom-x")}
+        assert all(p >= 0 for p in pos.values()), "四角色 + 额外池卡俱在"
+        assert (pos["fast"] < pos["premium"] < pos["small"]
+                < pos["classifier"] < pos["custom-x"]), \
+            "固定序四角色在前，额外池追加其后（R3 不隐藏）"
+
+    def test_unconfigured_card_badge_and_prefill(self, run_panel):
+        html = self._cards(run_panel, {"revision": 0, "pools": {}},
+                           catalog=self._catalog())
+        assert "mp-unconfigured" in html, "未配置卡有徽标类"
+        assert html.count("未配置") >= 4, "四卡各带「未配置」徽标"
+        assert 'data-mp-config-pool="fast"' in html
+        # 预填 = cardDefault 启发式：fast→活跃最小 local:qwen-turbo
+        i = html.find('data-mp-config-pool="fast"')
+        seg = html[i:html.find("</select>", i)]
+        assert 'value="local:qwen-turbo" selected' in seg, \
+            "fast 卡下拉预填活跃最小模型"
+        # premium→最大上下文 qwen-max（启发式按角色分异，非同一默认）
+        j = html.find('data-mp-config-pool="premium"')
+        segp = html[j:html.find("</select>", j)]
+        assert 'value="local:qwen-max" selected' in segp
+        # 未配置卡也带「高级配置」直通（openEditor 骨架路径，Task 5 接线）
+        assert 'data-mp-edit="fast"' in html and "高级配置" in html
+
+    def test_configured_card_keeps_actions(self, run_panel):
+        html = self._cards(run_panel,
+                           json.loads(json.dumps(self._CARDS_DEFS)),
+                           json.loads(json.dumps(self._CARDS_ST)),
+                           catalog=self._catalog())
+        assert 'data-mp-edit="small"' in html, "编辑入口保留"
+        assert 'data-mp-snippet="small"' in html, "接入片段入口保留"
+        assert 'data-mp-pool="small"' in html, "启用开关保留"
+        assert 'data-mp-inline-replace="small|m1"' in html, "替换为…保留"
+        assert "小模型 — 分类/抽取/批量任务" in html, "角色描述进卡头"
+
+    def test_unconfigured_config_select_present(self, run_panel):
+        html = self._cards(run_panel, {"revision": 0, "pools": {}},
+                           catalog=self._catalog())
+        for role in ("fast", "premium", "small", "classifier"):
+            assert 'data-mp-config-pool="%s"' % role in html
+        assert "本地 · qwen-turbo" in html, "选项来自目录本地条目"
+        assert "云 · prov/cloud-m" in html, "选项来自目录云条目"
+
+    def test_unconfigured_card_catalog_unavailable(self, run_panel):
+        # Review Focus #1：目录不可用/为空 → 未配置卡降级不白屏，
+        # 下拉禁用 + 明示去编辑器（复用 A2 降级语义）
+        html = self._cards(run_panel, {"revision": 0, "pools": {}},
+                           catalog=None)
+        assert html.count("mp-unconfigured") >= 4, "目录缺失四卡仍渲染"
+        assert "目录不可用 — 请用编辑器" in html
+        assert 'disabled' in html
