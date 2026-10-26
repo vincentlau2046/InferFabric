@@ -44,13 +44,14 @@ class TestContrastFoundation:
         )
 
     def test_phantom_tokens_eliminated(self):
-        # --if-text/--if-border/--if-text-dim 从未定义，回退值按深色硬编码 —
-        # 全灭，改用主题 token（--ink/--border/--ink-2）
+        # --if-* 前缀 token（text/border/text-dim/accent…）从未定义，
+        # 回退值按深色硬编码 — 全灭，改用主题 token（--ink/--border/--ink-2/--accent）。
+        # 验收覆盖全部 --if-*（builder-check 抓漏：--if-accent 第 4 幽灵 token）
         css = _css()
-        for phantom in ("--if-text", "--if-border", "--if-text-dim"):
-            assert phantom not in css, (
-                "幽灵 token {} 仍存在 — 必须替换为主题 token".format(phantom)
-            )
+        leftovers = re.findall(r"--if-[a-z0-9-]+", css)
+        assert not leftovers, (
+            "幽灵 token 残留 {} — 必须替换为主题 token".format(sorted(set(leftovers)))
+        )
 
     def test_selects_have_explicit_background(self):
         # 透明背景会回退到平台色（浅色 OS 上白底）+ option 继承浅字 → 白底白字

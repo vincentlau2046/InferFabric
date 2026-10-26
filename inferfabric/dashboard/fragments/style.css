@@ -758,7 +758,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   .mp-cand-degraded { transition: none; }
   /* C3：光带停止流动（静态实色）；C4：高亮呼吸停止（静态描边） */
   .mp-beam-flow { animation: none;
-    background: var(--if-accent, #0a84ff); }
+    background: var(--accent); }
   .mp-highlight { animation: none; }
 }
 
@@ -1463,7 +1463,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border: 1px solid var(--border); border-radius: 6px;
   background: transparent; color: var(--ink); cursor: pointer;
 }
-.mp-edit-btn:hover { border-color: var(--if-accent, #0a84ff); }
+.mp-edit-btn:hover { border-color: var(--accent); }
 .mp-editor { border: 1px solid var(--border); border-radius: 10px;
   padding: 14px 16px; margin-top: 12px; }
 .mp-editor-hdr { display: flex; gap: 10px; align-items: baseline;
@@ -1531,8 +1531,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-nochosen { color: var(--ink-2);
   transition: color var(--dur) var(--ease); }
 .mp-feat {
-  font-size: 11px; color: var(--if-accent, #0a84ff);
-  border: 1px solid color-mix(in srgb, var(--if-accent, #0a84ff) 35%, transparent);
+  font-size: 11px; color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: var(--radius-pill); padding: 1px 8px;
 }
 .mp-cand-rt { font-size: var(--fs-table); color: var(--ink-2);
@@ -1547,7 +1547,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-tl { position: relative; height: 16px; width: 100%; }
 .mp-tl::after { content: ''; position: absolute; left: 0; right: 0;
   bottom: 4px; height: 4px; border-radius: 2px;
-  background: color-mix(in srgb, var(--if-accent, #0a84ff) 16%, transparent); }
+  background: color-mix(in srgb, var(--accent) 16%, transparent); }
 .mp-tl-dot { position: absolute; bottom: 2px; width: 8px; height: 8px;
   border-radius: 50%; transform: translateX(-50%); flex: none; }
 .mp-tl-cooldown { background: #ffd60a; }
@@ -1559,7 +1559,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-beam { height: 3px; border-radius: 2px; margin-bottom: var(--sp-2); }
 .mp-beam-flow {
   background: linear-gradient(90deg, transparent,
-              var(--if-accent, #0a84ff), transparent);
+              var(--accent), transparent);
   background-size: 200% 100%;
   animation: mp-beam-flow 2.4s linear infinite;
 }
@@ -1568,7 +1568,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   to   { background-position: -200% 0; }
 }
 .mp-beam-idle {
-  background: color-mix(in srgb, var(--if-accent, #0a84ff) 25%, transparent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .mp-beam-dark { background: transparent; height: 0; border-radius: 0;
   border-top: 2px dashed var(--border); }
@@ -1642,7 +1642,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-busy::after {
   content: ''; position: absolute; inset: 0; pointer-events: none;
   background: linear-gradient(105deg, transparent 42%,
-      color-mix(in srgb, var(--if-accent, #0a84ff) 10%, transparent) 50%,
+      color-mix(in srgb, var(--accent) 10%, transparent) 50%,
       transparent 58%);
   animation: mp-sweep var(--dur-slow) var(--ease) infinite;
 }
