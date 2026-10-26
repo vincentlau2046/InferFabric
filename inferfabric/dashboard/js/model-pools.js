@@ -208,15 +208,20 @@
   function unconfiguredCard(name, catalog) {
     var desc = roleDesc(name);
     var defVal = cardDefault(name, catalog);
-    // 三态目录（与 A2 inline select 同语义）：object=就绪出选项（预填）；
+    // 四态目录（与 A2 inline select 同语义）：object=就绪出选项（预填）；
     // null=未预热（占位可选，box mouseover/focusin 即拉取，轮询重建补上）；
-    // false=拉取失败（禁用 + 明示去编辑器）
+    // false=拉取失败（禁用 + 明示去编辑器）；空目录=拉取成功但零条目
+    // （禁用 + 明示为空 — 终审 I4：不得渲染只剩占位的沉默死下拉）
     var opts = catalog ? configOptions(catalog, defVal) : null;
-    var selInner = catalog
-      ? '<option value="">选择模型…</option>' + opts
-      : (catalog === false
-          ? '<option value="">目录不可用 — 请用编辑器</option>'
-          : '<option value="">选择模型…（加载中）</option>');
+    var empty = !!(catalog && !(catalog.localValues || []).length
+      && !(catalog.cloudValues || []).length);
+    var selInner = empty
+      ? '<option value="">目录为空 — 请用编辑器</option>'
+      : (catalog
+          ? '<option value="">选择模型…</option>' + opts
+          : (catalog === false
+              ? '<option value="">目录不可用 — 请用编辑器</option>'
+              : '<option value="">选择模型…（加载中）</option>'));
     return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
       + esc(name) + '" data-mp-card="' + esc(name) + '">'
       + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
@@ -234,7 +239,8 @@
       + '<span class="mp-diff-old mono">（未配置）</span>'
       + '<span class="mp-diff-arrow">→</span>'
       + '<select class="mp-inline-sel mp-config-sel" data-mp-config-pool="'
-      + esc(name) + '"' + (catalog === false ? ' disabled' : '') + '>'
+      + esc(name) + '"' + (catalog === false || empty ? ' disabled' : '')
+      + '>'
       + selInner
       + '</select>'
       + '</div>'
@@ -921,6 +927,9 @@
       // 行内会话（池|候选|spec|rev）计入签名 — 下拉出现/diff 条/应用按钮
       // 启用都是结构变化
       var sig = structSig(def, stPools, rtPools)
+        // 终审 I2：load_error 进签名 — 首渲染后才拉到的加载失败/修复
+        // 都必须重建（横幅只在重建路径渲染，池形未变不算「无变化」）
+        + '|le:' + (def.load_error || '')
         + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
         // C2：toggle 在否（池事件有无）+ 展开池列表都是结构 — 变化即重建；
         // 事件数据本身不进 sig（by-id 更新）
@@ -1159,13 +1168,16 @@
   }
 
   // A2 会话公共尾段：设 _inline → 重建出 diff 条 → 自动预览（三段式
-  // 门禁）→ 预览结果进签名重建（启用/禁用应用按钮）
+  // 门禁）→ 预览结果进签名重建（启用/禁用应用按钮）。
+  // 令牌必须在首个 await 前同步捕获：预演在途时用户再选一次会同步接管
+  // _inline，若令牌取自渲染恢复之后，旧会话的迟到结果会通过身份校验
+  // 写进新会话（validated/previewHtml 与 work 错位 → 门禁被绕过）
   async function startInlineSession(pool, candId, spec, base, work) {
-    _inline = { pool: pool, candId: candId, spec: spec, base: base,
-                work: work, base_revision: _state.def.revision,
-                validated: false, previewHtml: '', rev: 0 };
+    var session = { pool: pool, candId: candId, spec: spec, base: base,
+                    work: work, base_revision: _state.def.revision,
+                    validated: false, previewHtml: '', rev: 0 };
+    _inline = session;
     await renderModelPools();
-    var session = _inline;
     var out = await previewWork(work, pool);
     if (_inline !== session) return;
     _inline.previewHtml = out.code === 'error'
@@ -1313,12 +1325,14 @@
     return d;
   }
 
-  // 编辑器消费形态：字符串数组（下拉）+ index（候选生成）
+  // 候选目录消费形态：字符串数组（下拉）+ index（候选生成）+ 完整条目
+  // （local/cloud — cardDefault 角色预填启发式读 active/context_window；
+  // 终审 I1：裁剪掉 local 曾让四卡预填全部塌到「首个云」）
   async function fetchCandidateCatalog() {
     var cat = await fetchCatalog();
     if (!cat) return null;
     return { localValues: cat.localValues, cloudValues: cat.cloudValues,
-             index: cat.index };
+             index: cat.index, local: cat.local, cloud: cat.cloud };
   }
 
   // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）

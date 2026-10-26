@@ -32,9 +32,11 @@ import os
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -53,6 +55,10 @@ TXT_MODEL = "Qwen38-27B-TXT"                       # 唯一在跑的本地模型
 SWAP_MODEL = "SwapTarget-TXT"                      # 负路径靶（scratch 注入，未在跑）
 CLOUD_PROVIDER = "iff-gate"                        # 假云 provider（静态注册零出网）
 CLOUD_SWAP = f"cloud:{CLOUD_PROVIDER}/swap-target"  # 换模靶（dry-run 纯内存）
+# 终审 I3：401 云靶 — 指向测试内 127.0.0.1 常回 401 的服务器，为
+# 树行冷却态/时间线提供真实 dispatch 失败（零外网；api_key 为自造占位值）
+CLOUD_401_PROVIDER = "iff-gate-401"
+CLOUD_401_SWAP = f"cloud:{CLOUD_401_PROVIDER}/unauthorized-model"
 
 # 外部目标模式：IFF_BROWSER_TEST_BASE 指向已启动的（如未重构树的）scratch
 # 代理 → 不自建实例，直接测（负向验证测试有效性用）
@@ -98,13 +104,38 @@ def _build_scratch_repo(base: Path) -> Path:
     return repo
 
 
-def _write_fake_cloud_provider(home: Path) -> None:
+class _Always401(BaseHTTPRequestHandler):
+    """终审 I3：常回 401 的本机服务器 — 给云候选提供真实「可连但拒绝」
+    的上游，让 dispatch 失败走 cooldown_401（连接拒绝只记 last_attempt
+    不进冷却，事件环为空，树行没有可点的时间线）。"""
+
+    def _reject(self):
+        body = b'{"error": {"message": "Unauthorized"}}'
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # noqa: N802 — http.server 约定
+        self._reject()
+
+    def do_GET(self):  # noqa: N802
+        self._reject()
+
+    def log_message(self, *args):   # 静默 — 不污染 pytest 输出
+        pass
+
+
+def _write_fake_cloud_provider(home: Path, port_401: int) -> None:
     """假云 provider → scratch HOME/.inferfabric/cloud_provider.yaml。
 
     静态 models: 段启动即注册（_register_spec_only_models，零探测零出网），
     为换模测试提供第二个 ready 目标（云候选 ready 只查注册表；本地候选
     必须真在跑，而 scratch 不启动任何模型）。dry-run 纯内存不转发，故
     base_url 指向不存在的端口也永不命中；api_key 为自造占位值。
+    iff-gate-401（终审 I3）指向测试内常回 401 的本机服务器 — 真实
+    dispatch 失败 → cooldown_401 事件 → 树行冷却态 + 可点时间线。
     """
     data_dir = home / ".inferfabric"
     data_dir.mkdir()
@@ -116,7 +147,14 @@ def _write_fake_cloud_provider(home: Path) -> None:
         '    api_key: "iff-browser-gate-fake-key"\n'
         "    models:\n"
         "      swap-target:\n"
-        "        model_id: swap-target\n",
+        "        model_id: swap-target\n"
+        f"  {CLOUD_401_PROVIDER}:\n"
+        f'    openai_base: "http://127.0.0.1:{port_401}/v1"\n'
+        f'    anthropic_base: "http://127.0.0.1:{port_401}/v1"\n'
+        '    api_key: "iff-browser-gate-fake-key"\n'
+        "    models:\n"
+        "      unauthorized-model:\n"
+        "        model_id: unauthorized-model\n",
         encoding="utf-8")
 
 
@@ -152,7 +190,10 @@ def scratch_base(tmp_path_factory):
     repo = _build_scratch_repo(base_dir)
     home = base_dir / "scratch-home"       # HOME 覆盖 → 空数据目录（零池）
     home.mkdir()
-    _write_fake_cloud_provider(home)       # 假云换模靶（静态注册，零出网）
+    # 终审 I3：先起 401 服务器（端口进 yaml），再写 provider 配置
+    httpd401 = HTTPServer(("127.0.0.1", 0), _Always401)
+    threading.Thread(target=httpd401.serve_forever, daemon=True).start()
+    _write_fake_cloud_provider(home, httpd401.server_address[1])
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
     env = dict(os.environ,
@@ -179,6 +220,8 @@ def scratch_base(tmp_path_factory):
                        for m in catalog["cloud"]]
         assert f"{CLOUD_PROVIDER}/swap-target" in cloud_names, \
             f"假云 provider 未注册: {cloud_names}"
+        assert f"{CLOUD_401_PROVIDER}/unauthorized-model" in cloud_names, \
+            f"401 云靶未注册: {cloud_names}"
         yield base
     finally:
         proc.terminate()
@@ -187,6 +230,7 @@ def scratch_base(tmp_path_factory):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+        httpd401.shutdown()
 
 
 @pytest.fixture(scope="session")
@@ -386,15 +430,85 @@ def test_05_advanced_modal_esc(page, scratch_base):
     assert page.locator("#mpModal").inner_text().strip() == ""
 
 
+def _post_chat(base: str, model: str):
+    """POST /v1/chat/completions（无 api_keys.yaml → 鉴权不启用）。"""
+    payload = json.dumps({"model": model,
+                          "messages": [{"role": "user", "content": "ping"}],
+                          "max_tokens": 1}).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/v1/chat/completions", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode("utf-8"))
+
+
+# ── 5b. 真实 dispatch 失败 → 树行冷却态 + 点击开时间线（终审 I3）──
+
+def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
+    """终审 I3：树行可点性必须有真实浏览器交互钉住。
+
+    真实 POST 到 iff/fast（唯一候选 = 401 云靶）→ cooldown_401 事件入环
+    → 树行转「冷却中」（mp-tree-row-diag 可点）→ 点击展开事件轴。
+    冷却记录是选择器层的传输尝试回写（pool_forward 的 record_attempt/
+    add），与 watchdog 的引擎进程自愈互不相干 — 后者重启进程，前者只
+    影响候选准入。
+    """
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # fast 行内换到 401 云靶（假 provider 静态注册；dry-run 纯内存通过）
+    page.locator('select[data-mp-inline-replace="fast|fast-1"]') \
+        .select_option(value=CLOUD_401_SWAP)
+    _apply_inline_diff(page)
+    _poll(page, '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-leaf',
+          "e => e.textContent", f"{CLOUD_401_PROVIDER}/unauthorized-model",
+          msg="401 云靶未换上")
+    # 真实 dispatch：唯一候选上游 401 → 冷却 + 队列耗尽 503 pool_unavailable
+    code, body = _post_chat(scratch_base, "iff/fast")
+    assert code == 503, (code, body)
+    # 树行翻转「冷却中」（面板 5s 轮询拿运行态；冷却 TTL 60s 足够宽）
+    _poll(page, "#mp-tstate-fast", "e => e.textContent", "冷却中",
+          msg="冷却态未上树")
+    # 冷却徽标对比度（终审 I5：亮主题 --warn 加深后的真实渲染进扫描面）
+    for theme in ("dark", "light"):
+        if theme == "light":
+            page.eval_on_selector(
+                "html", "el => el.setAttribute('data-theme', 'light')")
+        else:
+            page.eval_on_selector(
+                "html", "el => el.removeAttribute('data-theme')")
+        page.wait_for_timeout(150)
+        results = page.eval_on_selector("#mpPools", _CONTRAST_JS)
+        badges = [r for r in results
+                  if r["el"].startswith(".mp-tree-state-cooldown")]
+        assert badges, f"{theme}: 冷却徽标不在扫描面"
+        assert all(r["ratio"] >= 4.5 for r in badges), (
+            f"{theme}: 冷却徽标对比度 <4.5:1: "
+            f"{json.dumps(badges, ensure_ascii=False)}")
+    # 点击树行 → 行内时间线展开（cooldown_401 事件点在轴上）
+    page.click('.mp-tree-row[data-mp-tree-pool="fast"]')
+    page.wait_for_selector(
+        '.mp-tree-row[data-mp-tree-pool="fast"] + .mp-tree-tl'
+        ' .mp-tl-dot.mp-tl-cooldown', state="attached")
+
+
 # ── 6. 双主题对比度：面板全文本控件 computed contrast ≥ 4.5:1 ───────
 
 _CONTRAST_JS = """
 el => {
+  // 终审 I5 门禁升级：.mp-card-title 是死选择器（实为 .if-card-title）；
+  // .mp-diff-arrow / .mp-tree-state-cooldown 纳入扫描面；元素 opacity
+  // 并入前景有效色（.85 透明度曾让 3.99:1 骗过整段门禁）；
+  // 禁用控件跳过（WCAG 1.4.3 inactive 组件豁免 — .mp-inline-sel:disabled
+  // 的 opacity .55 是刻意的弱化态）
   const SEL = ['.mp-tree-row', '.mp-tree-state', '.mp-unconfigured-badge',
-               '.mp-role-desc', '.mp-config-line', '.mp-card-title',
+               '.mp-role-desc', '.mp-config-line', '.if-card-title',
                '.mp-edit-btn', 'select.mp-inline-sel', 'option',
                '.mp-tree-port', '.mp-tree-role', '.mp-tree-leaf',
-               '.mp-diff-old', '.mp-diff-new', '.mp-inline-preview',
+               '.mp-diff-old', '.mp-diff-arrow', '.mp-diff-new',
+               '.mp-inline-preview', '.mp-tree-state-cooldown',
                '.mp-inline-apply:not([disabled])'];
   const parse = (s) => {
     const m = s.match(/rgba?\\(([\\d.]+), ?([\\d.]+), ?([\\d.]+)(?:, ?([\\d.]+))?\\)/);
@@ -423,11 +537,16 @@ el => {
   const out = [];
   for (const s of SEL) {
     for (const n of el.querySelectorAll(s)) {
+      if (n.matches('[disabled]')) continue;   // WCAG inactive 豁免
       const st = getComputedStyle(n);
       const fg = parse(st.color);
       if (!fg) continue;
       const bg = resolveBg(n);
-      const l1 = lum(blend(fg, bg)), l2 = lum(bg);
+      // 元素透明度并入前景 alpha（先与 bg 合成再算亮度比）
+      const op = parseFloat(st.opacity);
+      const fgEff = [fg[0], fg[1], fg[2],
+                     fg[3] * (isNaN(op) ? 1 : op)];
+      const l1 = lum(blend(fgEff, bg)), l2 = lum(bg);
       const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
       const label = s + ' «' + (n.textContent || '').trim().slice(0, 24) + '»';
       out.push({el: label, ratio: Math.round(ratio * 100) / 100});

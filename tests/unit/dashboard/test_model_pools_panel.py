@@ -147,6 +147,9 @@ const fetch = async (url, options) => {
     // 时序路由：按命中次序取 body（越界取最后一个）
     r = {status: route.status || 200,
          statuses: route.statuses,   // P1 Task 3 加法：保留时序 status
+         // 终审 C1 加法：可控微任务拍随 body 时序透传
+         yieldTicks: route.yieldTicks,
+         yieldTicksSeq: route.yieldTicksSeq,
          body: route.bodies[Math.min(seen[mkey] - 1, route.bodies.length - 1)]};
   } else if (route) {
     r = route;
@@ -159,6 +162,13 @@ const fetch = async (url, options) => {
   const status = Array.isArray(r.statuses)
     ? r.statuses[Math.min(seen[mkey] - 1, r.statuses.length - 1)]
     : r.status;
+  // 终审 C1 加法：yieldTicks(常量)/yieldTicksSeq(按命中次序，越界取最后)
+  // — 响应前让出 N 个微任务拍，确定性交错两条并发链（noAwait 动作）。
+  // 默认 0 拍 = 立即响应，既有用例行为不变。
+  const yt = Array.isArray(r.yieldTicksSeq)
+    ? r.yieldTicksSeq[Math.min(seen[mkey] - 1, r.yieldTicksSeq.length - 1)]
+    : (r.yieldTicks || 0);
+  for (let i = 0; i < yt; i++) await Promise.resolve();
   return {
     ok: status >= 200 && status < 300,
     status: status,
@@ -215,6 +225,15 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
   // v7.1.0 编辑器：任意 window 函数动作序列（模拟用户在模态内的操作流）。
   // noAwait: true → 不等待完成（模拟慢网络下并发开第二个编辑会话）
   for (const act of (input.actions || [])) {
+    // 终审 C1 加法：_drain — 让出 N 个微任务拍（等 noAwait 起动的并发
+    // 链确定性收尾后再取终态；无此原语则 harness 尾段自己的 await 数量
+    // 决定在途链是否跑完，测试会假绿）
+    if (act.fn === '_drain') {
+      const n = (act.args && act.args[0]) || 200;
+      for (let i = 0; i < n; i++) await Promise.resolve();
+      results.push(null);
+      continue;
+    }
     const fn = window[act.fn];
     if (typeof fn !== 'function') {
       throw new Error('unknown action: ' + act.fn);
@@ -430,6 +449,27 @@ class TestOpsRender:
         assert "qwen-small" not in out["html"]
         # 大手术：横幅 + 同布局降级（四张未配置卡，不再是裸横幅）
         assert "mp-unconfigured" in out["html"]
+
+    def test_load_error_appearing_after_initial_render_rebuilds(self,
+                                                                run_panel):
+        # 终审 I2：load_error 不进结构签名 → 首渲染正常、轮询才拉到的
+        # 加载失败不重建（池形未变即跳过）→ 横幅永远不出现。签名必须
+        # 计入 load_error（出现/清除两个方向都是重建事件）
+        zero = json.loads(json.dumps(_POOLS_BODY))
+        zero["pools"] = {}
+        zero["configured"] = False
+        zero["load_error"] = None
+        zero["raw"] = None
+        broken = json.loads(json.dumps(zero))
+        broken["load_error"] = "model_pools.yaml invalid: late break"
+        routes = _ops_routes()
+        routes["/admin/model-pools"] = {"status": 200,
+                                        "bodies": [zero, broken]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "mp-error-banner" in out["htmlFinal"], \
+            "轮询拉到的 load_error 未重建出横幅"
+        assert "late break" in out["htmlFinal"]
 
     def test_active_badge_local_vs_cloud(self, run_panel):
         out = run_panel(_ops_routes())
@@ -2173,8 +2213,10 @@ class TestPersistentCards:
         assert "云 · prov/cloud-m" in html, "选项来自目录云条目"
 
     def test_unconfigured_card_catalog_states(self, run_panel):
-        # Review Focus #1：目录三态 — False=拉取失败（禁用+明示去编辑器）；
-        # None=未预热（可选占位，box 手势即拉取，轮询重建补选项）
+        # Review Focus #1 + 终审 I4：目录四态 — False=拉取失败（禁用+明示
+        # 去编辑器）；None=未预热（可选占位，box 手势即拉取，轮询重建补
+        # 选项）；空目录=拉取成功但零条目（禁用+「目录为空」，不得渲染
+        # 只剩占位的沉默死下拉）
         html = self._cards(run_panel, {"revision": 0, "pools": {}},
                            catalog=False)
         assert html.count("mp-unconfigured") >= 4, "目录失败四卡仍渲染"
@@ -2184,6 +2226,13 @@ class TestPersistentCards:
                             catalog=None)
         assert "选择模型…（加载中）" in html2
         assert 'disabled' not in html2
+        empty = {"local": [], "cloud": [], "localValues": [],
+                 "cloudValues": [], "index": {}}
+        html3 = self._cards(run_panel, {"revision": 0, "pools": {}},
+                            catalog=empty)
+        assert "目录为空 — 请用编辑器" in html3, \
+            "空目录必须是明示禁用态，不是沉默死下拉"
+        assert 'disabled' in html3
 
     # ── Task 5：未配置卡交互（选模型即建池 / 高级直通）──
 
@@ -2285,6 +2334,31 @@ class TestPersistentCards:
             "树仅剩 premium/classifier 未配置"
         assert any("已更新 iff/fast" in t["message"] for t in out["toasts"])
 
+    def test_live_prime_prefills_unconfigured_by_role(self, run_panel):
+        # 终审 I1：活路径（mpPrimeInline → ensureCatalog → _catalog → 渲染）
+        # 的预填必须走角色启发式。fetchCandidateCatalog 曾只回
+        # localValues/cloudValues/index（丢 local 完整条目）→ cardDefault
+        # 的 cat.local 恒空 → 四卡预填全部塌到「首个云」而非角色本地模型。
+        zero = {"revision": 0, "pools": {}, "configured": False,
+                "load_error": None, "raw": None}
+        routes = self._create_routes(pools_body=zero)
+        out = run_panel(routes, actions=[{"fn": "mpPrimeInline",
+                                          "args": []}])
+        h = out["htmlFinal"]
+
+        def sel_seg(role):
+            i = h.find('data-mp-config-pool="%s"' % role)
+            return h[i:h.find("</select>", i)]
+
+        # fast=活跃最小 / premium=最大上下文 / small=最小 / classifier=
+        # 首个活跃（目录：qwen-turbo active 32k、qwen-max 128k）
+        assert 'value="local:qwen-turbo" selected' in sel_seg("fast"), \
+            "fast 预填非活跃最小本地模型"
+        assert 'value="local:qwen-max" selected' in sel_seg("premium"), \
+            "premium 预填非最大上下文本地模型"
+        assert 'value="local:qwen-turbo" selected' in sel_seg("small")
+        assert 'value="local:qwen-turbo" selected' in sel_seg("classifier")
+
     def test_unconfigured_advanced_opens_skeleton_editor(self, run_panel):
         # 高级配置直通：未配置池 → doMpEdit 走骨架（池参数默认值在模态）
         zero = {"revision": 0, "pools": {}, "configured": False,
@@ -2296,6 +2370,71 @@ class TestPersistentCards:
         assert 'data-mp-editor="fast"' in m
         assert 'data-mp-param="max_attempts" value="2"' in m
         assert 'data-mp-param="deadline_ms" value="60000"' in m
+
+
+class TestInlineSessionRace:
+    """终审 C1：并发行内会话 — 迟到预演不得写入当前会话。
+
+    startInlineSession 曾在首个 await（renderModelPools）之后才捕获会话
+    令牌：A 预演在途时用户再选一次（B 已同步接管 _inline），A 恢复时
+    令牌成了 B → A 的迟到结果写进 B（validated/previewHtml 与 work 错
+    位）→ 三段门禁被绕过（B 的 work 借 A 的验证状态上应用）。
+    确定性交错：A 的 validate 路由让 60 拍（慢网络）；dry-run 时序路由
+    前两拍给 B（有选择、通过）、后两拍给 A（无候选、已阻止）→ A 必然
+    晚于 B 完成。修复（令牌同步捕获）后 A 在身份校验处丢弃，B 的通过
+    态保持到终态。
+    """
+
+    def test_late_preview_of_first_select_discarded(self, run_panel):
+        zero = {"revision": 0, "pools": {}, "configured": False,
+                "load_error": None, "raw": None}
+        routes = _editor_routes(pools_body=zero)
+        routes["/admin/model-pools/catalog"] = {
+            "status": 200, "body": TestPersistentCards._catalog()}
+        routes["POST /admin/model-pools/validate"] = {
+            "status": 200, "body": {"valid": True, "issues": []},
+            # 实测交错：B（第二个 select）的 validate 先发（A 的首渲染
+            # fetch 在途拖住了 A 的预演起点）→ 命 1=B、命 2=A；给 A 慢
+            # 60 拍 → A 的结果必然晚于 B 写回
+            "yieldTicksSeq": [0, 60]}
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200,
+            "bodies": [
+                {"chosen": "premium-1", "error": None, "decisions": [],
+                 "pool": "premium", "protocol": "openai"},      # B（即时）
+                {"chosen": "premium-1", "error": None, "decisions": [],
+                 "pool": "premium", "protocol": "anthropic"},  # B（即时）
+                {"chosen": None, "error": "no_ready_target", "decisions": [],
+                 "pool": "premium", "protocol": "openai"},      # A 迟到
+                {"chosen": None, "error": "no_ready_target", "decisions": [],
+                 "pool": "premium", "protocol": "anthropic"},  # A 迟到
+            ]}
+        actions = [
+            {"fn": "doMpConfigSelect", "args": ["premium", "local:qwen-turbo"],
+             "noAwait": True},   # A：在途（并发开第二个会话）
+            {"fn": "doMpConfigSelect", "args": ["premium", "local:qwen-max"]},
+            {"fn": "_drain", "args": [300]},   # A 链确定性收尾后取终态
+        ]
+        out = run_panel(routes, actions=actions)
+        # 交错自证：两会话都走完整三段；B 先发 validate（qwen-max）、A 后
+        # 发（qwen-turbo）。若任一链没跑（如被守卫早退）这两个断言直接
+        # 失败 — 测试不会假绿
+        vals = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/validate"]
+        drys = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/dry-run"]
+        assert len(vals) == 2 and len(drys) == 4, (len(vals), len(drys))
+        assert vals[0]["body"]["pools"]["premium"]["candidates"][0] \
+            ["model_name"] == "qwen-max"
+        assert vals[1]["body"]["pools"]["premium"]["candidates"][0] \
+            ["model_name"] == "qwen-turbo"
+        # 终态 = 后选会话 B：diff 条在、预演通过、应用可用
+        h = out["htmlFinal"]
+        assert 'data-mp-inline-bar="premium|premium-1"' in h
+        assert 'data-mp-inline-apply="premium|premium-1"' in h
+        assert "已阻止应用" not in h, "A 的迟到「已阻止」写进了 B 会话（C1）"
+        assert 'disabled title="需先通过预览"' not in h, \
+            "A 的迟到结果禁用了 B 的应用按钮（C1）"
 
 
 class TestSingleFormRender:

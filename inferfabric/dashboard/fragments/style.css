@@ -1578,8 +1578,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   font-size: var(--fs-table);
 }
-.mp-diff-old { color: var(--crit); opacity: .85; text-decoration: line-through; }
-.mp-diff-arrow { color: var(--ink-3); }
+/* 终审 I5：对比度按有效色计 — 旧目标色不得再叠透明度（.85 曾把
+   crit 压到 3.99:1）；删除线的语义已足，颜色本身必须 ≥4.5:1 */
+.mp-diff-old { color: var(--crit); text-decoration: line-through; }
+/* 终审 I5：箭头是文本（ink-3 仅 3.42:1），升 ink-2 */
+.mp-diff-arrow { color: var(--ink-2); }
 .mp-diff-new { color: var(--ok); font-weight: 600; }
 .mp-inline-preview {
   color: var(--ink-2); flex: 1 1 auto; min-width: 0;
@@ -1681,9 +1684,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   background: transparent; height: 0; border-radius: 0;
   border-top: 2px dashed var(--crit);
 }
+/* 终审 I5：非文本 3:1 不变量 — opacity .6 把 ink-3 压到 ~2:1，去掉；
+   未配置点线在两主题裸 ink-3 均达 3.42/3.10:1 */
 .mp-link-unconfigured {
   background: transparent; height: 0; border-radius: 0;
-  border-top: 2px dotted var(--ink-3); opacity: .6;
+  border-top: 2px dotted var(--ink-3);
 }
 .mp-tree-state {
   flex: none; font-size: 11px; padding: 1px 8px;
@@ -1691,7 +1696,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ink-2); background: var(--surface-2);
 }
 .mp-tree-state-flowing { color: var(--ok); border-color: var(--ok); }
+/* 终审 I5：cooldown 徽标是文本 — 亮主题 --warn(#9a6700) 在 surface-2 上
+   仅 4.34:1，亮主题单独加深（dark 6.2:1 本就达标） */
 .mp-tree-state-cooldown { color: var(--warn); border-color: var(--warn); }
+[data-theme="light"] .mp-tree-state-cooldown { color: #7d5400; }
 .mp-tree-state-fail { color: var(--crit); border-color: var(--crit); }
 .mp-tree-state-unconfigured { color: var(--ink-2); border-style: dashed; }
 
