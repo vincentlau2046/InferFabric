@@ -54,6 +54,76 @@
   var _degradeDismissed = {};
   // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
   var BEAM_FRESH_S = 30;
+
+  /* ── 调用树 + 四组常驻卡（2026-10-26 大手术，v7.5.0）──────────────
+   * 用户 2026-10-25 判定向导式初始化为失败设计：配置窗口用完即消失、
+   * 缺失组无创建入口。重构为单一形态 — 顶部调用树（端口→角色→模型，
+   * 链路态 = 有没有被真实调用）+ 四角色常驻配置卡（未配置即待建）。
+   * 四角色固定序与描述表（原向导 _ROLE_DEFS 上移 — 树与卡共用）。 */
+  var _ROLE_ORDER = ['fast', 'premium', 'small', 'classifier'];
+  var _ROLE_DEFS = [
+    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
+  ];
+  // 树链路流动窗：真实 ok 交换在此窗内 = flowing。比卡片光带窗
+  // （BEAM_FRESH_S=30）宽 — 树答「近期有被调用」，光带答「此刻在交换」
+  var FLOW_WINDOW_S = 60;
+
+  // 链路五态纯函数（树渲染与后续卡渲染同源）：
+  //   unconfigured 无 def（缺失组不消失，灰虚线）
+  //   fail         issues 非空，或近窗真实尝试失败且窗内无成功交换
+  //   flowing      任一候选近窗真实 ok 交换（降级服务中数据仍在流动 →
+  //                flowing 优先于 cooldown，降级细节归 C4 提示）
+  //   cooldown     无流动但有候选隔离/冷却
+  //   idle         可路由但静默
+  function linkState(def, rtPool) {
+    if (!def) return { cls: 'unconfigured', label: '未配置' };
+    if ((def.issues || []).length) {
+      return { cls: 'fail', label: '故障' };
+    }
+    var flowing = false, recentFail = false, cooling = false;
+    (((rtPool || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && typeof la.age_s === 'number' && la.age_s < FLOW_WINDOW_S) {
+        if (la.ok) flowing = true; else recentFail = true;
+      }
+      if (rc.cooling) cooling = true;
+    });
+    if (flowing) return { cls: 'flowing', label: '调用中' };
+    if (cooling) return { cls: 'cooldown', label: '冷却中' };
+    if (recentFail) return { cls: 'fail', label: '故障' };
+    return { cls: 'idle', label: '空闲' };
+  }
+
+  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <模型叶>」+ 态徽标。
+  // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
+  function treeHtml(defs, rt) {
+    var pools = (defs && defs.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var rows = order.map(function (name) {
+      var def = pools[name];
+      var ls = linkState(def, rtPools[name]);
+      var cands = (def && def.candidates) || [];
+      var leaf = cands.length ? cands[0].target : '—';
+      return '<div class="mp-tree-row" data-mp-tree-pool="' + esc(name) + '">'
+        + '<span class="mp-tree-port">:8999</span>'
+        + '<span class="mp-link mp-link-' + ls.cls + '"></span>'
+        + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
+        + '<span class="mp-link mp-link-' + ls.cls + '"></span>'
+        + '<span class="mp-tree-leaf">' + esc(leaf) + '</span>'
+        + '<span class="mp-tree-state mp-tree-state-' + ls.cls + '">'
+        + esc(ls.label) + '</span>'
+        + '</div>';
+    });
+    return '<div class="mp-tree" id="mpTree">' + rows.join('') + '</div>';
+  }
+
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -1047,13 +1117,6 @@
   // A4 向导出口：提交成功的成果卡在屏（{pools:[names]}）— 完成/离开才清
   var _wizardDone = null;
 
-  var _ROLE_DEFS = [
-    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
-    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
-    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
-    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
-  ];
-
   // 模型目录（/models 全量条目 + 云 provider 模型，best-effort）
   // 向导消费形态：本地条目对象（预填启发式用 active/context_window）+ 云选择键
   async function fetchWizardModels() {
@@ -1948,6 +2011,8 @@
   window.tabRenderers = window.tabRenderers || {};
   window.tabRenderers['tab-model-pools'] = renderModelPools;
   window.renderModelPools = renderModelPools;
+  window.mpLinkState = linkState;
+  window.mpTreeHtml = treeHtml;
   window.doMpToggle = doMpToggle;
   window.doMpEdit = doMpEdit;
   window.doMpUndo = doMpUndo;

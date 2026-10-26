@@ -121,6 +121,7 @@ const navigator = {
 };
 const docListeners = {};   // P2 Task 4：document 级监听捕获（fireKey 派发用）
 const calls = [];
+const results = [];         // 大手术 T2 加法：动作返回值捕获
 const fetchSnapshots = [];   // P2 Task 2 加法：captureAtFetch — 每次请求
                              // 瞬间快照指定元素 className（乐观态在途断言）
 const seen = {};
@@ -219,7 +220,9 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
       throw new Error('unknown action: ' + act.fn);
     }
     const p = fn.apply(window, act.args || []);
-    if (!act.noAwait) await p;
+    // 大手术 T2 加法：捕获动作返回值（linkState/treeHtml 等纯函数经
+    // window 导出后可被用例直接断言；noAwait 语义不变 — 不等待不捕获）
+    results.push(act.noAwait ? null : await p);
   }
   // 模拟 5s 轮询滴答（每次滴答触发全部已注册 interval；
   // 每个计时器触发前推进 timeStepMs 毫秒 —— 模拟真实流逝）
@@ -238,7 +241,7 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
   }
   console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
                               fetchSnapshots, clipboardWrites, htmlFinal,
-                              writeCounts, dyn}));
+                              writeCounts, dyn, results}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -2103,3 +2106,144 @@ class TestP3Degrade:
         joined = "\n".join(blocks)
         assert "mp-beam-flow" in joined
         assert "mp-highlight" in joined
+
+
+class TestCallTree:
+    """大手术 T2：linkState 五态纯函数 + treeHtml 四行调用树。
+
+    树契约（用户 2026-10-25）：顶部「:8999 → iff/<角色> → 模型」四行；
+    绿色+数据流动 = 正在被调用（真实 ok 交换，非轮询探测）；断链 = 故障；
+    缺失组灰虚线 + 「未配置」不消失；四角色固定序 fast/premium/small/classifier，
+    四角色之外的额外池追加其后（R3）。
+    """
+
+    # ── linkState 纯函数 ──────────────────────────────────────
+
+    def _link(self, run_panel, defn=None, rt=None):
+        out = run_panel(_routes(), actions=[
+            {"fn": "mpLinkState", "args": [defn, rt]},
+        ])
+        return out["results"][0]
+
+    def test_link_state_unconfigured(self, run_panel):
+        # 无 def（YAML 未配置该组）→ unconfigured — 缺失组在树上不消失
+        assert self._link(run_panel)["cls"] == "unconfigured"
+
+    def test_link_state_flowing(self, run_panel):
+        out = self._link(run_panel, defn={"issues": []},
+                         rt={"candidates": [
+                             {"id": "a", "last_attempt": {"ok": True,
+                                                          "age_s": 10}}]})
+        assert out["cls"] == "flowing"
+
+    def test_link_state_flowing_window_60(self, run_panel):
+        # 流动窗 FLOW_WINDOW_S=60（树口径比卡片光带 30s 宽 — 树答"近期
+        # 有被调用"）；45s 仍流动，75s 退回 idle（两边界分钉窗口值）
+        assert self._link(run_panel, defn={"issues": []},
+                          rt={"candidates": [
+                              {"id": "a", "last_attempt": {"ok": True,
+                                                           "age_s": 45}}]}
+                          )["cls"] == "flowing"
+        assert self._link(run_panel, defn={"issues": []},
+                          rt={"candidates": [
+                              {"id": "a", "last_attempt": {"ok": True,
+                                                           "age_s": 75}}]}
+                          )["cls"] == "idle"
+
+    def test_link_state_idle(self, run_panel):
+        # active、无 cooling、无近期 attempt → idle（可路由但静默）
+        out = self._link(run_panel, defn={"issues": []},
+                         rt={"candidates": [
+                             {"id": "a", "active": True,
+                              "last_attempt": {"ok": True, "age_s": 300}}]})
+        assert out["cls"] == "idle"
+
+    def test_link_state_cooldown(self, run_panel):
+        out = self._link(run_panel, defn={"issues": []},
+                         rt={"candidates": [
+                             {"id": "a", "cooling": {"remaining_s": 120}}]})
+        assert out["cls"] == "cooldown"
+
+    def test_link_state_fail_on_issues(self, run_panel):
+        out = self._link(run_panel, defn={"issues": ["no_candidate"]}, rt={})
+        assert out["cls"] == "fail"
+
+    def test_link_state_fail_on_recent_failed_attempt(self, run_panel):
+        # 近窗真实尝试失败且窗内无成功交换 → 断链（红），
+        # 陈旧失败（>窗）不算 — 历史故障归 C2 时间线
+        assert self._link(run_panel, defn={"issues": []},
+                          rt={"candidates": [
+                              {"id": "a", "last_attempt": {"ok": False,
+                                                           "age_s": 5}}]}
+                          )["cls"] == "fail"
+        assert self._link(run_panel, defn={"issues": []},
+                          rt={"candidates": [
+                              {"id": "a", "last_attempt": {"ok": False,
+                                                           "age_s": 90}}]}
+                          )["cls"] == "idle"
+
+    def test_link_state_flowing_beats_cooldown(self, run_panel):
+        # 首候选冷却但回退候选窗内有真实成功交换 → flowing（数据在流动，
+        # 降级细节归 C4 提示，树不降级显示）
+        out = self._link(run_panel, defn={"issues": []},
+                         rt={"candidates": [
+                             {"id": "a", "cooling": {"remaining_s": 60}},
+                             {"id": "b", "last_attempt": {"ok": True,
+                                                          "age_s": 8}}]})
+        assert out["cls"] == "flowing"
+
+    # ── treeHtml 渲染 ─────────────────────────────────────────
+
+    _TREE_DEFS = {"revision": 1, "pools": {
+        "small": {"enabled": True, "issues": [],
+                  "candidates": [{"id": "m1", "priority": 1, "kind": "local",
+                                  "target": "Qwen38-27B-TXT"}]},
+    }}
+
+    def _tree(self, run_panel, defs, rt=None):
+        out = run_panel(_routes(), actions=[
+            {"fn": "mpTreeHtml", "args": [defs, rt or {"pools": {}}]},
+        ])
+        return out["results"][0]
+
+    def test_tree_four_rows_fixed_order(self, run_panel):
+        html = self._tree(run_panel, json.loads(json.dumps(self._TREE_DEFS)))
+        pos = {r: html.find('data-mp-tree-pool="%s"' % r)
+               for r in ("fast", "premium", "small", "classifier")}
+        assert all(p >= 0 for p in pos.values()), "四角色行必须俱在"
+        assert (pos["fast"] < pos["premium"] < pos["small"]
+                < pos["classifier"]), "固定序 fast,premium,small,classifier"
+        assert html.count("未配置") == 3, "缺失组（fast/premium/classifier）灰显未配置"
+        assert "mp-link-unconfigured" in html, "未配置链路段走灰虚线态"
+
+    def test_tree_extra_pool_appended(self, run_panel):
+        defs = json.loads(json.dumps(self._TREE_DEFS))
+        defs["pools"]["custom-x"] = {
+            "enabled": True, "issues": [],
+            "candidates": [{"id": "cx", "priority": 1, "kind": "cloud",
+                            "target": "prov/x-m"}]}
+        html = self._tree(run_panel, defs)
+        assert html.find('data-mp-tree-pool="custom-x"') \
+            > html.find('data-mp-tree-pool="classifier"'), \
+            "额外池必须追加四角色之后（R3 不隐藏）"
+        assert "iff/custom-x" in html
+
+    def test_tree_row_structure(self, run_panel):
+        html = self._tree(run_panel, json.loads(json.dumps(self._TREE_DEFS)))
+        i = html.find('data-mp-tree-pool="small"')
+        assert i >= 0
+        row = html[i:html.find("</div>", i)]
+        # 行契约：端口 → 角色 → 模型叶 + 链路段类
+        assert ":8999" in row
+        assert "iff/small" in row
+        assert "Qwen38-27B-TXT" in row
+        assert "mp-link mp-link-idle" in row, "配置且静默 → 实线 idle 链路段"
+
+    def test_tree_link_state_wired_from_runtime(self, run_panel):
+        # 树行链路态由 runtime 喂给 linkState — 真实交换 → flowing 链路
+        rt = {"pools": {"small": {"candidates": [
+            {"id": "m1", "last_attempt": {"ok": True, "age_s": 8}}]}}}
+        html = self._tree(run_panel,
+                          json.loads(json.dumps(self._TREE_DEFS)), rt)
+        assert "mp-link-flowing" in html
+        assert "调用中" in html
