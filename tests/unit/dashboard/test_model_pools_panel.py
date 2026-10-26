@@ -1771,13 +1771,16 @@ class TestP3Timeline:
         assert 'data-mp-tl-toggle="fast"' in html
         assert "故障时间线 · 2" in html
         assert 'id="mp-tl-fast"' not in html
+        assert 'id="mp-tree-tl-fast"' not in html
         # 展开 → 轴出现：事件点数 = 2、着色、title 含 reason、left% 在 0–100
         out2 = run_panel(self._routes(events_body=_events_body(_EV2)),
                          actions=[{"fn": "doMpTimelineToggle",
                                    "args": ["fast"]}])
         h2 = out2["htmlFinal"]
         assert 'id="mp-tl-fast"' in h2
-        assert h2.count("mp-tl-dot") == 2
+        # 大手术 T5：展开是状态 — 卡片区与树行下双渲染，各 2 点
+        assert 'id="mp-tree-tl-fast"' in h2
+        assert h2.count("mp-tl-dot") == 4
         assert "mp-tl-cooldown" in h2 and "mp-tl-quarantine" in h2
         assert "cooldown_401" in h2 and "quarantine_404" in h2
         for m in re.finditer(r'left:([\d.]+)%', h2):
@@ -2182,6 +2185,118 @@ class TestPersistentCards:
         assert "选择模型…（加载中）" in html2
         assert 'disabled' not in html2
 
+    # ── Task 5：未配置卡交互（选模型即建池 / 高级直通）──
+
+    def _create_routes(self, pools_body=None, pools_bodies=None):
+        """未配置建池路由：验证/预演/更新 + 目录（TestPersistentCards 目录）。"""
+        routes = _editor_routes(pools_body=pools_body,
+                                pools_bodies=pools_bodies)
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": self._catalog()}
+        return routes
+
+    def test_unconfigured_select_starts_create_session(self, run_panel):
+        # 选模型 → 骨架+首候选会话（id=<pool>-1、priority=1、协议/能力来自
+        # 目录），走同一 A2 预览→应用链：diff 条「（未配置）→ 新目标」+
+        # 验证 POST + 预演×2 携带建池 work
+        zero = {"revision": 0, "pools": {}, "configured": False,
+                "load_error": None, "raw": None}
+        routes = self._create_routes(pools_body=zero)
+        out = run_panel(routes, actions=[{"fn": "doMpConfigSelect",
+                                          "args": ["fast",
+                                                   "local:qwen-turbo"]}])
+        h = out["htmlFinal"]
+        assert 'data-mp-inline-bar="fast|fast-1"' in h
+        assert "（未配置）" in h and "qwen-turbo" in h
+        assert 'data-mp-inline-apply="fast|fast-1"' in h
+        assert 'disabled title="需先通过预览"' not in h, "预演通过 → 应用可用"
+        val = next(c for c in out["calls"]
+                   if c["url"] == "/admin/model-pools/validate")
+        sk = val["body"]["pools"]["fast"]
+        assert sk["strategy"] == "priority" and sk["max_attempts"] == 2
+        assert sk["candidates"][0] == {"id": "fast-1", "kind": "local",
+                                       "model_name": "qwen-turbo",
+                                       "declared_protocols": ["openai"],
+                                       "features": [], "priority": 1}
+        drys = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools/dry-run"]
+        assert len(drys) == 2
+        assert all(c["body"]["config"]["pools"]["fast"]["candidates"][0]
+                   ["model_name"] == "qwen-turbo" for c in drys)
+
+    def test_unconfigured_apply_creates_pool_with_cas_base(self, run_panel):
+        # 用户实况：small 已配置（revision 3）、fast 缺失 → 未配置卡建 fast。
+        # POST = raw 基底 + 新池（small 防丢）；CAS 基点 = 当前 revision
+        # （同编辑器语义 — 非旧向导整体替换的硬编码 expected_revision=0）
+        small_view = {"enabled": True, "issues": [], "candidates": [
+            {"id": "m1", "priority": 1, "kind": "local",
+             "target": "Qwen38-27B-TXT", "features": [],
+             "evidence": {"openai": "declared"}}]}
+        small_raw = {"enabled": True, "strategy": "priority",
+                     "allowed_locations": ["local", "cloud"],
+                     "accept_declared": True, "allow_cross_location": False,
+                     "max_attempts": 2, "deadline_ms": 60000,
+                     "candidates": [{"id": "m1", "kind": "local",
+                                     "model_name": "Qwen38-27B-TXT",
+                                     "declared_protocols": ["openai"],
+                                     "features": [], "priority": 1}]}
+        fast_view = {"enabled": True, "issues": [], "candidates": [
+            {"id": "fast-1", "priority": 1, "kind": "local",
+             "target": "qwen-turbo", "features": [],
+             "evidence": {"openai": "declared"}}]}
+        fast_raw = {"enabled": True, "strategy": "priority",
+                    "allowed_locations": ["local", "cloud"],
+                    "accept_declared": True, "allow_cross_location": False,
+                    "max_attempts": 2, "deadline_ms": 60000,
+                    "candidates": [{"id": "fast-1", "kind": "local",
+                                    "model_name": "qwen-turbo",
+                                    "declared_protocols": ["openai"],
+                                    "features": [], "priority": 1}]}
+
+        def base(rev):
+            return {"revision": rev, "configured": True, "load_error": None,
+                    "pools": {"small": small_view},
+                    "raw": {"schema_version": 1,
+                            "pools": {"small": small_raw}}}
+
+        after = {"revision": 4, "configured": True, "load_error": None,
+                 "pools": {"fast": fast_view, "small": small_view},
+                 "raw": {"schema_version": 1,
+                         "pools": {"fast": fast_raw, "small": small_raw}}}
+        routes = self._create_routes(
+            pools_bodies=[base(3), base(3), base(3), after])
+        actions = [{"fn": "doMpConfigSelect",
+                    "args": ["fast", "local:qwen-turbo"]},
+                   {"fn": "doMpInlineApply"}]
+        out = run_panel(routes, actions=actions)
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        body = posts[-1]["body"]
+        assert body["expected_revision"] == 3, "CAS 基点 = 当前 revision"
+        assert body["pools"]["small"] == small_raw, "raw 基底防丢既有池"
+        fc = body["pools"]["fast"]["candidates"][0]
+        assert fc["id"] == "fast-1" and fc["model_name"] == "qwen-turbo"
+        assert fc["priority"] == 1
+        assert body["pools"]["fast"]["strategy"] == "priority"
+        h = out["htmlFinal"]
+        assert 'data-mp-pool="fast"' in h, "卡转已配置"
+        assert 'data-mp-config-pool="fast"' not in h
+        assert h.count("mp-tree-state-unconfigured") == 2, \
+            "树仅剩 premium/classifier 未配置"
+        assert any("已更新 iff/fast" in t["message"] for t in out["toasts"])
+
+    def test_unconfigured_advanced_opens_skeleton_editor(self, run_panel):
+        # 高级配置直通：未配置池 → doMpEdit 走骨架（池参数默认值在模态）
+        zero = {"revision": 0, "pools": {}, "configured": False,
+                "load_error": None, "raw": None}
+        routes = self._create_routes(pools_body=zero)
+        out = run_panel(routes, actions=[{"fn": "doMpEdit",
+                                          "args": ["fast"]}])
+        m = out["modalHtml"]
+        assert 'data-mp-editor="fast"' in m
+        assert 'data-mp-param="max_attempts" value="2"' in m
+        assert 'data-mp-param="deadline_ms" value="60000"' in m
+
 
 class TestSingleFormRender:
     """大手术 T4：renderModelPools 单一形态 — 树 + 四组常驻卡，向导全删。
@@ -2285,3 +2400,48 @@ class TestSingleFormRender:
                                            "body": {"revision": 5,
                                                     "pools": {}}},
         }
+
+
+# ── 大手术 Task 5：树交互 — 点击行内诊断（C2 时间线下放树行）──────────
+
+class TestTreeInteractions:
+    """树行点击 → C2 时间线行内展开（复用 events 渲染，不跳转卡片区）。
+
+    契约：有事件的行（fail/cooldown 必有事件；idle/flowing 有历史也可查）
+    标记可点态（mp-tree-row-diag — CSS cursor 挂此类）；点击 = 同一
+    _timelineOpen 状态键 → 树行下展开轴；再点收起；无事件行点击不动。
+    """
+
+    def _routes_with_events(self, pools_body=None):
+        routes = _routes()
+        routes["/admin/model-pools"] = {"status": 200,
+                                        "body": pools_body or _POOLS_BODY}
+        routes["/admin/model-pools/events"] = {"status": 200, "body": {
+            "pools": {"fast": [{"type": "cooldown", "target": "loc",
+                                "reason": "unhealthy", "age_s": 120}]}}}
+        return routes
+
+    def test_tree_fail_click_expands_timeline(self, run_panel):
+        # fail 行（issues 非空 → 断链态）点击 → 树行下展开时间线轴
+        pools = json.loads(json.dumps(_POOLS_BODY))
+        pools["pools"]["fast"]["issues"] = ["候选 loc 不可达"]
+        routes = self._routes_with_events(pools)
+        out = run_panel(routes, actions=[{"fn": "doMpTreeDiag",
+                                          "args": ["fast"]}])
+        assert 'id="mp-tree-tl-fast"' in out["htmlFinal"], "树行下展开时间线"
+        assert "mp-tl-dot" in out["htmlFinal"]
+        assert "mp-tl-cooldown" in out["htmlFinal"]
+        assert "mp-tree-row-diag" in out["htmlFinal"], "可点态标记在行上"
+
+    def test_tree_click_without_events_noop(self, run_panel):
+        # 无事件行 → 点击不展开（无可诊断），也不标可点态
+        out = run_panel(_routes(), actions=[{"fn": "doMpTreeDiag",
+                                             "args": ["fast"]}])
+        assert "mp-tree-tl" not in out["htmlFinal"]
+        assert "mp-tree-row-diag" not in out["htmlFinal"]
+
+    def test_tree_timeline_click_again_collapses(self, run_panel):
+        routes = self._routes_with_events()
+        actions = [{"fn": "doMpTreeDiag", "args": ["fast"]}] * 2
+        out = run_panel(routes, actions=actions)
+        assert "mp-tree-tl-fast" not in out["htmlFinal"], "再点收起"

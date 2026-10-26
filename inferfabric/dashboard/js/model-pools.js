@@ -106,12 +106,20 @@
     Object.keys(pools).forEach(function (n) {
       if (order.indexOf(n) < 0) order.push(n);
     });
-    var rows = order.map(function (name) {
+    var rows = [];
+    order.forEach(function (name) {
       var def = pools[name];
       var ls = linkState(def, rtPools[name]);
       var cands = (def && def.candidates) || [];
       var leaf = cands.length ? cands[0].target : '—';
-      return '<div class="mp-tree-row" data-mp-tree-pool="' + esc(name) + '">'
+      // T5：有事件的行可点（fail/cooldown 必有事件；idle/flowing 有历史
+      // 也可查）— mp-tree-row-diag 挂 cursor 供 CSS
+      var evs = poolEvents(name);
+      rows.push('<div class="mp-tree-row'
+        + (evs.length ? ' mp-tree-row-diag' : '')
+        + '" data-mp-tree-pool="' + esc(name) + '"'
+        + (evs.length ? ' title="点击查看故障时间线"' : '')
+        + '">'
         + '<span class="mp-tree-port">:8999</span>'
         // 链路段/态徽标带 id — applyDynamic by-id 类翻转（同 C3 光带，
         // 不进结构签名：轮询零闪烁）
@@ -124,7 +132,13 @@
         + '<span class="mp-tree-state mp-tree-state-' + ls.cls
         + '" id="mp-tstate-' + esc(name) + '">'
         + esc(ls.label) + '</span>'
-        + '</div>';
+        + '</div>');
+      // T5：展开态在树行下渲染轴（C2 下放 — 行内诊断不跳转卡片区；
+      // 开合态进 sig → 变化即重建）
+      if (evs.length && _timelineOpen[name]) {
+        rows.push('<div class="mp-tl mp-tree-tl" id="mp-tree-tl-'
+          + esc(name) + '">' + timelineDots(name) + '</div>');
+      }
     });
     return '<div class="mp-tree" id="mpTree">' + rows.join('') + '</div>';
   }
@@ -224,6 +238,8 @@
       + selInner
       + '</select>'
       + '</div>'
+      // T5：建池会话 → 同一 A2 diff 条（（未配置）→ 新目标 + 预览/应用）
+      + (_inline && _inline.pool === name ? inlineDiffBar(name, null) : '')
       + '</div>';
   }
 
@@ -358,11 +374,13 @@
     var newC = candFromCatalogValue(n.spec, n.candId, _catalog);
     var newTarget = newC.kind === 'local' ? newC.model_name
       : (newC.provider + '/' + newC.model_id);
-    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开
-    var oldTarget = oldCand.target
-      ? oldCand.target
-      : (oldCand.kind === 'local' ? oldCand.model_name
-         : (oldCand.provider + '/' + oldCand.model_id));
+    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开；
+    // 未配置会话（T5 建池）oldCand=null → 旧侧「（未配置）」
+    var oldTarget = !oldCand ? '（未配置）'
+      : (oldCand.target
+          ? oldCand.target
+          : (oldCand.kind === 'local' ? oldCand.model_name
+             : (oldCand.provider + '/' + oldCand.model_id)));
     return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
       + '|' + esc(n.candId) + '">'
       + '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
@@ -738,6 +756,9 @@
       if (_timelineOpen[n]) {
         var tl = $('mp-tl-' + n);
         if (tl) tl.innerHTML = timelineDots(n);
+        // T5：树行下轴同态刷新（展开是状态 — 两渲染点数据一致）
+        var ttl = $('mp-tree-tl-' + n);
+        if (ttl) ttl.innerHTML = timelineDots(n);
       }
       // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
       var beam = $('mp-beam-' + n);
@@ -998,6 +1019,13 @@
     await renderModelPools();
   }
 
+  // T5：树行点击 → 行内诊断。有事件才展开（fail/cooldown 必有事件；
+  // idle/flowing 有历史也可查）；无事件行无可诊断，静默不动。
+  async function doMpTreeDiag(pool) {
+    if (!poolEvents(pool).length) return;
+    await doMpTimelineToggle(pool);
+  }
+
   // C4：查看回退链 — 池卡加高亮类（定位滚动交给 CSS scroll-margin）
   function doMpDegradeView(pool) {
     var card = $('mp-card-' + pool);
@@ -1127,19 +1155,53 @@
     work.pools[pool].candidates[i] = deepCopy(nc);
     // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
     // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
+    await startInlineSession(pool, candId, spec, base, work);
+  }
+
+  // A2 会话公共尾段：设 _inline → 重建出 diff 条 → 自动预览（三段式
+  // 门禁）→ 预览结果进签名重建（启用/禁用应用按钮）
+  async function startInlineSession(pool, candId, spec, base, work) {
     _inline = { pool: pool, candId: candId, spec: spec, base: base,
                 work: work, base_revision: _state.def.revision,
                 validated: false, previewHtml: '', rev: 0 };
-    await renderModelPools();          // 重建出 diff 条
+    await renderModelPools();
     var session = _inline;
-    var out = await previewWork(work, pool);   // 自动预览（三段式门禁）
+    var out = await previewWork(work, pool);
     if (_inline !== session) return;
     _inline.previewHtml = out.code === 'error'
       ? '<span class="mp-issue">预览请求异常：' + esc(out.message) + '</span>'
       : out.html;
     _inline.validated = out.validated;
-    _inline.rev += 1;                  // 进签名 → 重建（启用/禁用应用按钮）
+    _inline.rev += 1;
     await renderModelPools();
+  }
+
+  // T5：未配置卡选模型即建池 — 骨架 + 首候选（id/priority 承旧向导约定
+  // <pool>-1/1；协议/能力来自目录），走同一 A2 预览→应用链。CAS 基点 =
+  // 当前 revision（同编辑器语义 — 池创建与其他池修改同语义，不是旧向导
+  // 整体替换的硬编码 expected_revision=0；零配置时基点自然为 0）。
+  async function doMpConfigSelect(pool, spec) {
+    if (!spec) return;
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (base.pools[pool]) return;   // 已配置池不走未配置卡（竞态防御）
+    var work = deepCopy(base);
+    var c = candFromCatalogValue(spec, pool + '-1', _catalog);
+    c.priority = 1;
+    var sk = newPoolSkeleton();
+    sk.candidates = [deepCopy(c)];
+    work.pools[pool] = sk;
+    await startInlineSession(pool, pool + '-1', spec, base, work);
   }
 
   async function doMpInlineApply() {
@@ -1698,6 +1760,9 @@
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
     if (pool) { doMpToggle(pool, !!t.checked); return; }
+    // T5：未配置卡下拉 → 建池会话（空值=占位项，忽略）
+    var cfgPool = t.getAttribute('data-mp-config-pool');
+    if (cfgPool && t.value) { doMpConfigSelect(cfgPool, t.value); return; }
     var inl = t.getAttribute('data-mp-inline-replace');
     if (inl && t.value) {
       var bar = inl.split('|');   // 'pool|candId'
@@ -1806,6 +1871,13 @@
     // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
     var tlPool = t.getAttribute('data-mp-tl-toggle');
     if (tlPool) { doMpTimelineToggle(tlPool); return; }
+    // T5：树行点击 → C2 行内诊断（target 可能是行内 span → closest 爬行）
+    var treeRow = (typeof t.closest === 'function')
+      ? t.closest('[data-mp-tree-pool]') : null;
+    if (treeRow) {
+      doMpTreeDiag(treeRow.getAttribute('data-mp-tree-pool'));
+      return;
+    }
     // C4：劣化引导条（查看回退链 / 关闭）
     var dgView = t.getAttribute('data-mp-degrade-view');
     if (dgView) { doMpDegradeView(dgView); return; }
@@ -1892,6 +1964,8 @@
   window.doMpInlineSelect = doMpInlineSelect;
   window.doMpInlineApply = doMpInlineApply;
   window.doMpInlineCancel = doMpInlineCancel;
+  window.doMpConfigSelect = doMpConfigSelect;
+  window.doMpTreeDiag = doMpTreeDiag;
   window.mpPrimeInline = primeInline;
   window.doMpTimelineToggle = doMpTimelineToggle;
   window.doMpDegradeView = doMpDegradeView;
