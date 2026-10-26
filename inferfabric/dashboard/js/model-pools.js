@@ -113,11 +113,16 @@
       var leaf = cands.length ? cands[0].target : '—';
       return '<div class="mp-tree-row" data-mp-tree-pool="' + esc(name) + '">'
         + '<span class="mp-tree-port">:8999</span>'
-        + '<span class="mp-link mp-link-' + ls.cls + '"></span>'
+        // 链路段/态徽标带 id — applyDynamic by-id 类翻转（同 C3 光带，
+        // 不进结构签名：轮询零闪烁）
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-a-' + esc(name) + '"></span>'
         + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
-        + '<span class="mp-link mp-link-' + ls.cls + '"></span>'
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-b-' + esc(name) + '"></span>'
         + '<span class="mp-tree-leaf">' + esc(leaf) + '</span>'
-        + '<span class="mp-tree-state mp-tree-state-' + ls.cls + '">'
+        + '<span class="mp-tree-state mp-tree-state-' + ls.cls
+        + '" id="mp-tstate-' + esc(name) + '">'
         + esc(ls.label) + '</span>'
         + '</div>';
     });
@@ -132,7 +137,7 @@
     return null;
   }
 
-  // 未配置卡下拉默认值（原向导 _prefill 启发式按角色吸收；仅建议值）：
+  // 未配置卡下拉默认值（原初始化引导的预填启发式按角色吸收；仅建议值）：
   // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
   // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
   // （fetchCatalog 完整形态）。额外池无启发式。
@@ -189,7 +194,15 @@
   function unconfiguredCard(name, catalog) {
     var desc = roleDesc(name);
     var defVal = cardDefault(name, catalog);
+    // 三态目录（与 A2 inline select 同语义）：object=就绪出选项（预填）；
+    // null=未预热（占位可选，box mouseover/focusin 即拉取，轮询重建补上）；
+    // false=拉取失败（禁用 + 明示去编辑器）
     var opts = catalog ? configOptions(catalog, defVal) : null;
+    var selInner = catalog
+      ? '<option value="">选择模型…</option>' + opts
+      : (catalog === false
+          ? '<option value="">目录不可用 — 请用编辑器</option>'
+          : '<option value="">选择模型…（加载中）</option>');
     return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
       + esc(name) + '" data-mp-card="' + esc(name) + '">'
       + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
@@ -207,10 +220,8 @@
       + '<span class="mp-diff-old mono">（未配置）</span>'
       + '<span class="mp-diff-arrow">→</span>'
       + '<select class="mp-inline-sel mp-config-sel" data-mp-config-pool="'
-      + esc(name) + '"' + (opts ? '' : ' disabled') + '>'
-      + (opts
-          ? '<option value="">选择模型…</option>' + opts
-          : '<option value="">目录不可用 — 请用编辑器</option>')
+      + esc(name) + '"' + (catalog === false ? ' disabled' : '') + '>'
+      + selInner
       + '</select>'
       + '</div>'
       + '</div>';
@@ -731,6 +742,17 @@
       // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
       var beam = $('mp-beam-' + n);
       if (beam) beam.className = 'mp-beam ' + beamClass(stPools[n], rtPools[n]);
+      // 调用树：链路态 by-id（同哲学 — 类翻转是动态更新非结构变化，
+      // 不进 sig；未配置行态恒定无需更新）
+      var tls = linkState(poolDef, rtPools[n]);
+      var tla = $('mp-tlink-a-' + n), tlb = $('mp-tlink-b-' + n);
+      if (tla) tla.className = 'mp-link mp-link-' + tls.cls;
+      if (tlb) tlb.className = 'mp-link mp-link-' + tls.cls;
+      var tst = $('mp-tstate-' + n);
+      if (tst) {
+        tst.className = 'mp-tree-state mp-tree-state-' + tls.cls;
+        tst.textContent = tls.label;
+      }
     });
     var revEl = $('mpRevision');
     if (revEl && typeof def.revision !== 'undefined') {
@@ -764,8 +786,6 @@
       if (typeof document !== 'undefined' && document.hidden) return;
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
-      if (_wizard) return;
-      if (_wizardDone) return;   // A4：成果卡在屏 — 倒计时定点更新无的放矢
       // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
       // 计时器被节流，锚点差值仍反映真实时间）
       var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
@@ -820,9 +840,6 @@
   async function renderModelPools() {
     var box = $('mpPools');
     if (!box || _loading) return;
-    // A4 成果卡在屏：面板锁定为成果卡（轮询/重激活不得冲掉 — 完成
-    // 按钮先清 _wizardDone 再走正常渲染），也不发无谓请求
-    if (_wizardDone) { renderWizardDone(); return; }
     _loading = true;
     try {
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
@@ -861,33 +878,9 @@
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
 
-      // 三态分支（spec §4.3）：
-      // 1) 文件损坏 → 错误横幅（registry 保留最后有效快照继续服务）
-      // 离开向导态（配置出现/文件损坏）时清除陈旧向导状态 — 否则
-      // 残留 _wizard 既挡轮询又让「创建这些池」提交陈旧选择（终审修复）
-      _wizard = null;   // 向导分支内 renderWizard() 会重新建立
-      if (def.load_error) {
-        _lastSig = null;   // 评审 I5：错误横幅替换面板 → 失效签名
-        box.innerHTML = '<div class="mp-error-banner">'
-          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
-          + '<p class="mono">' + esc(def.load_error) + '</p>'
-          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
-          + '</div>';
-        return;
-      }
-      var names = Object.keys(def.pools || {});
-      // 2) 从未配置（无文件）→ 初始化向导（Task 7）
-      if (def.configured === false && def.raw == null && !names.length) {
-        _lastSig = null;   // 评审 I5：向导页替换面板 → 失效签名，恢复后必须重建
-        await renderWizard();
-        return;
-      }
-      // 3) 配置了零个池 → 普通空态
-      if (!names.length) {
-        _lastSig = null;
-        box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
-        return;
-      }
+      // 单一形态（2026-10-26 大手术）：无空态分支 — 零池 = 四张未配置卡
+      // （未配置即待建）；load_error → 横幅 + 同布局降级渲染（registry
+      // 保留最后有效快照，树上照常显示现有池）
       // A2：目录不做渲染期拉取（Task 1 裁决 — 既有轮询 GET 计数是契约），
       // 手势惰性预热：box mouseover/focusin → primeInline()
       var stPools = (st && st.pools) || {};
@@ -933,10 +926,16 @@
       }
       _lastSig = sig;
       var html = '';
-      if (_actionError) html += bannerHtml();   // A3：渲染池列表前输出行动横幅
-      names.forEach(function (n) {
-        html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
-      });
+      if (def.load_error) {
+        html += '<div class="mp-error-banner">'
+          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
+          + '<p class="mono">' + esc(def.load_error) + '</p>'
+          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
+          + '</div>';
+      }
+      if (_actionError) html += bannerHtml();   // A3：行动横幅常驻
+      html += treeHtml(def, rt);
+      html += cardsHtml(def, st, rt, _catalog);
       box.innerHTML = html;
       startCountdown();
     } catch (e) {
@@ -1224,234 +1223,6 @@
       accept_declared: true, allow_cross_location: false,
       max_attempts: 2, deadline_ms: 60000, candidates: [],
     };
-  }
-
-  /* ── 空态初始化向导（Task 7）：从未配置 → 四角色引导创建 ── */
-
-  var _wizard = null;   // {roles:{name:{desc,selected}}, removed:{}, catalog}
-  // A4 向导出口：提交成功的成果卡在屏（{pools:[names]}）— 完成/离开才清
-  var _wizardDone = null;
-
-  // 模型目录（/models 全量条目 + 云 provider 模型，best-effort）
-  // 向导消费形态：本地条目对象（预填启发式用 active/context_window）+ 云选择键
-  async function fetchWizardModels() {
-    var cat = null;
-    try { cat = await fetchCatalog(); } catch (e) { cat = null; }
-    if (!cat) {
-      return { local: [], cloud: [], cloudValues: [], index: {} };
-    }
-    return { local: cat.local, cloud: cat.cloud, cloudValues: cat.cloudValues,
-             index: cat.index };
-  }
-
-  // 预填启发式（可改；仅建议值）：fast=活跃小模型 / premium=大上下文本地，
-  // 无本地则首个云 / small=最小 / classifier=首个活跃
-  function _prefill(catalog) {
-    var llms = catalog.local;
-    var act = llms.filter(function (m) { return !!m.active; });
-    function pick(list, wantMax) {
-      if (!list.length) {
-        return catalog.cloudValues.length ? catalog.cloudValues[0] : null;
-      }
-      var sorted = list.slice();
-      var allSized = sorted.every(function (m) {
-        return typeof m.context_window === 'number';
-      });
-      if (allSized) {
-        sorted.sort(function (a, b) {
-          return wantMax ? b.context_window - a.context_window
-            : a.context_window - b.context_window;
-        });
-      } else if (!wantMax) {
-        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
-      }
-      return 'local:' + sorted[0].name;
-    }
-    return {
-      fast: pick(act.length ? act : llms, false),
-      premium: pick(llms, true),
-      small: pick(llms, false),
-      classifier: act.length ? 'local:' + act[0].name : pick(llms, false),
-    };
-  }
-
-  async function renderWizard() {
-    var catalog = await fetchWizardModels();
-    var pre = _prefill(catalog);
-    var roles = {};
-    _ROLE_DEFS.forEach(function (rd) {
-      roles[rd.name] = { desc: rd.desc, selected: pre[rd.name] };
-    });
-    _wizard = { roles: roles, removed: {}, catalog: catalog };
-    renderWizardHtml();
-  }
-
-  function renderWizardHtml() {
-    var box = $('mpPools');
-    if (!box || !_wizard) return;
-    var html = _actionError ? bannerHtml() : '';   // A3：向导模式同样常驻横幅
-    html += '<div class="mp-wizard">'
-      + '<p class="mp-wizard-intro">逻辑模型池尚未配置。为常用角色创建池后，'
-      + 'agent 产品只需配置一次 <span class="mono">iff/&lt;角色&gt;</span>，'
-      + '日后换模型在这里改，客户端零改动。</p>';
-    _ROLE_DEFS.forEach(function (rd) {
-      var st = _wizard.roles[rd.name];
-      if (!st) return;   // 已移除
-      var opts = '<option value="">（不创建）</option>';
-      _wizard.catalog.local.forEach(function (m) {
-        var v = 'local:' + m.name;
-        opts += '<option value="' + esc(v) + '"'
-          + (st.selected === v ? ' selected' : '')
-          + '>本地 · ' + esc(m.name) + (m.active ? '（服务中）' : '')
-          + '</option>';
-      });
-      _wizard.catalog.cloudValues.forEach(function (v) {
-        var n = v.slice('cloud:'.length);
-        opts += '<option value="' + esc(v) + '"'
-          + (st.selected === v ? ' selected' : '')
-          + '>云 · ' + esc(n) + '</option>';
-      });
-      html += '<div class="mp-wizard-role" data-mp-role="' + esc(rd.name) + '">'
-        + '<span class="mono"><b>iff/' + esc(rd.name) + '</b></span>'
-        + '<span class="mp-wizard-desc">' + esc(st.desc) + '</span>'
-        + '<select data-mp-wizard-sel="' + esc(rd.name) + '">' + opts + '</select>'
-        + '<button type="button" data-mp-wizard-del="' + esc(rd.name) + '">移除</button>'
-        + '</div>';
-    });
-    var removedNames = Object.keys(_wizard.removed);
-    if (removedNames.length) {
-      html += '<div class="mp-wizard-removed">已移除的角色：';
-      removedNames.forEach(function (n) {
-        html += '<button type="button" data-mp-wizard-add="' + esc(n) + '">恢复 '
-          + esc(n) + '</button>';
-      });
-      html += '</div>';
-    }
-    html += '<div class="mp-edit-actions">'
-      + '<button type="button" data-mp-wizard-submit="1">创建这些池</button>'
-      + '</div></div>';
-    box.innerHTML = html;
-  }
-
-  // 角色移除/恢复（提交只 POST 仍在 roles 里的）
-  function doMpWizardToggle(role) {
-    if (!_wizard) return;
-    if (_wizard.roles[role]) {
-      _wizard.removed[role] = _wizard.roles[role];
-      delete _wizard.roles[role];
-    } else if (_wizard.removed[role]) {
-      _wizard.roles[role] = _wizard.removed[role];
-      delete _wizard.removed[role];
-    }
-    renderWizardHtml();
-  }
-
-  async function doMpWizardSubmit() {
-    if (!_wizard) {
-      UI.toast('向导未初始化（配置文件损坏时不可用向导）', 'error');
-      return;
-    }
-    var session = _wizard;   // 会话令牌：在途期间向导态可能被清除/重建
-    var pools = {};
-    Object.keys(_wizard.roles).forEach(function (role) {
-      var sel = _wizard.roles[role].selected;
-      if (!sel) return;   // 无候选的角色跳过
-      var c = candFromCatalogValue(sel, role + '-1', _wizard.catalog);
-      c.priority = 1;
-      var sk = newPoolSkeleton();
-      sk.candidates = [c];
-      pools[role] = sk;
-    });
-    if (!Object.keys(pools).length) {
-      UI.toast('请至少为一个角色选择候选模型', 'error');
-      return;
-    }
-    // 创建语义 = 从零建立：固定 expected_revision=0（终审修复 — 即便快照
-    // revision 异常残留也不带病提交；错则 409 可重试，不会覆盖他人配置）
-    var body = {
-      schema_version: 1,
-      pools: pools,
-      expected_revision: 0,
-    };
-    try {
-      var res = await fetch(UPDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(body),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
-      if (_wizard !== session) {
-        // 向导态已变（被重渲染清除/重建）— 只提示 + 刷新，不碰当前状态
-        if (res.ok) {
-          clearActionError();
-          UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-          await renderModelPools();
-        }
-        return;
-      }
-      if (res.ok) {
-        _wizard = null;
-        _wizardDone = { pools: Object.keys(pools) };   // A4：成果卡在屏
-        clearActionError();
-        UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-        renderWizardDone();   // 不直接跳回列表 — 先展示成果 + 片段直通
-        return;
-      }
-      if (res.status === 409) {
-        await setActionError('配置已被其他修改更新（冲突）',
-          '已刷新，基于最新配置重试',
-          {label: '重试', run: function () { return doMpWizardSubmit(); }});
-        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
-        return;
-      }
-      var msg = (d && d.error) || ('创建失败 · HTTP ' + res.status);
-      UI.toast(msg, 'error');
-      await setActionError(msg, null,
-        {label: '重试', run: function () { return doMpWizardSubmit(); }});
-    } catch (e) {
-      UI.toast('创建请求异常：' + (e && e.message), 'error');
-      await setActionError('创建请求异常：' + (e && e.message), null,
-        {label: '重试', run: function () { return doMpWizardSubmit(); }});
-    }
-  }
-
-  /* ── A4 向导出口（UI/UX P2 Task 3）：成果卡 + 接入片段直通 ──
-     用户拍板：不自动淡出返回（复制会被打断）—「完成」按钮手动返回。 */
-
-  function renderWizardDone() {
-    var b = $('mpPools');
-    if (!b || !_wizardDone) return;
-    var names = _wizardDone.pools || [];
-    b.innerHTML = '<div class="mp-wizard-done">'
-      + '<div class="mp-wizard-done-hdr">已创建 ' + names.length
-      + ' 个逻辑模型池</div>'
-      + '<p class="mp-hint">agent 产品只需配置一次 '
-      + '<span class="mono">iff/&lt;池名&gt;</span> — 复制片段即可接入，'
-      + '之后换模型无需改客户端。</p>'
-      + names.map(function (n) {
-          return '<div class="mp-wizard-done-row">'
-            + '<span class="mono">iff/' + esc(n) + '</span>'
-            + '<button type="button" data-mp-copy-pool="' + esc(n)
-            + '" data-mp-copy="openai">复制 OpenAI 片段</button>'
-            + '</div>';
-        }).join('')
-      + '<div class="mp-edit-actions">'
-      + '<button type="button" data-mp-wizard-done="1">完成</button>'
-      + '</div>'
-      + '</div>';
-  }
-
-  async function doMpWizardDone() {
-    if (!_wizardDone) return;
-    _wizardDone = null;
-    await renderModelPools();   // 正常池列表（服务端此刻已配置）
-  }
-
-  // 成果卡直通复制：按池现组 _snippet（snippetText 同源），复用剪贴板路径
-  function doMpWizardDoneCopy(pool) {
-    _snippet = { pool: pool, openai: snippetText(pool, 'openai'),
-                 anthropic: snippetText(pool, 'anthropic') };
-    return doMpSnippetCopy('openai');
   }
 
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
@@ -1933,10 +1704,6 @@
       doMpInlineSelect(bar[0], bar[1], t.value);
       return;
     }
-    var wsel = t.getAttribute('data-mp-wizard-sel');
-    if (wsel && _wizard && _wizard.roles[wsel]) {
-      _wizard.roles[wsel].selected = t.value || null;
-    }
   }
 
   /* ── 接入片段（Task 8）：客户端复制即用代码 ── */
@@ -2044,15 +1811,6 @@
     if (dgView) { doMpDegradeView(dgView); return; }
     var dgDismiss = t.getAttribute('data-mp-degrade-dismiss');
     if (dgDismiss) { doMpDegradeDismiss(dgDismiss); return; }
-    // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
-    var cpool = t.getAttribute('data-mp-copy-pool');
-    if (cpool) { doMpWizardDoneCopy(cpool); return; }
-    if (t.getAttribute('data-mp-wizard-done')) { doMpWizardDone(); return; }
-    var del = t.getAttribute('data-mp-wizard-del');
-    if (del) { doMpWizardToggle(del); return; }
-    var add = t.getAttribute('data-mp-wizard-add');
-    if (add) { doMpWizardToggle(add); return; }
-    if (t.getAttribute('data-mp-wizard-submit')) { doMpWizardSubmit(); }
   }
 
   var box = $('mpPools');
@@ -2070,7 +1828,6 @@
      向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
   function onKeyDown(ev) {
     if (!ev || !ev.key) return;
-    if (_wizard || _wizardDone) return;
     if (window.store && typeof window.store.get === 'function'
         && window.store.get('tab_active') !== 'tab-model-pools') return;
     var t = ev.target;
@@ -2108,8 +1865,6 @@
       if (typeof document !== 'undefined' && document.hidden) return;
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
-      if (_wizard) return;
-      if (_wizardDone) return;   // A4：成果卡在屏 — 轮询不得冲掉
       return renderModelPools();   // 返回 promise 供测试/调用方等待
     } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
   }
@@ -2145,10 +1900,6 @@
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
   window.mpEditApply = mpEditApply;
-  window.doMpWizardToggle = doMpWizardToggle;
-  window.doMpWizardSubmit = doMpWizardSubmit;
-  window.doMpWizardDone = doMpWizardDone;
-  window.doMpWizardDoneCopy = doMpWizardDoneCopy;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();
