@@ -7,6 +7,8 @@
 
 /* ── L1: Primitive 色板（原始值，组件不直接引用） ─────────────── */
 :root {
+  color-scheme: dark;
+
   --c-bg-dark:        #0e1217;
   --c-surface-dark:   #161c24;
   --c-surface2-dark:  #1c242e;
@@ -89,6 +91,7 @@
 
 /* ── L2: Semantic 令牌 — LIGHT（仅覆盖 semantic 层） ───────────── */
 [data-theme="light"] {
+  color-scheme: light;
   --bg:         var(--c-bg-light);
   --surface:    var(--c-surface-light);
   --surface-2:  var(--c-surface2-light);
@@ -1441,7 +1444,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-lamps { display: inline-flex; gap: 6px; margin-left: 10px; }
 .mp-lamp {
   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-  background: var(--if-text-dim, #888); vertical-align: middle;
+  background: var(--ink-2); vertical-align: middle;
   transition: background var(--dur) var(--ease),
               box-shadow var(--dur) var(--ease);
 }
@@ -1457,42 +1460,42 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 /* ── 模型池编辑器 + 空态向导 v7.1.0 ── */
 .mp-edit-btn {
   margin-right: 8px; padding: 2px 10px; font-size: 12px;
-  border: 1px solid var(--if-border, #444); border-radius: 6px;
-  background: transparent; color: var(--if-text, #eee); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: var(--ink); cursor: pointer;
 }
 .mp-edit-btn:hover { border-color: var(--if-accent, #0a84ff); }
-.mp-editor { border: 1px solid var(--if-border, #444); border-radius: 10px;
+.mp-editor { border: 1px solid var(--border); border-radius: 10px;
   padding: 14px 16px; margin-top: 12px; }
 .mp-editor-hdr { display: flex; gap: 10px; align-items: baseline;
   margin-bottom: 10px; }
 .mp-edit-ops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .mp-edit-ops button, .mp-edit-actions button {
   padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
-  border: 1px solid var(--if-border, #444); background: transparent;
-  color: var(--if-text, #eee);
+  border: 1px solid var(--border); background: transparent;
+  color: var(--ink);
 }
 .mp-edit-actions { margin-top: 12px; display: flex; gap: 8px; }
 .mp-edit-actions button[disabled] { opacity: .4; cursor: default; }
 .mp-edit-add { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
 .mp-edit-params { margin-top: 10px; display: flex; gap: 16px; flex-wrap: wrap;
-  font-size: 12px; color: var(--if-text-dim, #999); }
+  font-size: 12px; color: var(--ink-2); }
 .mp-edit-params input[type="number"] { width: 90px; }
-.mp-hint { font-size: 12px; color: var(--if-text-dim, #999); }
+.mp-hint { font-size: 12px; color: var(--ink-2); }
 .mp-preview { margin-top: 12px; }
 .mp-wizard { display: flex; flex-direction: column; gap: 10px; }
-.mp-wizard-intro { color: var(--if-text-dim, #999); }
+.mp-wizard-intro { color: var(--ink-2); }
 .mp-wizard-role { display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
-  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 14px; }
 .mp-wizard-role select { flex: 1 1 220px; }
-.mp-wizard-desc { color: var(--if-text-dim, #999); font-size: 13px; }
+.mp-wizard-desc { color: var(--ink-2); font-size: 13px; }
 .mp-wizard-role button { padding: 2px 10px; font-size: 12px;
-  border-radius: 6px; border: 1px solid var(--if-border, #444);
-  background: transparent; color: var(--if-text, #eee); cursor: pointer; }
-.mp-wizard-removed { font-size: 12px; color: var(--if-text-dim, #999);
+  border-radius: 6px; border: 1px solid var(--border);
+  background: transparent; color: var(--ink); cursor: pointer; }
+.mp-wizard-removed { font-size: 12px; color: var(--ink-2);
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .mp-snippet-title { margin: 10px 0 4px; font-size: 13px;
-  color: var(--if-text-dim, #999); }
+  color: var(--ink-2); }
 .mp-snippet { background: rgba(0, 0, 0, .25); border-radius: 8px;
   padding: 10px 12px; font-size: 12px; overflow-x: auto; margin: 4px 0 8px; }
 
@@ -1504,7 +1507,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-cand-card {
   display: flex; align-items: center; gap: var(--sp-2);
   padding: 10px var(--sp-2); background: var(--surface-2, #1c242e);
-  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  border: 1px solid var(--border); border-radius: 10px;
   transition: border-color var(--dur) var(--ease),
               opacity var(--dur) var(--ease);
 }
@@ -1514,9 +1517,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   flex: 1; min-width: 0; flex-wrap: wrap; }
 .mp-cand-target { font-size: var(--fs-table); }
 .mp-cand-kind, .mp-cand-pri {
-  font-size: 11px; color: var(--if-text-dim, #999);
+  font-size: 11px; color: var(--ink-2);
 }
-.mp-cand-kind { border: 1px solid var(--if-border, #444);
+.mp-cand-kind { border: 1px solid var(--border);
   border-radius: var(--radius-pill); padding: 1px 8px; }
 .mp-proto-badge {
   font-size: 11px; font-family: var(--font-mono); color: #64d2ff;
@@ -1525,14 +1528,14 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .mp-chosen { color: #30d158;
   transition: color var(--dur) var(--ease); }
-.mp-nochosen { color: var(--if-text-dim, #888);
+.mp-nochosen { color: var(--ink-2);
   transition: color var(--dur) var(--ease); }
 .mp-feat {
   font-size: 11px; color: var(--if-accent, #0a84ff);
   border: 1px solid color-mix(in srgb, var(--if-accent, #0a84ff) 35%, transparent);
   border-radius: var(--radius-pill); padding: 1px 8px;
 }
-.mp-cand-rt { font-size: var(--fs-table); color: var(--if-text-dim, #999);
+.mp-cand-rt { font-size: var(--fs-table); color: var(--ink-2);
   display: flex; align-items: center; gap: var(--sp-1); }
 /* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */
 .mp-spark-wrap { display: inline-flex; align-items: center;
@@ -1568,7 +1571,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   background: color-mix(in srgb, var(--if-accent, #0a84ff) 25%, transparent);
 }
 .mp-beam-dark { background: transparent; height: 0; border-radius: 0;
-  border-top: 2px dashed var(--if-border, #444); }
+  border-top: 2px dashed var(--border); }
 /* C4 劣化提示：首候选降级而服务由回退候选提供 */
 .mp-degrade { display: flex; align-items: center; gap: var(--sp-2);
   padding: 6px 10px; margin-bottom: var(--sp-2);
@@ -1577,7 +1580,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   background: color-mix(in srgb, #ffd60a 10%, transparent);
   font-size: var(--fs-table); }
 .mp-degrade-x { margin-left: auto; border: none; background: transparent;
-  color: var(--if-text-dim, #888); font-size: 14px; cursor: pointer; }
+  color: var(--ink-2); font-size: 14px; cursor: pointer; }
 /* A2 行内 diff 预览条（UI/UX P2 Task 1）：旧→新 红/绿双编码 + 预览 + 应用/撤销 */
 .mp-inline-diff {
   display: flex; align-items: center; gap: var(--sp-1);
@@ -1595,8 +1598,8 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .mp-inline-sel {
   margin-top: var(--sp-1); font-size: var(--fs-table);
-  color: var(--if-text, #eee); background: transparent;
-  border: 1px dashed var(--if-border, #444); border-radius: 6px;
+  color: var(--ink); background: var(--surface-2);
+  border: 1px dashed var(--border); border-radius: 6px;
   padding: 2px 8px; max-width: 100%;
 }
 .mp-inline-sel:disabled { opacity: .55; }
@@ -1609,7 +1612,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 
 .mp-dot { width: 10px; height: 10px; border-radius: 50%; flex: none;
-  background: var(--if-border, #444);
+  background: var(--border);
   transition: background var(--dur) var(--ease),
               opacity var(--dur) var(--ease); }
 .mp-dot-ok   { background: #30d158; }
@@ -1619,7 +1622,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-dot-probe { background: #ffd60a;
   animation: mp-breathe .9s var(--ease) infinite; }
 .mp-dot-cool { background: #ffd60a; opacity: .5; }
-.mp-dot-off  { background: var(--if-border, #444); }
+.mp-dot-off  { background: var(--border); }
 
 @keyframes mp-breathe {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -1629,7 +1632,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 /* 环形倒计时：--p = 剩余百分比（0-100），由局部渲染任务 JS 驱动 */
 .mp-ring { width: 14px; height: 14px; border-radius: 50%; flex: none;
   background: conic-gradient(#ffd60a calc(var(--p, 100) * 1%),
-                             var(--if-border, #444) 0);
+                             var(--border) 0);
   position: relative; }
 .mp-ring::after { content: ''; position: absolute; inset: 3px;
   border-radius: 50%; background: var(--surface-2, #1c242e); }
@@ -1653,7 +1656,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-wizard-done {
   display: flex; flex-direction: column; gap: var(--sp-2);
   padding: var(--sp-3);
-  border: 1px solid var(--if-border, #444); border-radius: 10px;
+  border: 1px solid var(--border); border-radius: 10px;
   background: var(--surface-2, #1c242e);
   animation: mp-fade-in var(--dur-slow) var(--ease);
 }
@@ -1661,7 +1664,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-wizard-done-row {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--sp-2); padding: 6px var(--sp-2);
-  border: 1px solid var(--if-border, #444); border-radius: 8px;
+  border: 1px solid var(--border); border-radius: 8px;
 }
 @keyframes mp-fade-in {
   from { opacity: 0; transform: translateY(4px); }
