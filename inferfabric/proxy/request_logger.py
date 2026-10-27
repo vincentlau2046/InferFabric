@@ -73,6 +73,10 @@ class RequestLogger:
         self._db = db
         self._buffer: list[dict] = []
         self._buf_lock = threading.Lock()
+        # PR-20 评审修复 5：串行化所有 flush 执行（flush 线程/终刷/close），
+        # 使 flush_blocking 能等出在途 DB 写并确认缓冲已清。RLock：close()
+        # 与 flush_blocking 各自嵌套调用 _do_flush。
+        self._flush_op_lock = threading.RLock()
         self._batch_size = batch_size
         self._flush_interval = flush_interval
         self._flush_event = threading.Event()
@@ -184,6 +188,42 @@ class RequestLogger:
                 self._fd = None
                 self._current_date = ""
 
+    def flush_blocking(self, timeout: float = 5.0) -> int:
+        """评审修复 5：关停前的有界终刷 —— 只刷不关。
+
+        os._exit(0) 会跳过后台 flush 线程与 close() 路径，缓冲区里未落库
+        的请求日志会丢。本方法在排空完成后、硬退出前调用：
+          1. 等出 flush 线程的在途 DB 写（已 swap-out 的批次不得被截断）；
+          2. 清空缓冲区落库；
+          3. 全程有界 —— DB 写卡死时按时返回，不拖垮关停预算。
+        不停线程、不禁用、不关 DB/JSONL —— EDGE_HARD_EXIT=0 继续运行时
+        logger 仍完全可用（与 close() 的关键差异）。
+        返回本次落库条数；-1 = 未在 timeout 内完成（在途/卡死写）。
+        """
+        if not (self._enabled and self._db):
+            return 0
+        result = {"flushed": -1}
+
+        def _final_flush():
+            with self._flush_op_lock:  # 等 flush 线程的在途写完成
+                with self._buf_lock:
+                    pending = len(self._buffer)
+                if pending:
+                    self._do_flush()
+                with self._buf_lock:
+                    remaining = len(self._buffer)
+                result["flushed"] = pending - remaining
+
+        t = threading.Thread(target=_final_flush, daemon=True,
+                             name="reqlog-final-flush")
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            log.warning("RequestLogger final flush unfinished within %.1fs "
+                        "— buffered entries may be lost", timeout)
+            return -1
+        return result["flushed"]
+
     def _flush_loop(self):
         """后台 flush 线程。每 flush_interval 秒或收到 event 时 flush。"""
         while not self._stop_event.is_set():
@@ -196,33 +236,38 @@ class RequestLogger:
                     self._flush_event.set()
 
     def _do_flush(self):
-        """将缓冲区刷入 SQLite。swap out buffer → lock-free DB write。"""
-        # 持锁 swap out buffer
-        with self._buf_lock:
-            if not self._buffer:
-                return
-            batch = self._buffer
-            self._buffer = []  # 原子替换为空列表
+        """将缓冲区刷入 SQLite。swap out buffer → lock-free DB write。
 
-        # 锁外执行 DB 写入（不阻塞 log()）
-        try:
-            self._db.insert_request_log(batch)
-            log.debug("Flushed %d request_log entries to SQLite", len(batch))
-        except Exception as e:
-            log.error("Failed to flush request_log: %s", e)
-            # 回插失败批次到 buffer 前端
-            # 防止 buffer 无限膨胀（磁盘满场景）
+        PR-20 评审修复 5：_flush_op_lock 串行化所有 flush 执行（flush 线程/
+        终刷/close），使 flush_blocking 能等出在途写并确认缓冲已清。
+        """
+        with self._flush_op_lock:
+            # 持锁 swap out buffer
             with self._buf_lock:
-                if len(self._buffer) + len(batch) > 10000:
-                    overflow = len(self._buffer) + len(batch) - 10000
-                    log.error("Buffer overflow on flush failure: discarding %d oldest entries",
-                             overflow)
-                    batch = batch[overflow:]
-                self._buffer = batch + self._buffer
+                if not self._buffer:
+                    return
+                batch = self._buffer
+                self._buffer = []  # 原子替换为空列表
 
-        # 惰性清理（1% 概率）
-        if random.random() < 0.01:
-            self._maybe_prune()
+            # 锁外执行 DB 写入（不阻塞 log()）
+            try:
+                self._db.insert_request_log(batch)
+                log.debug("Flushed %d request_log entries to SQLite", len(batch))
+            except Exception as e:
+                log.error("Failed to flush request_log: %s", e)
+                # 回插失败批次到 buffer 前端
+                # 防止 buffer 无限膨胀（磁盘满场景）
+                with self._buf_lock:
+                    if len(self._buffer) + len(batch) > 10000:
+                        overflow = len(self._buffer) + len(batch) - 10000
+                        log.error("Buffer overflow on flush failure: discarding %d oldest entries",
+                                 overflow)
+                        batch = batch[overflow:]
+                    self._buffer = batch + self._buffer
+
+            # 惰性清理（1% 概率）
+            if random.random() < 0.01:
+                self._maybe_prune()
 
     def _maybe_prune(self):
         """惰性清理过期日志记录（1% 概率触发）。"""

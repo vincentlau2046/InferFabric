@@ -530,6 +530,88 @@ async def start_site_with_retry(runner, host=None, port=None,
     raise RuntimeError("unreachable")
 
 
+def _build_runner(app) -> web.AppRunner:
+    """PR-20 ①：有界排空 — shutdown_timeout 默认 30s（原 60s 默认）。
+
+    排空上限 = SIGTERM 后在途请求最长等待，超限由 aiohttp 取消剩余
+    handler；env EDGE_SHUTDOWN_DRAIN 可调。P0 实测：60s 排空上限 +
+    非守护线程 join = 91.7s 拒连窗口的两大组成部分。
+    """
+    drain = float(os.environ.get("EDGE_SHUTDOWN_DRAIN", "30"))
+    return web.AppRunner(app, keepalive_timeout=75, access_log=None,
+                         handler_cancellation=True, shutdown_timeout=drain)
+
+
+async def _shutdown_gracefully(mgr, watchdog, shutdown_event, site, runner,
+                               executor, sd_notify, exit_fn=None):
+    """PR-20 ①③：有序关停序列 — 封印 → 停后台 → 有界排空 → 硬退出。
+
+    - begin_shutdown：封印 StateDB（垂死进程禁写状态，③）+ 停
+      health_monitor/telemetry 后台写入者；watchdog 也在此停（关停期
+      不得再自动重启模型）。
+    - site.stop → runner.cleanup：端口先收，在途请求有界排空
+      （≤ shutdown_timeout，由 _build_runner 设定）。
+    - 硬退出 os._exit(0)：绕过非守护 executor 转发线程的 join
+      （P0 实测 60–91.7s 挂死根因；executor.shutdown(wait=False) 不够，
+      Python 退出时仍 join）。EDGE_HARD_EXIT=0 关闭（调试走
+      start_async finally 兜底）。systemd TimeoutStopSec=45 最终兜底。
+    """
+    if exit_fn is None:
+        exit_fn = os._exit
+    log.info("Shutting down async edge...")
+    try:
+        mgr.begin_shutdown("proxy shutdown")
+    except Exception as e:
+        log.exception("begin_shutdown failed — continuing shutdown: %s", e)
+    shutdown_event.set()  # health_loop / sd-watchdog 退出
+    try:
+        watchdog.stop()
+    except Exception as e:
+        log.warning("watchdog stop failed: %s", e)
+    async def drain():
+        await site.stop()
+        await runner.cleanup()
+
+    # aiohttp may spend shutdown_timeout twice (handler completion and
+    # cancellation). Bound the entire cleanup, not merely each internal phase.
+    cleanup = asyncio.create_task(drain())
+    try:
+        deadline = float(os.environ.get("EDGE_SHUTDOWN_DRAIN", "30"))
+        done, _ = await asyncio.wait({cleanup}, timeout=deadline)
+        if done:
+            cleanup.result()
+        else:
+            cleanup.cancel()
+            log.warning("Total drain deadline reached (%.1fs)", deadline)
+    except Exception:
+        cleanup.cancel()
+        log.exception("Graceful drain error — proceeding to hard exit")
+
+    # PR-20 评审修复 5：排空后、硬退出前的有界终刷 —— os._exit 会跳过
+    # 后台 flush 线程与 close() 路径，缓冲区里的请求日志必须在此落库。
+    # 只刷不关：EDGE_HARD_EXIT=0 继续运行时 logger 仍完全可用；
+    # 终刷失败不阻断关停（尽力而为，退出必须发生）。
+    logger = getattr(getattr(mgr, "telemetry", None), "logger", None)
+    if logger is not None and hasattr(logger, "flush_blocking"):
+        try:
+            flushed = logger.flush_blocking(timeout=5.0)
+            if flushed:
+                log.info("Final request-log flush: %d entries persisted", flushed)
+        except Exception:
+            log.warning("Final request-log flush failed — continuing shutdown",
+                        exc_info=True)
+
+    # 在跑 worker 有界（gate 30s / 上游 300s 超时兜底），不做无限阻塞 join；
+    # systemd TimeoutStopSec 是最终兜底（与线程版 daemon_threads 语义等价）
+    executor.shutdown(wait=False)
+    sd_notify("STOPPING=1")
+    if os.environ.get("EDGE_HARD_EXIT", "1") != "0":
+        log.info("Shutdown complete — hard exit (bypass non-daemon thread joins)")
+        exit_fn(0)
+    else:
+        log.info("Shutdown complete (EDGE_HARD_EXIT=0 — soft return)")
+
+
 async def _run(mgr, watchdog, shutdown_event, sd_notify):
     """事件循环主体：executor + ClientSession 无关（PR-19 转发仍同步）+ 有序关停。"""
     loop = asyncio.get_running_loop()
@@ -538,8 +620,7 @@ async def _run(mgr, watchdog, shutdown_event, sd_notify):
         thread_name_prefix="iff-async",
     )
     app = build_app(mgr, executor, watchdog)
-    runner = web.AppRunner(app, keepalive_timeout=75, access_log=None,
-                           handler_cancellation=True)
+    runner = _build_runner(app)
     await runner.setup()
     site = await start_site_with_retry(runner)
 
@@ -567,13 +648,8 @@ async def _run(mgr, watchdog, shutdown_event, sd_notify):
                          name="sd-watchdog").start()
 
     await stopped.wait()
-    log.info("Shutting down async edge...")
-    await site.stop()
-    await runner.cleanup()
-    # 在跑 worker 有界（gate 30s / 上游 300s 超时兜底），不做无限阻塞 join；
-    # systemd TimeoutStopSec 是最终兜底（与线程版 daemon_threads 语义等价）
-    executor.shutdown(wait=False)
-    sd_notify("STOPPING=1")
+    await _shutdown_gracefully(mgr, watchdog, shutdown_event, site, runner,
+                               executor, sd_notify)
 
 
 def start_async():
