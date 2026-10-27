@@ -34,6 +34,7 @@ class ModelWatchdog:
         auto_restart: bool = True,
         max_restarts: int = 3,
         restart_cooldown_step: float = 30.0,
+        fence_timeout: float = 5.0,
     ):
         self._manager = manager
         self._check_interval = check_interval
@@ -42,6 +43,7 @@ class ModelWatchdog:
         self._auto_restart = auto_restart
         self._max_restarts = max_restarts
         self._restart_cooldown_step = restart_cooldown_step
+        self._fence_timeout = fence_timeout
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._fail_counts: dict[str, int] = {}  # model_name → consecutive_failures
@@ -49,6 +51,11 @@ class ModelWatchdog:
         self._total_restarts: dict[str, int] = {}  # model_name → total restart attempts
         self._restart_cooldowns: dict[str, float] = {}  # model_name → cooldown deadline (monotonic)
         self._lock = threading.Lock()
+        # PR-20 评审修复 4：关停围栏。已派发的重启 worker 不受监控线程 join
+        # 管辖 —— 没有围栏它们可在关停后继续 reconcile/switch/stop_service，
+        # 把重启要保全的引擎杀掉。
+        self._workers: set[threading.Thread] = set()
+        self._mutation_lock = threading.Lock()
 
     def start(self):
         """Start the watchdog background thread."""
@@ -61,11 +68,40 @@ class ModelWatchdog:
                  self._check_interval, self._fail_threshold_alert, self._fail_threshold_restart)
 
     def stop(self):
-        """Stop the watchdog background thread."""
+        """Stop the watchdog: monitor thread + fence all restart workers.
+
+        PR-20 评审修复 4：先置 _stop_event，再以 _mutation_lock 作屏障。
+        屏障语义：新变更不可能在检查与调用之间溜进（worker 的 check+mutate
+        在同一把锁下原子执行）；已在途的单次变更要么在 fence_timeout 内
+        完成，要么由进程硬退出截断。stop() 返回后：无在途 worker 变更，
+        也不会有新变更开始。
+        """
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
-        log.info("Watchdog stopped")
+        # 屏障：等出在途变更（有界）。拿不到锁 = 有变更在途，放弃等待 ——
+        # 该变更由硬退出截断；其后续变更会在围栏检查处放弃。
+        if self._mutation_lock.acquire(timeout=self._fence_timeout):
+            self._mutation_lock.release()
+        with self._lock:
+            workers = list(self._workers)
+        for w in workers:
+            w.join(timeout=self._fence_timeout)
+        log.info("Watchdog stopped (%d restart worker(s) drained)", len(workers))
+
+    def _fenced(self, fn, *args):
+        """评审修复 4：在关停围栏内执行一次 manager 变更。
+
+        check+mutate 在 _mutation_lock 下原子：stop() 先置 _stop_event 再
+        用同一把锁作屏障，屏障之后不会有变更通过检查。返回 (ok, result)；
+        ok=False = 关停中，变更被拦截未执行。
+        """
+        with self._mutation_lock:
+            if self._stop_event.is_set():
+                log.info("Watchdog: shutdown fence — skip %s",
+                         getattr(fn, "__name__", fn))
+                return False, None
+            return True, fn(*args)
 
     def _run(self):
         """Main watchdog loop."""
@@ -142,13 +178,20 @@ class ModelWatchdog:
                         cooldown = min(300, self._restart_cooldown_step * (2 ** total))
                         self._restart_cooldowns[svc_name] = now + cooldown
                         log.info("Watchdog: %s cooldown set to %ds", svc_name, cooldown)
+                        # 关停后不再派发新 worker（评审修复 4）
+                        if self._stop_event.is_set():
+                            continue
                         # Trigger restart in a separate thread to avoid blocking watchdog
-                        threading.Thread(
+                        worker = threading.Thread(
                             target=self._restart_model,
                             args=(svc_name,),
                             daemon=True,
                             name=f"iff-watchdog-restart-{svc_name}",
-                        ).start()
+                        )
+                        # 已在 _check_all 的 with self._lock 块内 —— 直接注册，
+                        # 不得重入非可重入 Lock（自死锁）
+                        self._workers.add(worker)
+                        worker.start()
                     elif count >= self._fail_threshold_alert:
                         log.warning("Watchdog: %s failed %d times — alerting (profile_state=ERROR)", svc_name, count)
                         self._manager.state.set("profile_state", ServiceState.ERROR)
@@ -160,6 +203,9 @@ class ModelWatchdog:
         from switch() is NOT a success — it means reconcile() failed to clean
         up a stale entry, or the process was still registered but non-responsive.
         Only "switched" counts as a successful restart.
+
+        PR-20 评审修复 4：每个 manager 变更经 _fenced 围栏 —— 关停开始后
+        worker 在变更边界处放弃（不得杀掉重启要保全的引擎/毒化状态）。
         """
         try:
             with self._lock:
@@ -172,11 +218,15 @@ class ModelWatchdog:
                 log.info("Watchdog: %s restart skipped — %s is switching", name, switching)
                 return
             log.info("Watchdog: reconciling before restart of %s", name)
-            self._manager.reconcile()  # Clean up dead service entries
+            ok, _ = self._fenced(self._manager.reconcile)
+            if not ok:
+                return  # Clean up dead service entries（关停围栏拦截）
             if name not in self._manager.active_services:
                 # Reconcile removed it — now switch will actually deploy
                 log.info("Watchdog: deploying %s after reconcile", name)
-                result = self._manager.switch(name)
+                ok, result = self._fenced(self._manager.switch, name)
+                if not ok:
+                    return
                 if result.get("status") == "switched":
                     log.info("Watchdog: %s restart succeeded", name)
                     with self._lock:
@@ -191,11 +241,11 @@ class ModelWatchdog:
                         )
                         # Stop the process first to avoid orphan / port conflict,
                         # then remove the stale active_services entry.
-                        try:
-                            self._manager.stop_service(name)
-                        except Exception:
-                            pass
-                        self._manager.state.remove_active_service(name)
+                        if not self._fenced_quiet_stop(name):
+                            return
+                        ok, _ = self._fenced(self._manager.state.remove_active_service, name)
+                        if not ok:
+                            return
                     else:
                         log.error("Watchdog: %s restart failed: %s", name, result)
             else:
@@ -205,16 +255,27 @@ class ModelWatchdog:
                     "Watchdog: %s still in active_services after reconcile — "
                     "force-stopping and retrying in next cycle", name
                 )
-                try:
-                    self._manager.stop_service(name)
-                except Exception:
-                    pass
-                self._manager.state.remove_active_service(name)
+                if not self._fenced_quiet_stop(name):
+                    return
+                ok, _ = self._fenced(self._manager.state.remove_active_service, name)
+                if not ok:
+                    return
         except Exception as e:
             log.error("Watchdog: %s restart exception: %s", name, e)
         finally:
             with self._lock:
                 self._restarting.discard(name)
+                self._workers.discard(threading.current_thread())
+
+    def _fenced_quiet_stop(self, name: str) -> bool:
+        """围栏内 stop_service，保留原有吞异常语义（P2-2: stop 失败也清条目）。"""
+        def _stop():
+            try:
+                self._manager.stop_service(name)
+            except Exception:
+                pass
+        ok, _ = self._fenced(_stop)
+        return ok
 
     @property
     def fail_counts(self) -> dict[str, int]:
