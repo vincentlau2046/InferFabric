@@ -125,20 +125,33 @@ class StateDB:
 
     # ─── Seal (PR-20 ③ 重启零中断) ─────────────────────────────
 
-    def seal(self, reason: str = ""):
+    def seal(self, reason: str = "", timeout: float = 5.0):
         """封印状态库：此后所有写方法 no-op（读不受影响），幂等。
 
         P0 实测旧进程关停期 reconcile 毒写 gpu_mode/services，把错误状态
         交给下一个进程（2026-10-27 12:27:58 事件）。SIGTERM 第一时间封印，
         下一个进程从现实重新推导，不继承垂死进程的误判。
+
+        提交屏障有界（安全评审补丁）：已准入写持锁时最多等 timeout 秒。
+        超时则仍置 _sealed（标志只 False→True，无锁置位无害）——至多
+        已准入的写晚到提交（记警告日志），之后的写照旧 no-op。否则
+        begin_shutdown 会在 SIGTERM 关键路径上无限挂死，排空窗口退化
+        回 systemd SIGKILL。
         """
         # Wait for writes already admitted by the decorator to commit. After
         # seal returns, no StateDB writer can commit behind the shutdown barrier.
-        with self._seal_lock:
+        acquired = self._seal_lock.acquire(timeout=timeout)
+        try:
             if not self._sealed:
                 self._sealed = True
+                if not acquired:
+                    log.warning("StateDB seal: admitted write still in flight after "
+                                "%.1fs — sealing anyway (straggler may commit)", timeout)
                 log.warning("StateDB sealed (%s) — state writes disabled until process exit",
                             reason or "unspecified")
+        finally:
+            if acquired:
+                self._seal_lock.release()
 
     # ─── Generic KV ────────────────────────────────────────────
 

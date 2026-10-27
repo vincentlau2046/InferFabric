@@ -145,3 +145,40 @@ class TestSealSemantics:
         db.seal("from other thread")
         db.set("k", "after")
         assert db.get("k") == "before"
+
+    def test_seal_bounded_when_admitted_write_stuck(self, tmp_path, monkeypatch):
+        """安全评审：seal 不得在 SIGTERM 关键路径上无限等待。
+
+        病态场景（磁盘停顿 / CLI 进程持锁的长事务）：已准入写卡死时，
+        seal(timeout) 必须有界返回并置 _sealed —— 至多已准入的写晚到提交
+        （记日志），之后的写照旧 no-op。否则 begin_shutdown 挂死，
+        排空窗口退化回 systemd SIGKILL。
+        """
+        db = _db(tmp_path)
+        db.set("profile_state", "healthy")
+        admitted, release, sealed = (threading.Event() for _ in range(3))
+        write = db._db.set
+
+        def stuck_write(key, value):
+            admitted.set()
+            release.wait(10)          # 永不主动释放 —— 模拟病态卡死
+            write(key, value)
+
+        monkeypatch.setattr(db._db, "set", stuck_write)
+        writer = threading.Thread(target=db.set, args=("profile_state", "idle"),
+                                  daemon=True)
+        writer.start()
+        assert admitted.wait(2)
+        try:
+            t0 = __import__("time").monotonic()
+            db.seal("bounded", timeout=0.2)   # 关键路径调用方不传 timeout 也有默认
+            elapsed = __import__("time").monotonic() - t0
+            assert elapsed < 2.0, f"seal 应有界返回（0.2s 预算），实际 {elapsed:.1f}s"
+            assert db._sealed is True
+        finally:
+            release.set()
+            writer.join(3)
+        # 卡死写晚到提交（已准入，允许）；但封印后的新写必须 no-op
+        after = db.get("profile_state")
+        db.set("profile_state", "post-seal")
+        assert db.get("profile_state") == after
