@@ -57,6 +57,7 @@ class ProxyManager:
     def __init__(self, mgr: Optional["ModelManager"] = None, models_dir: str | None = None):
         self.mgr = mgr if mgr is not None else ModelManager(models_dir or str(MODELS_DIR))
         self._last_switch = 0.0
+        self._shutdown_begun = False  # PR-20 ①③：begin_shutdown 幂等标志
         self._cooldown = 10
         self._switch_lock = threading.Lock()
         # PR-A: Auth manager
@@ -549,6 +550,36 @@ class ProxyManager:
 
     def health_check(self):
         return self.health_monitor.health_check()
+
+    def begin_shutdown(self, reason: str = "proxy shutdown") -> None:
+        """PR-20 ①③：有序关停第一步 — 封印 StateDB + 停后台状态写入者。
+
+        SIGTERM 第一时间调用（先于 site.stop / 排空）：
+        - 封印后本进程任何组件不得再持久化状态（下一个进程从现实推导），
+          根因是 P0 实测的垂死 reconcile 毒写（gpu_state.py reconcile 把
+          idle + 清空 services 写进 state.db 交给下一个进程）；
+        - 停 health_monitor（60s 周期 reconcile = 毒写源头）；
+        - 停 telemetry 采集线程（token_collector / power_sampler）。
+        幂等；单点失败只告警不阻断关停。watchdog / health_loop 由
+        async_server 关停序列单独停。
+        """
+        if self._shutdown_begun:
+            return
+        self._shutdown_begun = True
+        log.info("ProxyManager.begin_shutdown: %s", reason)
+        try:
+            self.mgr.state.seal(reason)
+        except Exception as e:
+            log.exception("StateDB seal failed — continuing shutdown: %s", e)
+        for label, stop in (
+            ("health_monitor", lambda: self.health_monitor.stop(timeout=3)),
+            ("token_collector", lambda: self.telemetry.token_collector.stop()),
+            ("power_sampler", lambda: self.telemetry.power_sampler.stop()),
+        ):
+            try:
+                stop()
+            except Exception as e:
+                log.warning("begin_shutdown: %s stop failed: %s", label, e)
 
     def _clean_manual_stops(self):
         self.health_monitor._clean_manual_stops()

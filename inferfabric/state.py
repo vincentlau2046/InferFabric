@@ -7,6 +7,7 @@ v5.0: StateDB delegates to IFFDB. Internal SQLite removed.
       Keeps same public API for backward compatibility.
 """
 
+import functools
 import json
 import time
 import logging
@@ -14,6 +15,16 @@ from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger("inferfabric")
+
+
+def _sealed_noop(fn):
+    """PR-20 ③：封印后写方法静默 no-op——垂死进程不得再写状态。"""
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        if self._sealed:
+            return None
+        return fn(self, *args, **kwargs)
+    return wrapper
 
 
 # ─── GPU Mode State Machine ──────────────────────────────────────
@@ -107,6 +118,21 @@ class StateDB:
         else:
             raise ValueError("StateDB requires db_path or iffdb")
         self._models_lookup = None  # 由 ModelManager 在 models 加载后设置
+        self._sealed = False  # PR-20 ③：关停期封印（垂死进程禁写状态）
+
+    # ─── Seal (PR-20 ③ 重启零中断) ─────────────────────────────
+
+    def seal(self, reason: str = ""):
+        """封印状态库：此后所有写方法 no-op（读不受影响），幂等。
+
+        P0 实测旧进程关停期 reconcile 毒写 gpu_mode/services，把错误状态
+        交给下一个进程（2026-10-27 12:27:58 事件）。SIGTERM 第一时间封印，
+        下一个进程从现实重新推导，不继承垂死进程的误判。
+        """
+        if not self._sealed:
+            self._sealed = True
+            log.warning("StateDB sealed (%s) — state writes disabled until process exit",
+                        reason or "unspecified")
 
     # ─── Generic KV ────────────────────────────────────────────
 
@@ -114,10 +140,12 @@ class StateDB:
         """Get state value. Compat with generic get()."""
         return self._db.get(key, default)
 
+    @_sealed_noop
     def set(self, key: str, value: str):
         """Set state value. Compat with generic set()."""
         self._db.set(key, value)
 
+    @_sealed_noop
     def set_multi(self, kv: dict[str, str]):
         """Atomically set multiple state keys in a single DB transaction."""
         self._db.set_multi(kv)
@@ -127,12 +155,15 @@ class StateDB:
     def get_active_services(self) -> list[str]:
         return self._db.get_active_services()
 
+    @_sealed_noop
     def set_active_services(self, services: list[str]):
         self._db.set_active_services(services)
 
+    @_sealed_noop
     def add_active_service(self, name: str):
         self._db.add_active_service(name)
 
+    @_sealed_noop
     def remove_active_service(self, name: str):
         self._db.remove_active_service(name)
 
@@ -140,6 +171,7 @@ class StateDB:
 
     MANUAL_STOP_TTL = 60  # 60s — auto-switch unblock cooldown after manual stop/reset
 
+    @_sealed_noop
     def record_manual_stop(self, name: str):
         """Record that user manually stopped a model (blocks auto-switch)."""
         self._db.record_manual_stop(name)
@@ -148,6 +180,7 @@ class StateDB:
         """Check if model was manually stopped within TTL."""
         return self._db.is_manually_stopped(name)
 
+    @_sealed_noop
     def clear_manual_stop(self, name: str):
         """Clear manual stop record."""
         self._db.clear_manual_stop(name)
@@ -192,6 +225,7 @@ class StateDB:
         return GPUMode.IDLE
 
     @gpu_mode.setter
+    @_sealed_noop
     def gpu_mode(self, mode: str):
         """保留 setter 写 DB（调试可查 + 向后兼容）。"""
         assert GPUMode.is_valid(mode), f"Invalid GPU mode: {mode}"
@@ -202,6 +236,7 @@ class StateDB:
     def get_sleep_state(self, model_name: str) -> Optional[str]:
         return self._db.get_sleep_state(model_name)
 
+    @_sealed_noop
     def set_sleep_state(self, model_name: str, level: Optional[int]):
         self._db.set_sleep_state(model_name, level)
 
@@ -210,6 +245,7 @@ class StateDB:
 
     # ─── History ────────────────────────────────────────────────
 
+    @_sealed_noop
     def add_history(self, from_profile: str, to_profile: str, duration: float, status: str = "ok"):
         self._db.add_switch_history(from_profile, to_profile, duration, status)
 
