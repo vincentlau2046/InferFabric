@@ -502,3 +502,131 @@ class TestStopAllActive:
         lc._stop_all_active(services=["ghost-service"], include_none=True)
 
         assert stopped == [], f"未知服务应被跳过，got {stopped}"
+
+# ═══════════════════════════════════════════════════════════════
+# PR-20 ②（评审修复 3）: 收养先于新分配守卫
+# ═══════════════════════════════════════════════════════════════
+
+def _make_deploy_lifecycle():
+    """Exclusive NInfer deploy 场景：peak 30500MB，GPU 32GB。
+
+    proc.engine_exists 由各测试自行配置（真实现见 process_manager）。
+    gpu_used_mb/gpu_total_mb 模拟「幸存容器自己占着 ~30GB」的 P0 场景。
+    """
+    state = MagicMock()
+    state.get_active_services.return_value = []
+    state.get_sleep_state.return_value = None
+    state.get_all_sleep_states.return_value = {}
+    state.gpu_mode = GPUMode.IDLE
+
+    proc = MagicMock()
+    proc.start_ninfer.return_value = {
+        "status": "healthy", "port": 8007, "pid": None, "adopted": True,
+    }
+
+    model = MagicMock()
+    model.name = "test-ninfer"
+    model.type = "ninfer"
+    model.container_name = "iff-ninfer-test"
+    model.ninfer.port = 8007
+    model.ninfer.docker_image = "ninfer:latest"
+    model.is_vllm = False
+    model.is_ninfer = True
+    model.is_exclusive = True
+    model.is_gpu_none = False
+    model.needs_gpu = True
+    model.gpu_role = "exclusive"
+    model.peak_vram_mb = 30500
+    model.typical_vram_pct = 0
+    model.config_hash = MagicMock(return_value="h1")
+
+    models = {"test-ninfer": model}
+    return ModelLifecycle(state, proc, MagicMock(), MagicMock(), MagicMock(),
+                          models), proc, model, models
+
+
+class TestDeployEngineAdoption:
+    """评审修复 3：引擎现实识别必须先于 CUDA clear + VRAM 预算守卫。
+
+    P0 场景：proxy 重启后幸存的 NInfer 容器自己占着 ~30GB，
+    peak_vram_mb=30500 → 30500+30500 > 31628 预算 → 收养路径永远到不了
+    start_ninfer。修复：身份匹配（容器名+镜像）的幸存引擎 → 跳过新分配
+    守卫（收养/等待不分配任何东西；重建路径先 docker stop 释放旧占用）。
+    守卫本身不全局关闭 —— 引擎不存在时照常生效。
+    """
+
+    def _patch_gpu(self, monkeypatch, models, used_mb=30500, total_mb=32768):
+        monkeypatch.setattr("inferfabric.model_lifecycle.load_models",
+                            lambda models_dir=None: models)
+        monkeypatch.setattr("inferfabric.model_lifecycle.gpu_used_mb",
+                            lambda: used_mb)
+        monkeypatch.setattr("inferfabric.model_lifecycle.gpu_total_mb",
+                            lambda: total_mb)
+
+    def test_deploy_skips_vram_guard_when_engine_exists(self, monkeypatch):
+        """幸存引擎在场 → 不 clear CUDA、不 VRAM 拒绝、直收养。"""
+        lc, proc, model, models = _make_deploy_lifecycle()
+        proc.engine_exists.return_value = True
+        self._patch_gpu(monkeypatch, models)
+
+        result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
+
+        assert result["status"] == "switched", \
+            f"幸存引擎应被收养而非拒绝: {result}"
+        proc.clear_gpu_cuda_state.assert_not_called()
+        proc.start_ninfer.assert_called_once()
+
+    def test_deploy_vram_guard_enforced_when_engine_absent(self, monkeypatch):
+        """引擎不在场（全新部署）→ 守卫照常：VRAM 超预算必须拒绝。"""
+        lc, proc, model, models = _make_deploy_lifecycle()
+        proc.engine_exists.return_value = False
+        self._patch_gpu(monkeypatch, models)
+
+        result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
+
+        assert result["status"] == "error"
+        assert "VRAM budget exceeded" in result["message"]
+        proc.start_ninfer.assert_not_called()
+        proc.clear_gpu_cuda_state.assert_called()  # 全新部署照常 clear
+
+    def test_deploy_default_mock_probe_not_treated_as_present(self, monkeypatch):
+        """契约：engine_exists 必须返回字面 True 才算在场。
+
+        未配置 return_value 的 MagicMock（旧测试替身/旧 proc 版本）返回
+        MagicMock 实例 —— truthy 但不是 True，不得触发守卫跳过。
+        """
+        lc, proc, model, models = _make_deploy_lifecycle()
+        # engine_exists.return_value 故意不设置（默认 MagicMock）
+        self._patch_gpu(monkeypatch, models)
+
+        result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
+
+        assert result["status"] == "error"
+        assert "VRAM budget exceeded" in result["message"]
+
+    def test_deploy_probe_failure_does_not_block_deploy(self, monkeypatch):
+        """探测本身抛异常 → 按不在场处理，不得阻断部署（守卫路径照走）。"""
+        lc, proc, model, models = _make_deploy_lifecycle()
+        proc.engine_exists.side_effect = RuntimeError("docker unavailable")
+        self._patch_gpu(monkeypatch, models, used_mb=100)
+
+        result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
+
+        assert result["status"] == "switched", \
+            f"探测失败不应阻断部署: {result}"
+        proc.start_ninfer.assert_called_once()
+
+    def test_shared_add_skips_vram_guard_when_engine_exists(self, monkeypatch):
+        """共享加服务同构：幸存引擎在场 → 跳过 VRAM 余量检查。"""
+        lc, proc, model, models = _make_deploy_lifecycle()
+        model.is_exclusive = False
+        model.gpu_role = "shared"
+        lc._lock.is_held = True
+        proc.engine_exists.return_value = True
+        self._patch_gpu(monkeypatch, models)
+
+        result = lc._shared_add_service(model)
+
+        assert result["status"] == "switched", \
+            f"幸存引擎的共享加服务应跳过 VRAM 守卫: {result}"
+        proc.start_ninfer.assert_called_once()

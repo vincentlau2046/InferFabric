@@ -179,6 +179,19 @@ class ProcessManager(BaseProcessManager):
     def stop_ninfer(self, container_name: str) -> dict:
         return self._ninfer.stop_ninfer(container_name)
 
+    def engine_exists(self, model) -> bool:
+        """PR-20 ②（评审修复 3）：现实识别 —— 本模型自己的引擎是否已在跑。
+
+        非变更性身份探测（容器名 + 镜像匹配），供 lifecycle 在新分配守卫
+        （CUDA clear + VRAM 预算）之前判定「分配目标已被本模型引擎占用」。
+        必须返回字面 True / False（消费方用 `is True` 判定，防 MagicMock
+        truthy 误跳守卫）。当前仅 NInfer 容器支持（proxy 重启幸存场景）；
+        其余引擎 → False（照走新分配守卫路径）。
+        """
+        if getattr(model, "type", None) == "ninfer" and model.ninfer:
+            return self._ninfer.container_exists(model.ninfer, model.container_name)
+        return False
+
     def is_sglang_alive(self, port: int) -> bool:
         return self._sglang.is_sglang_alive(port)
 
