@@ -8,6 +8,7 @@ v5.0: StateDB delegates to IFFDB. Internal SQLite removed.
 """
 
 import functools
+import threading
 import json
 import time
 import logging
@@ -21,9 +22,10 @@ def _sealed_noop(fn):
     """PR-20 ③：封印后写方法静默 no-op——垂死进程不得再写状态。"""
     @functools.wraps(fn)
     def wrapper(self, *args, **kwargs):
-        if self._sealed:
-            return None
-        return fn(self, *args, **kwargs)
+        with self._seal_lock:
+            if self._sealed:
+                return None
+            return fn(self, *args, **kwargs)
     return wrapper
 
 
@@ -118,6 +120,7 @@ class StateDB:
         else:
             raise ValueError("StateDB requires db_path or iffdb")
         self._models_lookup = None  # 由 ModelManager 在 models 加载后设置
+        self._seal_lock = threading.RLock()
         self._sealed = False  # PR-20 ③：关停期封印（垂死进程禁写状态）
 
     # ─── Seal (PR-20 ③ 重启零中断) ─────────────────────────────
@@ -129,10 +132,13 @@ class StateDB:
         交给下一个进程（2026-10-27 12:27:58 事件）。SIGTERM 第一时间封印，
         下一个进程从现实重新推导，不继承垂死进程的误判。
         """
-        if not self._sealed:
-            self._sealed = True
-            log.warning("StateDB sealed (%s) — state writes disabled until process exit",
-                        reason or "unspecified")
+        # Wait for writes already admitted by the decorator to commit. After
+        # seal returns, no StateDB writer can commit behind the shutdown barrier.
+        with self._seal_lock:
+            if not self._sealed:
+                self._sealed = True
+                log.warning("StateDB sealed (%s) — state writes disabled until process exit",
+                            reason or "unspecified")
 
     # ─── Generic KV ────────────────────────────────────────────
 

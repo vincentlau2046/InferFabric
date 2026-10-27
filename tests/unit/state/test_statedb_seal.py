@@ -6,6 +6,7 @@ P0 实测：旧进程关停期 reconcile 毒写 gpu_mode=idle + 清空 services�
 读不受影响、幂等——下一个进程从现实重新推导。
 """
 import logging
+import threading
 
 import pytest
 
@@ -102,6 +103,40 @@ class TestSealSemantics:
         assert db.is_manually_stopped("m") is True
         assert len(db.get_history(5)) == 1
         assert db.gpu_mode in (GPUMode.IDLE, GPUMode.SHARED, GPUMode.EXCLUSIVE)
+
+    def test_seal_waits_for_admitted_write_to_finish(self, tmp_path, monkeypatch):
+        db = _db(tmp_path)
+        db.set("profile_state", "healthy")
+        admitted, release, sealed = (threading.Event() for _ in range(3))
+        write = db._db.set
+
+        def paused_write(key, value):
+            admitted.set()
+            assert release.wait(3)
+            write(key, value)
+
+        monkeypatch.setattr(db._db, "set", paused_write)
+        writer = threading.Thread(target=db.set, args=("profile_state", "idle"))
+        def seal():
+            db.seal("race")
+            sealed.set()
+        sealer = threading.Thread(target=seal)
+        writer.start()
+        try:
+            assert admitted.wait(2)
+            sealer.start()
+            # A successful seal is a commit barrier, not merely a flag:
+            # an already-admitted write must finish before seal returns.
+            assert not sealed.wait(0.1)
+        finally:
+            release.set()
+            writer.join(3)
+            if sealer.ident is not None:
+                sealer.join(3)
+        assert sealed.is_set()
+        before = db.get("profile_state")
+        db.set("profile_state", "after-seal")
+        assert db.get("profile_state") == before
 
     def test_seal_from_writing_thread(self, tmp_path):
         """封印是线程安全标志：另一线程封印后，本线程写即刻 no-op。"""

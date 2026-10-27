@@ -2,6 +2,8 @@
 
 > 来源：P0 诊断（2026-10-27，纯观测，见下）→ 用户拍板 P1 四项实施口径。
 > P2（systemd socket activation）观察后再议，不在本 PR。
+> **当前不可发布。** 以下为设计目标，并非已达成效果。独立评审发现生命周期集成
+> 阻塞项，见 `REVIEW.md`；不得依据本文的早期估算部署或宣称近零中断。
 
 ## P0 诊断结论（实测）
 
@@ -26,7 +28,9 @@
   `begin_shutdown`（封印 + 停后台线程）→ `shutdown_event.set()` → `watchdog.stop()` → `site.stop()` → `runner.cleanup()`（≤30s 有界排空）→ `executor.shutdown(wait=False)` → `sd_notify("STOPPING=1")` → **`os._exit(0)`**。
 - `os._exit(0)` 绕过非守护线程 join（91.7s 根因）；`EDGE_HARD_EXIT=0` 可关（调试用，走 start_async finally 兜底）。
 - systemd 单元 `TimeoutStopSec=45`（排空 30s + 停线程余量，最终兜底）。
-- 效果：无在途请求时中断 ~1–2s；最坏 30s（原 91.7s）。
+- 目标：HTTP 排空使用独立的 30s 总 deadline（不能只依赖 AppRunner 内部 timeout）。
+  整体停止时间还包括后台线程 join、已准入数据库写事务和最终日志刷盘，
+  不应把排空预算等同于拒连时长；生产数据需发布验收后实测。
 
 ### ② 三态收养（引擎侧，最大头）
 
@@ -44,9 +48,11 @@ docker inspect（一次调用取 Running/StartedAt/Config.Image）
 
 - 返回 `status="healthy"` 保持消费方兼容（model_lifecycle 接受 healthy/started/ok）。
 - adopt-wait 上限 = 宽限剩余（非 startup_timeout=120——挡不住 15min 冷加载）。
-- 镜像变更（如 ninfer:auto 重 tag）自动重建；**参数变更**（models.d YAML）需显式
-  `iff stop`/restart 才生效（重启网关 ≠ 重配引擎，语义如此，文档说明）。
-- 效果：健在引擎零冷启（15min → ~1s）；新代理收养后 ~2-3s 恢复服务。
+- 镜像引用字符串变化可触发重建；`ninfer:auto` 同名 tag 更新不在当前检测能力内。
+  镜像升级和**参数变更**（models.d YAML）需显式 `iff stop`/restart 才生效
+  （重启网关 ≠ 重配引擎）。不能承诺网关重启自动应用同名镜像升级。
+- 目标：健康引擎不重复冷启。加载中引擎的识别必须早于新分配 VRAM/CUDA
+  清理守卫；当前集成尚未完成。systemd cgroup 所有权也需独立确认。
 
 ### ③ StateDB 封印（状态侧）
 
@@ -68,6 +74,7 @@ docker inspect（一次调用取 Running/StartedAt/Config.Image）
 
 1. 全量 pytest 绿（unit + integration）；import 冒烟；交叉评审通过。
 2. 沙箱运行时冒烟：SIGHUP 热更新实证；SIGTERM 关停序列日志正确。
-3. 生产重启验收（用户授权重启后测量）：拒连窗口 ≤ ~31s（最坏）/ ~2s（常态）；
+3. 生产重启验收（阻塞项全部关闭、用户授权重启后测量）：记录实际拒连窗口、
+   全停止时间与 30s HTTP 排空预算分别核对；
    健在 NInfer 容器收养（日志 `NInfer adopt`），无 15min 冷启；
    重启后 state.db 无垂死进程毒写。
