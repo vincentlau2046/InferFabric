@@ -54,6 +54,221 @@
   var _degradeDismissed = {};
   // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
   var BEAM_FRESH_S = 30;
+
+  /* ── 调用树 + 四组常驻卡（2026-10-26 大手术，v7.5.0）──────────────
+   * 用户 2026-10-25 判定向导式初始化为失败设计：配置窗口用完即消失、
+   * 缺失组无创建入口。重构为单一形态 — 顶部调用树（端口→角色→模型，
+   * 链路态 = 有没有被真实调用）+ 四角色常驻配置卡（未配置即待建）。
+   * 四角色固定序与描述表（原向导 _ROLE_DEFS 上移 — 树与卡共用）。 */
+  var _ROLE_ORDER = ['fast', 'premium', 'small', 'classifier'];
+  var _ROLE_DEFS = [
+    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
+  ];
+  // 树链路流动窗：真实 ok 交换在此窗内 = flowing。比卡片光带窗
+  // （BEAM_FRESH_S=30）宽 — 树答「近期有被调用」，光带答「此刻在交换」
+  var FLOW_WINDOW_S = 60;
+
+  // 链路五态纯函数（树渲染与后续卡渲染同源）：
+  //   unconfigured 无 def（缺失组不消失，灰虚线）
+  //   fail         issues 非空，或近窗真实尝试失败且窗内无成功交换
+  //   flowing      任一候选近窗真实 ok 交换（降级服务中数据仍在流动 →
+  //                flowing 优先于 cooldown，降级细节归 C4 提示）
+  //   cooldown     无流动但有候选隔离/冷却
+  //   idle         可路由但静默
+  function linkState(def, rtPool) {
+    if (!def) return { cls: 'unconfigured', label: '未配置' };
+    if ((def.issues || []).length) {
+      return { cls: 'fail', label: '故障' };
+    }
+    var flowing = false, recentFail = false, cooling = false;
+    (((rtPool || {}).candidates) || []).forEach(function (rc) {
+      var la = rc.last_attempt;
+      if (la && typeof la.age_s === 'number' && la.age_s < FLOW_WINDOW_S) {
+        if (la.ok) flowing = true; else recentFail = true;
+      }
+      if (rc.cooling) cooling = true;
+    });
+    if (flowing) return { cls: 'flowing', label: '调用中' };
+    if (cooling) return { cls: 'cooldown', label: '冷却中' };
+    if (recentFail) return { cls: 'fail', label: '故障' };
+    return { cls: 'idle', label: '空闲' };
+  }
+
+  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <模型叶>」+ 态徽标。
+  // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
+  function treeHtml(defs, rt) {
+    var pools = (defs && defs.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var rows = [];
+    order.forEach(function (name) {
+      var def = pools[name];
+      var ls = linkState(def, rtPools[name]);
+      var cands = (def && def.candidates) || [];
+      var leaf = cands.length ? cands[0].target : '—';
+      // T5：有事件的行可点（fail/cooldown 必有事件；idle/flowing 有历史
+      // 也可查）— mp-tree-row-diag 挂 cursor 供 CSS
+      var evs = poolEvents(name);
+      rows.push('<div class="mp-tree-row'
+        + (evs.length ? ' mp-tree-row-diag' : '')
+        + '" data-mp-tree-pool="' + esc(name) + '"'
+        + (evs.length ? ' title="点击查看故障时间线"' : '')
+        + '">'
+        + '<span class="mp-tree-port">:8999</span>'
+        // 链路段/态徽标带 id — applyDynamic by-id 类翻转（同 C3 光带，
+        // 不进结构签名：轮询零闪烁）
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-a-' + esc(name) + '"></span>'
+        + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
+        + '<span class="mp-link mp-link-' + ls.cls
+        + '" id="mp-tlink-b-' + esc(name) + '"></span>'
+        + '<span class="mp-tree-leaf">' + esc(leaf) + '</span>'
+        + '<span class="mp-tree-state mp-tree-state-' + ls.cls
+        + '" id="mp-tstate-' + esc(name) + '">'
+        + esc(ls.label) + '</span>'
+        + '</div>');
+      // T5：展开态在树行下渲染轴（C2 下放 — 行内诊断不跳转卡片区；
+      // 开合态进 sig → 变化即重建）
+      if (evs.length && _timelineOpen[name]) {
+        rows.push('<div class="mp-tl mp-tree-tl" id="mp-tree-tl-'
+          + esc(name) + '">' + timelineDots(name) + '</div>');
+      }
+    });
+    return '<div class="mp-tree" id="mpTree">' + rows.join('') + '</div>';
+  }
+
+  // 角色描述（四角色表查名；额外池无描述返回 null）
+  function roleDesc(name) {
+    for (var i = 0; i < _ROLE_DEFS.length; i++) {
+      if (_ROLE_DEFS[i].name === name) return _ROLE_DEFS[i].desc;
+    }
+    return null;
+  }
+
+  // 未配置卡下拉默认值（原初始化引导的预填启发式按角色吸收；仅建议值）：
+  // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
+  // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
+  // （fetchCatalog 完整形态）。额外池无启发式。
+  function cardDefault(roleName, catalog) {
+    var cat = catalog || {};
+    var llms = cat.local || [];
+    var act = llms.filter(function (m) { return !!m.active; });
+    function pick(list, wantMax) {
+      if (!list.length) {
+        return (cat.cloudValues || []).length ? cat.cloudValues[0] : null;
+      }
+      var sorted = list.slice();
+      var allSized = sorted.every(function (m) {
+        return typeof m.context_window === 'number';
+      });
+      if (allSized) {
+        sorted.sort(function (a, b) {
+          return wantMax ? b.context_window - a.context_window
+            : a.context_window - b.context_window;
+        });
+      } else if (!wantMax) {
+        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
+      }
+      return 'local:' + sorted[0].name;
+    }
+    if (roleName === 'fast') return pick(act.length ? act : llms, false);
+    if (roleName === 'premium') return pick(llms, true);
+    if (roleName === 'small') return pick(llms, false);
+    if (roleName === 'classifier') {
+      return act.length ? 'local:' + act[0].name : pick(llms, false);
+    }
+    return null;
+  }
+
+  // 未配置卡下拉选项（与 A2 inlineOptions 同形 + defVal 预选）
+  function configOptions(catalog, defVal) {
+    var o = '';
+    (catalog.localValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>本地 · '
+        + esc(v.slice('local:'.length)) + '</option>';
+    });
+    (catalog.cloudValues || []).forEach(function (v) {
+      o += '<option value="' + esc(v) + '"'
+        + (v === defVal ? ' selected' : '') + '>云 · '
+        + esc(v.slice('cloud:'.length)) + '</option>';
+    });
+    return o;
+  }
+
+  // 未配置卡：同形态 + 「未配置」徽标 + 预填下拉（首次 apply 建池）+
+  // 高级配置直通（openEditor 对缺失池走骨架）。无候选链/开关/接入片段
+  // — 那些是「已配置」才有的动作。
+  function unconfiguredCard(name, catalog) {
+    var desc = roleDesc(name);
+    var defVal = cardDefault(name, catalog);
+    // 四态目录（与 A2 inline select 同语义）：object=就绪出选项（预填）；
+    // null=未预热（占位可选，box mouseover/focusin 即拉取，轮询重建补上）；
+    // false=拉取失败（禁用 + 明示去编辑器）；空目录=拉取成功但零条目
+    // （禁用 + 明示为空 — 终审 I4：不得渲染只剩占位的沉默死下拉）
+    var opts = catalog ? configOptions(catalog, defVal) : null;
+    var empty = !!(catalog && !(catalog.localValues || []).length
+      && !(catalog.cloudValues || []).length);
+    var selInner = empty
+      ? '<option value="">目录为空 — 请用编辑器</option>'
+      : (catalog
+          ? '<option value="">选择模型…</option>' + opts
+          : (catalog === false
+              ? '<option value="">目录不可用 — 请用编辑器</option>'
+              : '<option value="">选择模型…（加载中）</option>'));
+    return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
+      + esc(name) + '" data-mp-card="' + esc(name) + '">'
+      + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
+      + '"></div>'
+      + '<div class="if-card-hdr">'
+      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="mp-unconfigured-badge">未配置</span>'
+      + '<span class="mp-toggle-wrap">'
+      + '<button type="button" class="mp-edit-btn" data-mp-edit="'
+      + esc(name) + '">高级配置</button>'
+      + '</span>'
+      + '</div>'
+      + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
+      + '<div class="mp-config-line">'
+      + '<span class="mp-diff-old mono">（未配置）</span>'
+      + '<span class="mp-diff-arrow">→</span>'
+      + '<select class="mp-inline-sel mp-config-sel" data-mp-config-pool="'
+      + esc(name) + '"' + (catalog === false || empty ? ' disabled' : '')
+      + '>'
+      + selInner
+      + '</select>'
+      + '</div>'
+      // T5：建池会话 → 同一 A2 diff 条（（未配置）→ 新目标 + 预览/应用）
+      + (_inline && _inline.pool === name ? inlineDiffBar(name, null) : '')
+      + '</div>';
+  }
+
+  // 四组常驻配置卡：_ROLE_ORDER 固定序四卡 + 额外池追加（R3）。
+  // 已配置 → 现 poolCard 全部动作；未配置 → unconfiguredCard（待建）。
+  // 面板只有这一种形态 — 不存在会消失的配置窗口。
+  function cardsHtml(defs, st, rt, catalog) {
+    var pools = (defs && defs.pools) || {};
+    var stPools = (st && st.pools) || {};
+    var rtPools = (rt && rt.pools) || {};
+    var order = _ROLE_ORDER.slice();
+    Object.keys(pools).forEach(function (n) {
+      if (order.indexOf(n) < 0) order.push(n);
+    });
+    var cards = order.map(function (name) {
+      var def = pools[name];
+      return def
+        ? poolCard(name, def, stPools[name], rtPools[name])
+        : unconfiguredCard(name, catalog);
+    });
+    return '<div class="mp-cards" id="mpCards">' + cards.join('') + '</div>';
+  }
+
   // v7.1.0 三段式编辑器（Task 6）：
   //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
   //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
@@ -165,11 +380,13 @@
     var newC = candFromCatalogValue(n.spec, n.candId, _catalog);
     var newTarget = newC.kind === 'local' ? newC.model_name
       : (newC.provider + '/' + newC.model_id);
-    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开
-    var oldTarget = oldCand.target
-      ? oldCand.target
-      : (oldCand.kind === 'local' ? oldCand.model_name
-         : (oldCand.provider + '/' + oldCand.model_id));
+    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开；
+    // 未配置会话（T5 建池）oldCand=null → 旧侧「（未配置）」
+    var oldTarget = !oldCand ? '（未配置）'
+      : (oldCand.target
+          ? oldCand.target
+          : (oldCand.kind === 'local' ? oldCand.model_name
+             : (oldCand.provider + '/' + oldCand.model_id)));
     return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
       + '|' + esc(n.candId) + '">'
       + '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
@@ -346,6 +563,9 @@
       + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + (roleDesc(name)
+          ? '<span class="mp-role-desc">' + esc(roleDesc(name)) + '</span>'
+          : '')
       + '<span class="mp-lamps">'
       + ['openai', 'anthropic'].map(function (proto) {
           var cls = lampForProtocol(def, ((st || {}).protocols || {})[proto]);
@@ -542,10 +762,24 @@
       if (_timelineOpen[n]) {
         var tl = $('mp-tl-' + n);
         if (tl) tl.innerHTML = timelineDots(n);
+        // T5：树行下轴同态刷新（展开是状态 — 两渲染点数据一致）
+        var ttl = $('mp-tree-tl-' + n);
+        if (ttl) ttl.innerHTML = timelineDots(n);
       }
       // C3：光带三态数据驱动 → by-id className 更新（不进 sig）
       var beam = $('mp-beam-' + n);
       if (beam) beam.className = 'mp-beam ' + beamClass(stPools[n], rtPools[n]);
+      // 调用树：链路态 by-id（同哲学 — 类翻转是动态更新非结构变化，
+      // 不进 sig；未配置行态恒定无需更新）
+      var tls = linkState(poolDef, rtPools[n]);
+      var tla = $('mp-tlink-a-' + n), tlb = $('mp-tlink-b-' + n);
+      if (tla) tla.className = 'mp-link mp-link-' + tls.cls;
+      if (tlb) tlb.className = 'mp-link mp-link-' + tls.cls;
+      var tst = $('mp-tstate-' + n);
+      if (tst) {
+        tst.className = 'mp-tree-state mp-tree-state-' + tls.cls;
+        tst.textContent = tls.label;
+      }
     });
     var revEl = $('mpRevision');
     if (revEl && typeof def.revision !== 'undefined') {
@@ -579,8 +813,6 @@
       if (typeof document !== 'undefined' && document.hidden) return;
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
-      if (_wizard) return;
-      if (_wizardDone) return;   // A4：成果卡在屏 — 倒计时定点更新无的放矢
       // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
       // 计时器被节流，锚点差值仍反映真实时间）
       var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
@@ -635,9 +867,6 @@
   async function renderModelPools() {
     var box = $('mpPools');
     if (!box || _loading) return;
-    // A4 成果卡在屏：面板锁定为成果卡（轮询/重激活不得冲掉 — 完成
-    // 按钮先清 _wizardDone 再走正常渲染），也不发无谓请求
-    if (_wizardDone) { renderWizardDone(); return; }
     _loading = true;
     try {
       var defRes = await fetch(POOLS_URL, { headers: UI.adminHeaders() });
@@ -676,33 +905,9 @@
       var revEl = $('mpRevision');
       if (revEl) revEl.textContent = String(def.revision);
 
-      // 三态分支（spec §4.3）：
-      // 1) 文件损坏 → 错误横幅（registry 保留最后有效快照继续服务）
-      // 离开向导态（配置出现/文件损坏）时清除陈旧向导状态 — 否则
-      // 残留 _wizard 既挡轮询又让「创建这些池」提交陈旧选择（终审修复）
-      _wizard = null;   // 向导分支内 renderWizard() 会重新建立
-      if (def.load_error) {
-        _lastSig = null;   // 评审 I5：错误横幅替换面板 → 失效签名
-        box.innerHTML = '<div class="mp-error-banner">'
-          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
-          + '<p class="mono">' + esc(def.load_error) + '</p>'
-          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
-          + '</div>';
-        return;
-      }
-      var names = Object.keys(def.pools || {});
-      // 2) 从未配置（无文件）→ 初始化向导（Task 7）
-      if (def.configured === false && def.raw == null && !names.length) {
-        _lastSig = null;   // 评审 I5：向导页替换面板 → 失效签名，恢复后必须重建
-        await renderWizard();
-        return;
-      }
-      // 3) 配置了零个池 → 普通空态
-      if (!names.length) {
-        _lastSig = null;
-        box.innerHTML = '<p class="mp-empty">暂无逻辑模型池 — 配置 model_pools.yaml 后热加载即可</p>';
-        return;
-      }
+      // 单一形态（2026-10-26 大手术）：无空态分支 — 零池 = 四张未配置卡
+      // （未配置即待建）；load_error → 横幅 + 同布局降级渲染（registry
+      // 保留最后有效快照，树上照常显示现有池）
       // A2：目录不做渲染期拉取（Task 1 裁决 — 既有轮询 GET 计数是契约），
       // 手势惰性预热：box mouseover/focusin → primeInline()
       var stPools = (st && st.pools) || {};
@@ -722,6 +927,9 @@
       // 行内会话（池|候选|spec|rev）计入签名 — 下拉出现/diff 条/应用按钮
       // 启用都是结构变化
       var sig = structSig(def, stPools, rtPools)
+        // 终审 I2：load_error 进签名 — 首渲染后才拉到的加载失败/修复
+        // 都必须重建（横幅只在重建路径渲染，池形未变不算「无变化」）
+        + '|le:' + (def.load_error || '')
         + '|cat:' + (_catalog ? '1' : _catalog === false ? '2' : '0')
         // C2：toggle 在否（池事件有无）+ 展开池列表都是结构 — 变化即重建；
         // 事件数据本身不进 sig（by-id 更新）
@@ -748,10 +956,16 @@
       }
       _lastSig = sig;
       var html = '';
-      if (_actionError) html += bannerHtml();   // A3：渲染池列表前输出行动横幅
-      names.forEach(function (n) {
-        html += poolCard(n, def.pools[n], stPools[n], rtPools[n]);
-      });
+      if (def.load_error) {
+        html += '<div class="mp-error-banner">'
+          + '<p><b>model_pools.yaml 加载失败</b>（registry 保留最后有效快照）：</p>'
+          + '<p class="mono">' + esc(def.load_error) + '</p>'
+          + '<p>修复文件后点击「重载配置」，或直接编辑 YAML。</p>'
+          + '</div>';
+      }
+      if (_actionError) html += bannerHtml();   // A3：行动横幅常驻
+      html += treeHtml(def, rt);
+      html += cardsHtml(def, st, rt, _catalog);
       box.innerHTML = html;
       startCountdown();
     } catch (e) {
@@ -812,6 +1026,13 @@
     if (_timelineOpen[pool]) delete _timelineOpen[pool];
     else _timelineOpen[pool] = true;
     await renderModelPools();
+  }
+
+  // T5：树行点击 → 行内诊断。有事件才展开（fail/cooldown 必有事件；
+  // idle/flowing 有历史也可查）；无事件行无可诊断，静默不动。
+  async function doMpTreeDiag(pool) {
+    if (!poolEvents(pool).length) return;
+    await doMpTimelineToggle(pool);
   }
 
   // C4：查看回退链 — 池卡加高亮类（定位滚动交给 CSS scroll-margin）
@@ -943,19 +1164,56 @@
     work.pools[pool].candidates[i] = deepCopy(nc);
     // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
     // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
-    _inline = { pool: pool, candId: candId, spec: spec, base: base,
-                work: work, base_revision: _state.def.revision,
-                validated: false, previewHtml: '', rev: 0 };
-    await renderModelPools();          // 重建出 diff 条
-    var session = _inline;
-    var out = await previewWork(work, pool);   // 自动预览（三段式门禁）
+    await startInlineSession(pool, candId, spec, base, work);
+  }
+
+  // A2 会话公共尾段：设 _inline → 重建出 diff 条 → 自动预览（三段式
+  // 门禁）→ 预览结果进签名重建（启用/禁用应用按钮）。
+  // 令牌必须在首个 await 前同步捕获：预演在途时用户再选一次会同步接管
+  // _inline，若令牌取自渲染恢复之后，旧会话的迟到结果会通过身份校验
+  // 写进新会话（validated/previewHtml 与 work 错位 → 门禁被绕过）
+  async function startInlineSession(pool, candId, spec, base, work) {
+    var session = { pool: pool, candId: candId, spec: spec, base: base,
+                    work: work, base_revision: _state.def.revision,
+                    validated: false, previewHtml: '', rev: 0 };
+    _inline = session;
+    await renderModelPools();
+    var out = await previewWork(work, pool);
     if (_inline !== session) return;
     _inline.previewHtml = out.code === 'error'
       ? '<span class="mp-issue">预览请求异常：' + esc(out.message) + '</span>'
       : out.html;
     _inline.validated = out.validated;
-    _inline.rev += 1;                  // 进签名 → 重建（启用/禁用应用按钮）
+    _inline.rev += 1;
     await renderModelPools();
+  }
+
+  // T5：未配置卡选模型即建池 — 骨架 + 首候选（id/priority 承旧向导约定
+  // <pool>-1/1；协议/能力来自目录），走同一 A2 预览→应用链。CAS 基点 =
+  // 当前 revision（同编辑器语义 — 池创建与其他池修改同语义，不是旧向导
+  // 整体替换的硬编码 expected_revision=0；零配置时基点自然为 0）。
+  async function doMpConfigSelect(pool, spec) {
+    if (!spec) return;
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (base.pools[pool]) return;   // 已配置池不走未配置卡（竞态防御）
+    var work = deepCopy(base);
+    var c = candFromCatalogValue(spec, pool + '-1', _catalog);
+    c.priority = 1;
+    var sk = newPoolSkeleton();
+    sk.candidates = [deepCopy(c)];
+    work.pools[pool] = sk;
+    await startInlineSession(pool, pool + '-1', spec, base, work);
   }
 
   async function doMpInlineApply() {
@@ -1041,241 +1299,6 @@
     };
   }
 
-  /* ── 空态初始化向导（Task 7）：从未配置 → 四角色引导创建 ── */
-
-  var _wizard = null;   // {roles:{name:{desc,selected}}, removed:{}, catalog}
-  // A4 向导出口：提交成功的成果卡在屏（{pools:[names]}）— 完成/离开才清
-  var _wizardDone = null;
-
-  var _ROLE_DEFS = [
-    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
-    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
-    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
-    { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
-  ];
-
-  // 模型目录（/models 全量条目 + 云 provider 模型，best-effort）
-  // 向导消费形态：本地条目对象（预填启发式用 active/context_window）+ 云选择键
-  async function fetchWizardModels() {
-    var cat = null;
-    try { cat = await fetchCatalog(); } catch (e) { cat = null; }
-    if (!cat) {
-      return { local: [], cloud: [], cloudValues: [], index: {} };
-    }
-    return { local: cat.local, cloud: cat.cloud, cloudValues: cat.cloudValues,
-             index: cat.index };
-  }
-
-  // 预填启发式（可改；仅建议值）：fast=活跃小模型 / premium=大上下文本地，
-  // 无本地则首个云 / small=最小 / classifier=首个活跃
-  function _prefill(catalog) {
-    var llms = catalog.local;
-    var act = llms.filter(function (m) { return !!m.active; });
-    function pick(list, wantMax) {
-      if (!list.length) {
-        return catalog.cloudValues.length ? catalog.cloudValues[0] : null;
-      }
-      var sorted = list.slice();
-      var allSized = sorted.every(function (m) {
-        return typeof m.context_window === 'number';
-      });
-      if (allSized) {
-        sorted.sort(function (a, b) {
-          return wantMax ? b.context_window - a.context_window
-            : a.context_window - b.context_window;
-        });
-      } else if (!wantMax) {
-        sorted.reverse();   // 无尺寸信息：表尾视作小模型（models.d 惯例）
-      }
-      return 'local:' + sorted[0].name;
-    }
-    return {
-      fast: pick(act.length ? act : llms, false),
-      premium: pick(llms, true),
-      small: pick(llms, false),
-      classifier: act.length ? 'local:' + act[0].name : pick(llms, false),
-    };
-  }
-
-  async function renderWizard() {
-    var catalog = await fetchWizardModels();
-    var pre = _prefill(catalog);
-    var roles = {};
-    _ROLE_DEFS.forEach(function (rd) {
-      roles[rd.name] = { desc: rd.desc, selected: pre[rd.name] };
-    });
-    _wizard = { roles: roles, removed: {}, catalog: catalog };
-    renderWizardHtml();
-  }
-
-  function renderWizardHtml() {
-    var box = $('mpPools');
-    if (!box || !_wizard) return;
-    var html = _actionError ? bannerHtml() : '';   // A3：向导模式同样常驻横幅
-    html += '<div class="mp-wizard">'
-      + '<p class="mp-wizard-intro">逻辑模型池尚未配置。为常用角色创建池后，'
-      + 'agent 产品只需配置一次 <span class="mono">iff/&lt;角色&gt;</span>，'
-      + '日后换模型在这里改，客户端零改动。</p>';
-    _ROLE_DEFS.forEach(function (rd) {
-      var st = _wizard.roles[rd.name];
-      if (!st) return;   // 已移除
-      var opts = '<option value="">（不创建）</option>';
-      _wizard.catalog.local.forEach(function (m) {
-        var v = 'local:' + m.name;
-        opts += '<option value="' + esc(v) + '"'
-          + (st.selected === v ? ' selected' : '')
-          + '>本地 · ' + esc(m.name) + (m.active ? '（服务中）' : '')
-          + '</option>';
-      });
-      _wizard.catalog.cloudValues.forEach(function (v) {
-        var n = v.slice('cloud:'.length);
-        opts += '<option value="' + esc(v) + '"'
-          + (st.selected === v ? ' selected' : '')
-          + '>云 · ' + esc(n) + '</option>';
-      });
-      html += '<div class="mp-wizard-role" data-mp-role="' + esc(rd.name) + '">'
-        + '<span class="mono"><b>iff/' + esc(rd.name) + '</b></span>'
-        + '<span class="mp-wizard-desc">' + esc(st.desc) + '</span>'
-        + '<select data-mp-wizard-sel="' + esc(rd.name) + '">' + opts + '</select>'
-        + '<button type="button" data-mp-wizard-del="' + esc(rd.name) + '">移除</button>'
-        + '</div>';
-    });
-    var removedNames = Object.keys(_wizard.removed);
-    if (removedNames.length) {
-      html += '<div class="mp-wizard-removed">已移除的角色：';
-      removedNames.forEach(function (n) {
-        html += '<button type="button" data-mp-wizard-add="' + esc(n) + '">恢复 '
-          + esc(n) + '</button>';
-      });
-      html += '</div>';
-    }
-    html += '<div class="mp-edit-actions">'
-      + '<button type="button" data-mp-wizard-submit="1">创建这些池</button>'
-      + '</div></div>';
-    box.innerHTML = html;
-  }
-
-  // 角色移除/恢复（提交只 POST 仍在 roles 里的）
-  function doMpWizardToggle(role) {
-    if (!_wizard) return;
-    if (_wizard.roles[role]) {
-      _wizard.removed[role] = _wizard.roles[role];
-      delete _wizard.roles[role];
-    } else if (_wizard.removed[role]) {
-      _wizard.roles[role] = _wizard.removed[role];
-      delete _wizard.removed[role];
-    }
-    renderWizardHtml();
-  }
-
-  async function doMpWizardSubmit() {
-    if (!_wizard) {
-      UI.toast('向导未初始化（配置文件损坏时不可用向导）', 'error');
-      return;
-    }
-    var session = _wizard;   // 会话令牌：在途期间向导态可能被清除/重建
-    var pools = {};
-    Object.keys(_wizard.roles).forEach(function (role) {
-      var sel = _wizard.roles[role].selected;
-      if (!sel) return;   // 无候选的角色跳过
-      var c = candFromCatalogValue(sel, role + '-1', _wizard.catalog);
-      c.priority = 1;
-      var sk = newPoolSkeleton();
-      sk.candidates = [c];
-      pools[role] = sk;
-    });
-    if (!Object.keys(pools).length) {
-      UI.toast('请至少为一个角色选择候选模型', 'error');
-      return;
-    }
-    // 创建语义 = 从零建立：固定 expected_revision=0（终审修复 — 即便快照
-    // revision 异常残留也不带病提交；错则 409 可重试，不会覆盖他人配置）
-    var body = {
-      schema_version: 1,
-      pools: pools,
-      expected_revision: 0,
-    };
-    try {
-      var res = await fetch(UPDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(body),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
-      if (_wizard !== session) {
-        // 向导态已变（被重渲染清除/重建）— 只提示 + 刷新，不碰当前状态
-        if (res.ok) {
-          clearActionError();
-          UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-          await renderModelPools();
-        }
-        return;
-      }
-      if (res.ok) {
-        _wizard = null;
-        _wizardDone = { pools: Object.keys(pools) };   // A4：成果卡在屏
-        clearActionError();
-        UI.toast('已创建 ' + Object.keys(pools).length + ' 个逻辑模型池', 'ok');
-        renderWizardDone();   // 不直接跳回列表 — 先展示成果 + 片段直通
-        return;
-      }
-      if (res.status === 409) {
-        await setActionError('配置已被其他修改更新（冲突）',
-          '已刷新，基于最新配置重试',
-          {label: '重试', run: function () { return doMpWizardSubmit(); }});
-        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
-        return;
-      }
-      var msg = (d && d.error) || ('创建失败 · HTTP ' + res.status);
-      UI.toast(msg, 'error');
-      await setActionError(msg, null,
-        {label: '重试', run: function () { return doMpWizardSubmit(); }});
-    } catch (e) {
-      UI.toast('创建请求异常：' + (e && e.message), 'error');
-      await setActionError('创建请求异常：' + (e && e.message), null,
-        {label: '重试', run: function () { return doMpWizardSubmit(); }});
-    }
-  }
-
-  /* ── A4 向导出口（UI/UX P2 Task 3）：成果卡 + 接入片段直通 ──
-     用户拍板：不自动淡出返回（复制会被打断）—「完成」按钮手动返回。 */
-
-  function renderWizardDone() {
-    var b = $('mpPools');
-    if (!b || !_wizardDone) return;
-    var names = _wizardDone.pools || [];
-    b.innerHTML = '<div class="mp-wizard-done">'
-      + '<div class="mp-wizard-done-hdr">已创建 ' + names.length
-      + ' 个逻辑模型池</div>'
-      + '<p class="mp-hint">agent 产品只需配置一次 '
-      + '<span class="mono">iff/&lt;池名&gt;</span> — 复制片段即可接入，'
-      + '之后换模型无需改客户端。</p>'
-      + names.map(function (n) {
-          return '<div class="mp-wizard-done-row">'
-            + '<span class="mono">iff/' + esc(n) + '</span>'
-            + '<button type="button" data-mp-copy-pool="' + esc(n)
-            + '" data-mp-copy="openai">复制 OpenAI 片段</button>'
-            + '</div>';
-        }).join('')
-      + '<div class="mp-edit-actions">'
-      + '<button type="button" data-mp-wizard-done="1">完成</button>'
-      + '</div>'
-      + '</div>';
-  }
-
-  async function doMpWizardDone() {
-    if (!_wizardDone) return;
-    _wizardDone = null;
-    await renderModelPools();   // 正常池列表（服务端此刻已配置）
-  }
-
-  // 成果卡直通复制：按池现组 _snippet（snippetText 同源），复用剪贴板路径
-  function doMpWizardDoneCopy(pool) {
-    _snippet = { pool: pool, openai: snippetText(pool, 'openai'),
-                 anthropic: snippetText(pool, 'anthropic') };
-    return doMpSnippetCopy('openai');
-  }
-
   // 候选目录（best-effort：拉取失败 → 手填降级，编辑器不因此不可用）
   /* 候选目录（v7.1.2）：唯一数据源 = GET /admin/model-pools/catalog。
      旧版前端自行刮 /models 与 /admin/cloud/providers 逆向猜 schema，
@@ -1302,12 +1325,14 @@
     return d;
   }
 
-  // 编辑器消费形态：字符串数组（下拉）+ index（候选生成）
+  // 候选目录消费形态：字符串数组（下拉）+ index（候选生成）+ 完整条目
+  // （local/cloud — cardDefault 角色预填启发式读 active/context_window；
+  // 终审 I1：裁剪掉 local 曾让四卡预填全部塌到「首个云」）
   async function fetchCandidateCatalog() {
     var cat = await fetchCatalog();
     if (!cat) return null;
     return { localValues: cat.localValues, cloudValues: cat.cloudValues,
-             index: cat.index };
+             index: cat.index, local: cat.local, cloud: cat.cloud };
   }
 
   // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
@@ -1749,15 +1774,14 @@
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
     if (pool) { doMpToggle(pool, !!t.checked); return; }
+    // T5：未配置卡下拉 → 建池会话（空值=占位项，忽略）
+    var cfgPool = t.getAttribute('data-mp-config-pool');
+    if (cfgPool && t.value) { doMpConfigSelect(cfgPool, t.value); return; }
     var inl = t.getAttribute('data-mp-inline-replace');
     if (inl && t.value) {
       var bar = inl.split('|');   // 'pool|candId'
       doMpInlineSelect(bar[0], bar[1], t.value);
       return;
-    }
-    var wsel = t.getAttribute('data-mp-wizard-sel');
-    if (wsel && _wizard && _wizard.roles[wsel]) {
-      _wizard.roles[wsel].selected = t.value || null;
     }
   }
 
@@ -1861,20 +1885,18 @@
     // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
     var tlPool = t.getAttribute('data-mp-tl-toggle');
     if (tlPool) { doMpTimelineToggle(tlPool); return; }
+    // T5：树行点击 → C2 行内诊断（target 可能是行内 span → closest 爬行）
+    var treeRow = (typeof t.closest === 'function')
+      ? t.closest('[data-mp-tree-pool]') : null;
+    if (treeRow) {
+      doMpTreeDiag(treeRow.getAttribute('data-mp-tree-pool'));
+      return;
+    }
     // C4：劣化引导条（查看回退链 / 关闭）
     var dgView = t.getAttribute('data-mp-degrade-view');
     if (dgView) { doMpDegradeView(dgView); return; }
     var dgDismiss = t.getAttribute('data-mp-degrade-dismiss');
     if (dgDismiss) { doMpDegradeDismiss(dgDismiss); return; }
-    // A4：成果卡每池片段直通（data-mp-copy 是模态侧属性，box 侧独立）
-    var cpool = t.getAttribute('data-mp-copy-pool');
-    if (cpool) { doMpWizardDoneCopy(cpool); return; }
-    if (t.getAttribute('data-mp-wizard-done')) { doMpWizardDone(); return; }
-    var del = t.getAttribute('data-mp-wizard-del');
-    if (del) { doMpWizardToggle(del); return; }
-    var add = t.getAttribute('data-mp-wizard-add');
-    if (add) { doMpWizardToggle(add); return; }
-    if (t.getAttribute('data-mp-wizard-submit')) { doMpWizardSubmit(); }
   }
 
   var box = $('mpPools');
@@ -1892,7 +1914,6 @@
      向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
   function onKeyDown(ev) {
     if (!ev || !ev.key) return;
-    if (_wizard || _wizardDone) return;
     if (window.store && typeof window.store.get === 'function'
         && window.store.get('tab_active') !== 'tab-model-pools') return;
     var t = ev.target;
@@ -1930,8 +1951,6 @@
       if (typeof document !== 'undefined' && document.hidden) return;
       if (window.store && typeof window.store.get === 'function'
           && window.store.get('tab_active') !== 'tab-model-pools') return;
-      if (_wizard) return;
-      if (_wizardDone) return;   // A4：成果卡在屏 — 轮询不得冲掉
       return renderModelPools();   // 返回 promise 供测试/调用方等待
     } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
   }
@@ -1948,6 +1967,9 @@
   window.tabRenderers = window.tabRenderers || {};
   window.tabRenderers['tab-model-pools'] = renderModelPools;
   window.renderModelPools = renderModelPools;
+  window.mpLinkState = linkState;
+  window.mpTreeHtml = treeHtml;
+  window.mpCardsHtml = cardsHtml;
   window.doMpToggle = doMpToggle;
   window.doMpEdit = doMpEdit;
   window.doMpUndo = doMpUndo;
@@ -1956,6 +1978,8 @@
   window.doMpInlineSelect = doMpInlineSelect;
   window.doMpInlineApply = doMpInlineApply;
   window.doMpInlineCancel = doMpInlineCancel;
+  window.doMpConfigSelect = doMpConfigSelect;
+  window.doMpTreeDiag = doMpTreeDiag;
   window.mpPrimeInline = primeInline;
   window.doMpTimelineToggle = doMpTimelineToggle;
   window.doMpDegradeView = doMpDegradeView;
@@ -1964,10 +1988,6 @@
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
   window.mpEditApply = mpEditApply;
-  window.doMpWizardToggle = doMpWizardToggle;
-  window.doMpWizardSubmit = doMpWizardSubmit;
-  window.doMpWizardDone = doMpWizardDone;
-  window.doMpWizardDoneCopy = doMpWizardDoneCopy;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();
