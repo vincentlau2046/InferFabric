@@ -30,8 +30,10 @@
    `served_name → ModelConfig.type → 映射`。
 
 **语义边界（有意为之）：**
-- 映射是声明的唯一权威源 — 收窄方向同样生效（引擎换型后存盘的多余声明
-  不再铸证据）。
+- 映射是 DECLARED 基线的唯一权威源 — 收窄方向同样生效（引擎换型后存盘的
+  多余声明不再铸 DECLARED 证据）。注意（评审 M-3）：本地端点指纹不含引擎
+  类型，引擎换型后 store 里指纹匹配的旧 PROBED 条目仍会注入 — PROBED 覆盖
+  声明本就是证据分层的设计意图，只是「收窄」一词只对 DECLARED 基线成立。
 - store 实测条目（PROBED/FAILED/STALE，指纹匹配）仍覆盖声明 — 自愈不会
   翻案实测失败。
 - 回调缺省/返回 None 退回存盘声明（向后兼容，纯单测用法不受影响）。
@@ -48,6 +50,16 @@
 `mpEditPoolParam` 失效后补 `renderEditor()`（此前是唯一不重烘按钮态的编辑
 操作 — 预览通过后改池参数，按钮会亮着过期状态；`mpEditApply` 的
 `!validated` 守卫一直在，无绕过风险，纯 UI 态不一致）。
+
+**评审 I-1 追加修复（2026-10-28）：** 五个编辑操作都就地改 `_edit`（身份
+不变），`mpEditPreview` 的会话令牌只挡关闭/重开 — 预演在途时改动，
+迟到的预演完成会把 validated 重新置真并点亮应用钮（用户没见过结果的配置
+被放行 = 三段门禁绕过；bug #2 修复前按钮永不亮，该竞态潜伏不活跃，点亮
+路径使它变活）。修复 = 行内编辑器同款纪律：会话对象加 `rev` 代次，
+`mpEditInvalidated()` 统一失效拍子（validated=false + rev++，五 mutator
+全走），`mpEditPreview` 起拍自增并捕获代次，完成时身份或代次对不上即
+放弃（pv 改 await 后重查）。VM 测试以 noAwait + yieldTicks + _drain
+确定性复现在途窗口，先 RED 后 GREEN。
 
 ## 测试
 
