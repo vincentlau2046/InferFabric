@@ -11,7 +11,7 @@
 | 干净 worktree 复验 | ✅ | 提交树全量 1807 passed（沙箱工作区绿 ≠ 提交树绿） |
 | cross-review | ✅ | fresh-context subagent 评审：无 Critical；1 Important（I-1 在途改动竞态）当场 TDD 修复；M-4 补测；M-1/2/3/5 存档下方留用户决策 |
 | 版本 | ✅ | 7.6.1（补丁位自主升级，per version-bump-autonomy 记忆） |
-| 合并/部署 | ⏳ | 待用户授权：合生产 + push + proxy 重启（后端生效需重启；JS 可 SIGHUP） |
+| 合并/部署 | ✅ | 2026-10-28 用户放行（"ok，ok，顺带完成了"）：sglang 双协议顺带开启（331c4c6）→ 生产合并 6b00ccc + push；重启验收通过（目录 TXT=['openai','anthropic']；4 池 anthropic 干跑全 err=None；面板新 JS 已内联服务 mpEditApply×5）。PR-20 验收发现引擎幸存前提证伪（另见 pr20 STATUS.md 第二次验收记录） |
 
 ## 验证记录
 
