@@ -17,7 +17,7 @@
 | 评审遗留 6 cgroup | ✅ | 2026-10-27 | 实验解决：attached/detached 容器均不随 user unit 死；默认 KillMode 足够 |
 | 评审遗留 7 同名镜像 | ✅ | 2026-10-27 | spec.md 契约收窄：重启网关 ≠ 重配引擎 |
 | Quality gates | ✅ | 2026-10-28 | 全量 pytest ✅ 1802 + 干净 worktree 复验 ✅ + import 冒烟 ✅；fresh-context 重审 ✅ 无 Critical/Important（7 Minor 留用户决策，见 REVIEW.md） |
-| Release | ⏳ | | 合并生产 + push；生产重启验收（用户授权后） |
+| Release | ✅ | 2026-10-28 | 合并生产 5f5e68a + push ✅；用户授权重启验收 ✅ 拒连 9.77s（基线 91.7s）；TimeoutStopSec=75 已写入 unit + daemon-reload；版本 7.6.0 |
 
 ## 当前验证记录
 
@@ -46,18 +46,27 @@
   不使用临时 `p1_smoke.sh`（完整 ProxyManager 可能触发真实模型 reconcile/
   watchdog），一律用隔离的 `tests/integration/test_restart_smoke.py`。
 
-## 部署步骤（Release 时执行）
+## 部署步骤（已执行，2026-10-28）
 
-1. 合并 sandbox/main → 生产 main，push。
-2. 编辑 `~/.config/systemd/user/inferfabric-proxy.service`：加 `TimeoutStopSec=45`
-   （注意：该文件含真实凭据，不回显内容）。
-   ⚠️ 重审 Minor #2：各组件有界停机之和最坏 ≈65s（seal 5 + health_monitor 3 +
-   token_collector 10 + power_sampler 2 + watchdog 10 + drain 30 + flush 5），
-   45s 只覆盖预期路径（~32s）。评审建议 **TimeoutStopSec=75**；即使 SIGKILL 提前
-   到来，seal-first 已保护 state.db，损失仅限排空尾部 + 终刷。**45 vs 75 由
-   用户在发版时定夺。**
-3. `systemctl --user daemon-reload`。
-4. 重启（用户授权后）：`systemctl --user restart inferfabric-proxy`，测量验收指标。
+1. ✅ 合并 sandbox/main → 生产 main（5f5e68a），push。
+2. ✅ systemd unit 写入 `TimeoutStopSec=75`（用户定夺 45→75：采纳重审建议，
+   覆盖最坏停机链 ≈65s；`systemctl --user show` 确认 TimeoutStopUSec=1min 15s）。
+   （该文件含真实凭据，全程未回显内容。）
+3. ✅ `systemctl --user daemon-reload`。
+4. ✅ 重启验收（用户授权）：见下方验收记录。
+
+## 重启验收记录（2026-10-28 11:45）
+
+- 拒连窗口 **9.77s**（重发起到 :8999 应答；P0 基线 91.7s）：
+  旧进程关停 ~4s（旧代码，executor 挂死未复现）+ RestartSec=5 + 新进程 <1s 绑端口。
+  注：本次关停侧仍是旧代码；PR-20 的有界关停从下一次重启兑现。
+- 新进程 startup reconcile 干净：DB 记 exclusive+TXT、现实容器已死（重启前自行
+  崩溃）→ 按现实清为 idle，未继承垂死误判。
+- 引擎：无活容器可收养 → 11:45:50 重建 → ~30s 健康（热页缓存；P0 ~15min 是
+  含杀健康重建+冷盘）。三态收养的「收养/等待」分支留待下次带活引擎重启实测。
+- 切换期一个请求收规范 503（switch guard 按设计）；云路由全程正常。
+- 终态：exclusive + Qwen38-27B-TXT ✅ + GPU 31.8/32.6G + dashboard 200 +
+  /api/metrics 200。
 
 ## 面板发版（今后，零重启）
 
