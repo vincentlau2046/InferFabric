@@ -244,3 +244,164 @@ class TestWatchdogAutoRestart:
 
         # 不应进入 restarting
         assert "test-model" not in wd._restarting
+
+
+class TestWatchdogShutdownFence:
+    """PR-20 评审修复 4：关停围栏 —— 重启 worker 不得在关停后变更生命周期。
+
+    P0 场景：SIGTERM 后 watchdog.stop() 只 join 监控线程，已派发的
+    _restart_model 线程不受管 —— 可在 StateDB 封印后继续 reconcile/
+    switch/stop_service，把重启要保全的引擎杀掉。围栏语义：
+      - 每次 manager 变更在 _mutation_lock 下 check+mutate 原子执行；
+      - stop() 先置 _stop_event 再以同一把锁作屏障 —— 屏障之后不可能
+        有新变更溜进检查与调用之间（单次布尔检查关不住的竞态）；
+      - 在途变更要么在 fence_timeout 内完成，要么由进程硬退出截断。
+    """
+
+    def _mgr(self):
+        mgr = MagicMock()
+        mgr.active_services = ["test-model"]
+        mgr.state.get.return_value = ""  # switching_target 为空
+        model = MagicMock()
+        model.port = 8000
+        model.health_url = None
+        mgr.get_model.return_value = model
+        return mgr
+
+    def test_fenced_mutation_skips_after_stop_event(self):
+        """stop_event 置位后 _fenced 拦截变更，不执行 fn。"""
+        from inferfabric.watchdog import ModelWatchdog
+
+        wd = ModelWatchdog(self._mgr())
+        wd._stop_event.set()
+        called = []
+
+        ok, result = wd._fenced(lambda: called.append(1) or "r")
+
+        assert ok is False
+        assert result is None
+        assert called == []
+
+    def test_stop_waits_for_inflight_mutation(self):
+        """在途变更未完成时 stop() 不得返回（屏障），完成后才返回。"""
+        import threading
+        from inferfabric.watchdog import ModelWatchdog
+
+        wd = ModelWatchdog(self._mgr(), fence_timeout=5.0)
+        started, release = threading.Event(), threading.Event()
+
+        def slow_mutation():
+            started.set()
+            release.wait(5)
+
+        t = threading.Thread(target=lambda: wd._fenced(slow_mutation), daemon=True)
+        t.start()
+        assert started.wait(2)
+
+        stop_done = threading.Event()
+        stopper = threading.Thread(target=lambda: (wd.stop(), stop_done.set()),
+                                   daemon=True)
+        stopper.start()
+        # 在途变更未释放 → stop() 必须还在屏障上等
+        assert not stop_done.wait(0.3), "stop() 在在途变更未完成时提前返回"
+        release.set()
+        assert stop_done.wait(3), "stop() 在在途变更完成后应返回"
+
+    def test_stop_bounded_when_mutation_stuck(self):
+        """变更卡死时 stop() 也必须在 fence_timeout 内有界返回。"""
+        import threading
+        import time as _t
+        from inferfabric.watchdog import ModelWatchdog
+
+        wd = ModelWatchdog(self._mgr(), fence_timeout=0.2)
+        started, release = threading.Event(), threading.Event()
+
+        def stuck_mutation():
+            started.set()
+            release.wait(10)
+
+        t = threading.Thread(target=lambda: wd._fenced(stuck_mutation), daemon=True)
+        t.start()
+        assert started.wait(2)
+
+        t0 = _t.monotonic()
+        wd.stop()
+        elapsed = _t.monotonic() - t0
+        release.set()
+        assert elapsed < 2.0, f"stop() 应有界返回（fence_timeout=0.2），实际 {elapsed:.1f}s"
+
+    def test_restart_worker_aborts_between_mutations(self):
+        """评审场景：reconcile 中途开始关停 → worker 不得再 switch/stop_service。"""
+        import threading
+        from inferfabric.watchdog import ModelWatchdog
+
+        mgr = self._mgr()
+        wd = ModelWatchdog(mgr, fence_timeout=5.0)
+        in_reconcile, release = threading.Event(), threading.Event()
+
+        def slow_reconcile():
+            in_reconcile.set()
+            release.wait(5)
+
+        mgr.reconcile.side_effect = slow_reconcile
+
+        worker = threading.Thread(target=wd._restart_model, args=("test-model",),
+                                  daemon=True)
+        worker.start()
+        assert in_reconcile.wait(2)
+
+        wd._stop_event.set()  # SIGTERM：关停开始，worker 还停在 reconcile 里
+        release.set()
+        worker.join(3)
+
+        mgr.switch.assert_not_called()
+        mgr.stop_service.assert_not_called()
+        assert not worker.is_alive()
+
+    def test_stop_joins_spawned_restart_worker(self):
+        """经 _check_all 派发的 worker 必须注册并在 stop() 返回前 join。"""
+        import threading
+        from inferfabric.watchdog import ModelWatchdog
+
+        mgr = self._mgr()
+        wd = ModelWatchdog(mgr, fail_threshold_alert=1, fail_threshold_restart=1,
+                           auto_restart=True, check_interval=60, fence_timeout=5.0)
+        wd._fail_counts["test-model"] = 0
+        in_reconcile, release = threading.Event(), threading.Event()
+
+        def slow_reconcile():
+            in_reconcile.set()
+            release.wait(5)
+
+        mgr.reconcile.side_effect = slow_reconcile
+
+        with patch("inferfabric.health.check_http_status", return_value="❌"):
+            wd._check_all()
+
+        assert in_reconcile.wait(2)
+        with wd._lock:
+            workers = list(wd._workers)
+        assert len(workers) == 1, "重启 worker 必须注册进 _workers"
+
+        stop_done = threading.Event()
+        stopper = threading.Thread(target=lambda: (wd.stop(), stop_done.set()),
+                                   daemon=True)
+        stopper.start()
+        release.set()
+        assert stop_done.wait(3)
+        assert not workers[0].is_alive(), "stop() 返回后 worker 线程必须已结束"
+
+    def test_check_all_does_not_spawn_worker_after_stop(self):
+        """stop() 后 _check_all 不得再派发新重启线程。"""
+        from inferfabric.watchdog import ModelWatchdog
+
+        mgr = self._mgr()
+        wd = ModelWatchdog(mgr, fail_threshold_alert=1, fail_threshold_restart=1,
+                           auto_restart=True, check_interval=60)
+        wd._stop_event.set()
+
+        with patch("inferfabric.health.check_http_status", return_value="❌"):
+            wd._check_all()
+
+        with wd._lock:
+            assert wd._workers == set(), "关停后不得派发新 worker"

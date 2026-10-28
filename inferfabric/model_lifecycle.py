@@ -47,6 +47,22 @@ class ModelLifecycle:
 
     # ── Start Model (dispatch) ────────────────────────────────────
 
+    def _engine_already_running(self, model: ModelConfig) -> bool:
+        """PR-20 ②（评审修复 3）：本模型自己的引擎是否已在跑？
+
+        非变更性探测（proc.engine_exists，见 process_manager/facade.py），
+        用于新分配守卫之前的现实识别：proxy 重启后幸存的引擎容器自己
+        占着 VRAM，若照走 CUDA clear + VRAM 预算守卫，会把「自己」当
+        「外来占用」拒之门外 —— 收养路径永远到不了 start_ninfer。
+
+        契约：proc.engine_exists 返回字面 True 才算在场（`is True` 判定，
+        防 MagicMock 替身 truthy 误跳守卫）；探测异常按不在场处理。
+        """
+        try:
+            return self._proc.engine_exists(model) is True
+        except Exception:
+            return False
+
     def _start_model(self, model: ModelConfig) -> dict:
         """Unified model start entry — dispatches by type.
 
@@ -77,17 +93,25 @@ class ModelLifecycle:
         if model is None:
             return {"status": "error", "message": f"Model {model_name} not found in YAML after reload"}
 
+        # PR-20 ②（评审修复 3）: 现实识别先于新分配守卫。本模型的幸存引擎
+        # 在场时跳过 CUDA clear 与 VRAM 预算：收养/等待路径不分配任何东西，
+        # 重建路径先 docker stop 释放旧占用再分配 —— 三条路径 VRAM 均自洽。
+        # 守卫不因此全局关闭：引擎不在场时照常生效（全新部署语义不变）。
+        engine_present = self._engine_already_running(model)
+
         # P1-6: Clear GPU CUDA state before deploying an exclusive model.
         # After ComfyUI (or any GPU-heavy service) exits, the CUDA driver may
         # retain a fragmented memory map. Clearing it here ensures the new
         # model can allocate large contiguous blocks without hitting CUDA OOM
         # even though nvidia-smi shows sufficient free memory.
-        if GPU_AUTO_CLEAR_CUDA_STATE and model.is_exclusive and target_mode == GPUMode.EXCLUSIVE:
+        # 幸存引擎在场时跳过 —— gpu-reset 会摧毁加载中/健在的容器（15min 冷启）。
+        if (not engine_present and GPU_AUTO_CLEAR_CUDA_STATE
+                and model.is_exclusive and target_mode == GPUMode.EXCLUSIVE):
             self._proc.clear_gpu_cuda_state()
 
         # PR-1: VRAM budget guard — reject if peak would exceed 97% of GPU
         # (95% was too tight: bge-m3 ~480MB + peak_vram_mb leaves <10MB margin)
-        if model.gpu_role != "none":
+        if not engine_present and model.gpu_role != "none":
             if model.peak_vram_mb > 0:
                 current_vram = gpu_used_mb()
                 gpu_total = gpu_total_mb()
@@ -196,31 +220,35 @@ class ModelLifecycle:
             }
 
         # ── VRAM headroom check (unified with _deploy_model peak_vram_mb guard) ──
-        if model.peak_vram_mb > 0:
-            current_vram = gpu_used_mb()
-            gpu_total = gpu_total_mb()
-            budget = int(gpu_total * 0.97)
-            if current_vram + model.peak_vram_mb > budget:
-                return {
-                    "status": "error",
-                    "message": (
-                        f"VRAM budget exceeded: current {current_vram}MB + "
-                        f"peak {model.peak_vram_mb}MB = {current_vram + model.peak_vram_mb}MB "
-                        f"> budget {budget}MB (97% of {gpu_total}MB)"
-                    ),
-                }
-        elif model.typical_vram_pct > 0:
-            # Fallback to legacy pct-based check for models without peak_vram_mb
-            current_pct = self._gpu_state._get_current_vram_pct()
-            if current_pct + model.typical_vram_pct > 97:
-                return {
-                    "status": "error",
-                    "message": (
-                        f"Insufficient GPU memory: current ~{current_pct:.0f}%, "
-                        f"{model.name} needs ~{model.typical_vram_pct}%, "
-                        f"total would be ~{current_pct + model.typical_vram_pct:.0f}% (limit 95%)."
-                    ),
-                }
+        # PR-20 ②（评审修复 3）: 幸存引擎在场 → 跳过新分配守卫（同 _deploy_model，
+        # peak 与 pct 两个分支一起跳 —— 守卫测的是「新分配叠加坡上」，在场引擎
+        # 走收养/等待/先停后建，不构成叠加）
+        if not self._engine_already_running(model):
+            if model.peak_vram_mb > 0:
+                current_vram = gpu_used_mb()
+                gpu_total = gpu_total_mb()
+                budget = int(gpu_total * 0.97)
+                if current_vram + model.peak_vram_mb > budget:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"VRAM budget exceeded: current {current_vram}MB + "
+                            f"peak {model.peak_vram_mb}MB = {current_vram + model.peak_vram_mb}MB "
+                            f"> budget {budget}MB (97% of {gpu_total}MB)"
+                        ),
+                    }
+            elif model.typical_vram_pct > 0:
+                # Fallback to legacy pct-based check for models without peak_vram_mb
+                current_pct = self._gpu_state._get_current_vram_pct()
+                if current_pct + model.typical_vram_pct > 97:
+                    return {
+                        "status": "error",
+                        "message": (
+                            f"Insufficient GPU memory: current ~{current_pct:.0f}%, "
+                            f"{model.name} needs ~{model.typical_vram_pct}%, "
+                            f"total would be ~{current_pct + model.typical_vram_pct:.0f}% (limit 95%)."
+                        ),
+                    }
 
         # ── Start only the new service — centralized type dispatch ──
         log.info("Shared add (incremental): %s", model.name)

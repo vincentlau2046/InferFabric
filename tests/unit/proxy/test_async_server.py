@@ -458,3 +458,133 @@ def test_client_rst_stops_worker(monkeypatch):
 
     _run(scenario())
     ex.shutdown(wait=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# PR-20 ① 有界排空 + 硬退出（重启零中断）
+# ═══════════════════════════════════════════════════════════════
+
+class TestBuildRunnerBoundedDrain:
+    def test_default_drain_30s(self, monkeypatch):
+        """AppRunner 必须带 shutdown_timeout=30（P0 实测 60s 排空上限是
+        91.7s 拒连窗口的组成部分；有界排空是硬前提）。"""
+        recorded = {}
+
+        class FakeAppRunner:
+            def __init__(self, app, **kwargs):
+                recorded.update(kwargs)
+
+        monkeypatch.setattr(aserver.web, "AppRunner", FakeAppRunner)
+        aserver._build_runner(_fake_pm())
+        assert recorded["shutdown_timeout"] == 30.0
+        # 既有语义不回退
+        assert recorded["keepalive_timeout"] == 75
+        assert recorded["handler_cancellation"] is True
+
+    def test_env_override_drain(self, monkeypatch):
+        recorded = {}
+
+        class FakeAppRunner:
+            def __init__(self, app, **kwargs):
+                recorded.update(kwargs)
+
+        monkeypatch.setattr(aserver.web, "AppRunner", FakeAppRunner)
+        monkeypatch.setenv("EDGE_SHUTDOWN_DRAIN", "5")
+        aserver._build_runner(_fake_pm())
+        assert recorded["shutdown_timeout"] == 5.0
+
+
+class TestShutdownGracefully:
+    """关停序列：封印 → 停后台 → 端口收 → 有界排空 → 硬退出。
+
+    硬退出绕过非守护 executor 线程 join（P0 实测 60–91.7s 挂死根因）。
+    """
+
+    def _fakes(self):
+        calls = []
+
+        class FakeSite:
+            async def stop(self):
+                calls.append("site.stop")
+
+        class FakeRunner:
+            async def cleanup(self):
+                calls.append("runner.cleanup")
+
+        mgr = MagicMock()
+        mgr.begin_shutdown = lambda reason: calls.append("begin_shutdown")
+        mgr.telemetry.logger.flush_blocking = lambda timeout=5: calls.append("reqlog.flush")
+        watchdog = MagicMock()
+        watchdog.stop = lambda: calls.append("watchdog.stop")
+        ev = MagicMock()
+        ev.set = lambda: calls.append("event.set")
+        executor = MagicMock()
+        executor.shutdown = lambda **kw: calls.append("executor.shutdown")
+        notify = lambda msg: calls.append(f"sd:{msg}")
+        exit_fn = lambda code: calls.append(f"exit({code})")
+        return calls, mgr, watchdog, ev, FakeSite(), FakeRunner(), executor, notify, exit_fn
+
+    def test_sequence_order_and_hard_exit(self, monkeypatch):
+        monkeypatch.delenv("EDGE_HARD_EXIT", raising=False)
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, runner, ex, notify, exit_fn))
+        assert calls == [
+            "begin_shutdown", "event.set", "watchdog.stop",
+            "site.stop", "runner.cleanup", "reqlog.flush", "executor.shutdown",
+            "sd:STOPPING=1", "exit(0)",
+        ]
+
+    def test_final_flush_failure_does_not_block_exit(self, monkeypatch):
+        """评审修复 5：终刷失败不得阻断关停（日志尽力而为，退出必须发生）。"""
+        monkeypatch.delenv("EDGE_HARD_EXIT", raising=False)
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+        mgr.telemetry.logger.flush_blocking = MagicMock(
+            side_effect=RuntimeError("db busy"))
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, runner, ex, notify, exit_fn))
+        assert calls[-1] == "exit(0)"
+
+    def test_seal_failure_does_not_block_shutdown(self, monkeypatch):
+        monkeypatch.delenv("EDGE_HARD_EXIT", raising=False)
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+        mgr.begin_shutdown = MagicMock(side_effect=RuntimeError("seal boom"))
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, runner, ex, notify, exit_fn))
+        assert "site.stop" in calls
+        assert calls[-1] == "exit(0)"
+
+    def test_drain_error_still_hard_exits(self, monkeypatch):
+        monkeypatch.delenv("EDGE_HARD_EXIT", raising=False)
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+
+        class BrokenRunner:
+            async def cleanup(self):
+                raise RuntimeError("drain boom")
+
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, BrokenRunner(), ex, notify, exit_fn))
+        assert calls[-1] == "exit(0)"
+
+    def test_total_drain_deadline_bounds_cleanup(self, monkeypatch):
+        monkeypatch.setenv("EDGE_SHUTDOWN_DRAIN", "0.02")
+        monkeypatch.setenv("EDGE_HARD_EXIT", "1")
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+
+        class SlowRunner:
+            async def cleanup(self):
+                await asyncio.sleep(0.25)
+
+        started = time.monotonic()
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, SlowRunner(), ex, notify, exit_fn))
+        assert time.monotonic() - started < 0.15
+        assert calls[-1] == "exit(0)"
+
+    def test_hard_exit_env_off(self, monkeypatch):
+        monkeypatch.setenv("EDGE_HARD_EXIT", "0")
+        calls, mgr, wd, ev, site, runner, ex, notify, exit_fn = self._fakes()
+        asyncio.run(aserver._shutdown_gracefully(
+            mgr, wd, ev, site, runner, ex, notify, exit_fn))
+        assert "exit(0)" not in calls
+        assert calls[-1] == "sd:STOPPING=1"
