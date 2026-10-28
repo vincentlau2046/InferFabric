@@ -72,14 +72,18 @@ class TestLocalCatalog:
         assert cat["local"][0]["name"] == "qwen-small"
 
     def test_local_protocols_by_engine(self):
-        # vllm 有本地 anthropic 转发路径（forward_anthropic_local）→ 双协议
-        # 声明；其余引擎保守只声明 openai（declared 态，证据系统可探实）
+        # vllm/ninfer 有本地 anthropic 路径（forward_anthropic_local 直通
+        # 引擎原生 /v1/messages，不翻译）→ 双协议声明。ninfer 双协议有 7 天
+        # 线上实证（6615 TXT + 3483 VL 次 /v1/messages → LOCAL，池 bug #1）。
+        # 其余引擎保守只声明 openai（declared 态，证据系统可探实）
         pm = CatalogPM(model_dicts=[_llm("a", type_="vllm"),
-                                    _llm("b", type_="ninfer")])
+                                    _llm("b", type_="ninfer"),
+                                    _llm("c", type_="sglang")])
         cat = build_catalog(pm)
         by_name = {e["name"]: e for e in cat["local"]}
         assert by_name["a"]["protocols"] == ["openai", "anthropic"]
-        assert by_name["b"]["protocols"] == ["openai"]
+        assert by_name["b"]["protocols"] == ["openai", "anthropic"]
+        assert by_name["c"]["protocols"] == ["openai"]
 
     def test_no_mgr_no_local(self):
         cat = build_catalog(SimpleNamespace(mgr=None, cloud=SimpleNamespace(

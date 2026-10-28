@@ -119,6 +119,7 @@ class ProxyManager:
                                  if m.served_name},
             known_providers=lambda: set(self.cloud.providers or ()),
             provider_route=self._provider_route_urls,
+            local_protocols=self._local_protocols,
         )
         self.pool_registry.load()
         # P2：上游凭证错误（401/403）的端点冷却（内存，进程内；
@@ -165,6 +166,16 @@ class ProxyManager:
             return {"openai_base": "", "anthropic_base": ""}
         return {"openai_base": getattr(cfg, "openai_base", "") or "",
                 "anthropic_base": getattr(cfg, "anthropic_base", "") or ""}
+
+    def _local_protocols(self, served_name: str) -> "list[str] | None":
+        """registry 存量自愈回调（池 bug #1）：served_name → 该模型引擎的
+        本地协议声明。与目录（build_catalog）同源同映射 — 目录给新建候选
+        存正确声明，这里让目录修正前的存量配置免迁移自愈。"""
+        from inferfabric.model_pool.catalog import local_protocols_for_engine
+        for m in self.mgr._models.values():
+            if m.served_name == served_name:
+                return local_protocols_for_engine(m.type)
+        return None
 
     def new_request_id(self) -> str:
         """Generate a unique, thread-safe request ID for logging.

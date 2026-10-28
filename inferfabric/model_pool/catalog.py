@@ -24,12 +24,19 @@ import logging
 
 log = logging.getLogger("inferfabric.model_pool.catalog")
 
-# 本地引擎 → 声明协议。vllm 有本地 anthropic 转发路径
-# （forward_anthropic_local）；其余引擎保守只声明 openai — 声明可被
-# 证据系统探测推翻/证实，宁可少声明不虚报。
+# 本地引擎 → 声明协议。vllm/ninfer 有本地 anthropic 路径（forward_anthropic_local
+# 直通引擎原生 /v1/messages，不翻译）→ 双协议声明；ninfer 有 7 天线上实证
+# （6615 TXT + 3483 VL 次 /v1/messages → LOCAL，2026-10-28 池 bug #1）。
+# 其余引擎保守只声明 openai — 声明可被证据系统探测推翻/证实，宁可少声明不虚报。
 _LOCAL_PROTOCOLS: dict[str, list[str]] = {
     "vllm": ["openai", "anthropic"],
+    "ninfer": ["openai", "anthropic"],
 }
+
+
+def local_protocols_for_engine(engine: str) -> list[str]:
+    """引擎的本地协议声明（目录与 registry 存量自愈共用同一映射源）。"""
+    return list(_LOCAL_PROTOCOLS.get(engine, ["openai"]))
 
 
 def build_catalog(pm) -> dict:
@@ -70,7 +77,7 @@ def _local_entries(pm) -> list[dict]:
             "engine": engine,
             "modality": m.get("modality"),
             "context_window": m.get("context_window"),
-            "protocols": list(_LOCAL_PROTOCOLS.get(engine, ["openai"])),
+            "protocols": local_protocols_for_engine(engine),
         })
     return out
 

@@ -34,13 +34,15 @@ def _raw_config(revision=0):
     }
 
 
-def _make_registry(tmp_path, known_local=None, known_providers=None):
+def _make_registry(tmp_path, known_local=None, known_providers=None,
+                   local_protocols=None):
     return PoolRegistry(
         config_path=tmp_path / "model_pools.yaml",
         evidence_path=tmp_path / "evidence.json",
         known_local=known_local if known_local is not None else {"qwen-small"},
         known_providers=known_providers if known_providers is not None else {"prov_a"},
         provider_base=lambda p: "https://base/v1" if p == "prov_a" else "",
+        local_protocols=local_protocols,
     )
 
 
@@ -148,6 +150,45 @@ class TestCandidateResolution:
         assert c2.evidence["openai"].state == EvidenceState.DECLARED
         # 未声明的协议 → UNKNOWN
         assert c2.evidence.get("anthropic", Evidence(EvidenceState.UNKNOWN, "", (), "", "", "")).state == EvidenceState.UNKNOWN
+
+    def test_local_declared_rederived_from_live_engine_map(self, tmp_path):
+        # 池 bug #1：目录修正（ninfer → 双协议）后，存量配置里保存的
+        # declared_protocols（建池时只存了 ["openai"]）不得钉死证据 —
+        # local 候选的 DECLARED 基线按引擎实时映射推导（local_protocols
+        # 回调，proxy_manager 接 models.d 引擎类型），存量配置免迁移自愈。
+        reg = _make_registry(
+            tmp_path, local_protocols=lambda n: ["openai", "anthropic"])
+        reg.update(_raw_config(), expected_revision=0)
+        c2 = reg.snapshot().pools["fast"].candidates[1]  # 存盘只声明 openai
+        assert c2.evidence["openai"].state == EvidenceState.DECLARED
+        assert c2.evidence["anthropic"].state == EvidenceState.DECLARED
+
+    def test_local_rederive_store_override_still_wins(self, tmp_path):
+        # 自愈只重铸 DECLARED 基线：store 里的实测/失败条目（指纹匹配）
+        # 仍覆盖声明 — 引擎实测不支持 anthropic 时不会被自愈翻案
+        from inferfabric.model_pool.evidence import endpoint_fingerprint
+        reg = _make_registry(
+            tmp_path, local_protocols=lambda n: ["openai", "anthropic"])
+        fp = endpoint_fingerprint("local", "qwen-small", "", "qwen-small")
+        reg.evidence.record("local:qwen-small:qwen-small:anthropic", Evidence(
+            state=EvidenceState.FAILED, protocol="anthropic", features=(),
+            fingerprint=fp, recorded_at="t", source="admin-probe"))
+        reg.update(_raw_config(), expected_revision=0)
+        c2 = reg.snapshot().pools["fast"].candidates[1]
+        assert c2.evidence["anthropic"].state == EvidenceState.FAILED
+        assert c2.evidence["openai"].state == EvidenceState.DECLARED
+
+    def test_local_rederive_narrows_stale_dual_declaration(self, tmp_path):
+        # 反向自愈：引擎实时映射收窄时（如 vllm 换 ollama），存盘的多余
+        # 声明不再铸造 DECLARED 证据 — 映射是声明的唯一权威源
+        reg = _make_registry(tmp_path, local_protocols=lambda n: ["openai"])
+        raw = _raw_config()
+        raw["pools"]["fast"]["candidates"][1][
+            "declared_protocols"] = ["openai", "anthropic"]
+        reg.update(raw, expected_revision=0)
+        c2 = reg.snapshot().pools["fast"].candidates[1]
+        assert set(c2.evidence) == {"openai"}
+        assert c2.evidence["openai"].state == EvidenceState.DECLARED
 
 
 class TestCASUpdate:

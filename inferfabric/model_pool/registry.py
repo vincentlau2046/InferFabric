@@ -91,7 +91,8 @@ class PoolRegistry:
                  known_local: _KnownRef = (),
                  known_providers: _KnownRef = (),
                  provider_base: Callable[[str], str] | None = None,
-                 provider_route: Callable[[str], dict[str, str]] | None = None):
+                 provider_route: Callable[[str], dict[str, str]] | None = None,
+                 local_protocols: Callable[[str], list[str] | None] | None = None):
         self._config_path = Path(config_path)
         self._lock = threading.Lock()
         self._snapshot: RegistrySnapshot = _EMPTY_SNAPSHOT
@@ -102,6 +103,10 @@ class PoolRegistry:
         self._known_providers = _as_getter(known_providers)
         self._provider_base = provider_base or (lambda provider: "")
         self._provider_route = provider_route
+        # served_name → 引擎本地协议声明（池 bug #1）：local 候选的
+        # DECLARED 基线按实时映射推导，存量配置里过期的 declared_protocols
+        # 免迁移自愈；缺省（无回调）/返回 None 时退回存盘声明
+        self._local_protocols = local_protocols
         self.evidence = EvidenceStore(evidence_path)
         # 运行状态（v7.1.0 三态，供 GET /admin/model-pools）：
         # configured=True 曾成功加载/写入过有效配置（快照/raw 可用）
@@ -373,10 +378,20 @@ class PoolRegistry:
         return RegistrySnapshot(revision=parsed.revision, pools=pools)
 
     def _evidence_for(self, cand: CandidateConfig, fp: str) -> dict[str, Evidence]:
-        """证据注入：store 记录优先（含 FAILED/STALE 覆盖声明），否则用声明推导。"""
+        """证据注入：store 记录优先（含 FAILED/STALE 覆盖声明），否则用声明推导。
+
+        local 候选的声明基线按引擎实时映射推导（local_protocols 回调，
+        池 bug #1）：建池时存进配置的 declared_protocols 可能是目录修正
+        前的旧值（如 ninfer 曾只存 openai），实时推导免迁移自愈 — 映射是
+        声明的唯一权威源，收窄方向同样生效；回调缺省/返回 None 退回存盘值。"""
         prefix = _evidence_key_prefix(cand)
         out: dict[str, Evidence] = {}
-        for protocol in cand.declared_protocols:
+        declared = cand.declared_protocols
+        if cand.kind == "local" and self._local_protocols is not None:
+            live = self._local_protocols(cand.model_name)
+            if live is not None:
+                declared = list(live)
+        for protocol in declared:
             out[protocol] = Evidence(
                 state=EvidenceState.DECLARED, protocol=protocol,
                 features=cand.features, fingerprint=fp,

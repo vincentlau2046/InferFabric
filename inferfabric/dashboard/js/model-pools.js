@@ -1428,7 +1428,7 @@
     html += '<div id="mpPreview" class="mp-preview"></div>'
       + '<div class="mp-edit-actions">'
       + '<button type="button" data-mp-act="preview">预览</button>'
-      + '<button type="button" data-mp-act="apply"'
+      + '<button type="button" id="mpEditApply" data-mp-act="apply"'
       + (_edit.validated ? '' : ' disabled title="需先通过预览"')
       + '>应用</button>'
       + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
@@ -1526,6 +1526,8 @@
     if (!_edit) return;
     _edit.work.pools[_edit.pool][key] = value;
     _edit.validated = false;
+    renderEditor();   // 与其他编辑操作一致：失效必须重烘按钮态
+                      // （防预览通过后改池参数，应用钮仍亮着旧状态）
   }
 
   // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
@@ -1620,6 +1622,14 @@
       return;
     }
     _edit.validated = true;
+    // 外科手术式点亮：预览结果刚写进 #mpPreview，renderEditor 整模态重绘
+    // 会把它抹掉 — 只重烘应用钮的 disabled/title（池 bug #2：预览通过后
+    // 按钮仍灰，用户无法应用）
+    var applyBtn = $('mpEditApply');
+    if (applyBtn) {
+      applyBtn.removeAttribute('disabled');
+      applyBtn.removeAttribute('title');
+    }
     UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
   }
 
