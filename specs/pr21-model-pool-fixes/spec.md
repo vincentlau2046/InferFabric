@@ -22,8 +22,9 @@
 
 **修复（两层，同一映射源）：**
 1. `catalog._LOCAL_PROTOCOLS["ninfer"] = ["openai", "anthropic"]`（新池从目录
-   拿到正确声明）；sglang 保守维持 openai-only（muse-glimmer-vl 无本地
-   anthropic 实证 — 宁可少声明不虚报，用户确认后一行可加）。
+   拿到正确声明）；sglang 同样双协议（2026-10-28 用户确认「本地框架默认
+   双协议」后顺带开启 — 声明可被证据系统探实/推翻，muse-glimmer-vl 若
+   实测不支持 anthropic 会被 FAILED 条目覆盖，不虚报）。
 2. `PoolRegistry(local_protocols=...)` 回调：local 候选的 DECLARED 基线按
    引擎实时映射推导，**存量配置免迁移自愈**（建池时存进的旧
    `declared_protocols` 不再钉死证据）。proxy_manager 接线
@@ -63,7 +64,7 @@
 
 ## 测试
 
-- 单测：catalog ninfer 双协议 + sglang 保守钉住；registry 自愈三向
+- 单测：catalog vllm/ninfer/sglang 双协议 + ollama 保守钉住；registry 自愈三向
   （补宽 / store 覆盖仍赢 / 收窄）；VM 逻辑层钉预览点亮（attrOps）。
 - 浏览器硬门禁 `test_05c`（真实 chromium + 真实 scratch 代理全链路）：
   premium 建池（在跑 TXT）→ 开编辑器 → 预览 → **双协议均「选择」+ 应用钮
