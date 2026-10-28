@@ -325,8 +325,8 @@ def test_02_select_apply_creates_pool_flips_card_and_tree(page, scratch_base):
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)
     # fast 卡选「在跑」的 TXT（真实主路径 — ready 要求模型实际运行）。
-    # ninfer 引擎只声明 openai → anthropic 预演无候选；门禁语义 =
-    # 两协议「均」无可用候选才拦（previewWork noneChosen === outs.length）
+    # ninfer 双协议声明（池 bug #1 修复后）→ openai/anthropic 预演均选择
+    # TXT；门禁语义仍是两协议「均」无可用候选才拦（noneChosen === outs.length）
     sel = page.locator('select[data-mp-config-pool="fast"]')
     sel.select_option(value=f"local:{TXT_MODEL}")
     _apply_inline_diff(page)
@@ -351,8 +351,9 @@ def test_02_select_apply_creates_pool_flips_card_and_tree(page, scratch_base):
 def test_03_gate_blocks_not_ready_local_target(page, scratch_base):
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)
-    # premium 卡选未在跑的 SwapTarget：openai no_ready_target +
-    # anthropic no_compatible_target → 两协议均无可用候选 — 已阻止应用
+    # premium 卡选未在跑的 SwapTarget（同 ninfer 双协议声明，池 bug #1
+    # 修复后两协议均过证据门）：双双 no_ready_target → 两协议均无可用
+    # 候选 — 已阻止应用
     page.locator('select[data-mp-config-pool="premium"]') \
         .select_option(value=f"local:{SWAP_MODEL}")
     # 会话首渲染前 diff 条尚不存在（validate + 两协议 dry-run 在途）；
@@ -428,6 +429,70 @@ def test_05_advanced_modal_esc(page, scratch_base):
         time.sleep(0.2)
     assert n == 0, "Esc 未关闭编辑器模态"
     assert page.locator("#mpModal").inner_text().strip() == ""
+
+
+# ── 5c. 模态编辑器全路径：预览 → 双协议识别 + 应用钮点亮 → 应用 ─────
+
+def test_05c_modal_preview_enables_apply_and_applies(page, scratch_base):
+    """池 bug #1+#2 的真实浏览器交互钉子（2026-10-28）：
+    bug #1 — ninfer 本地模型双协议识别失效（anthropic 预演永远无候选，
+    本地框架原生双协议服务不被认）；
+    bug #2 — 模态预览通过后应用钮仍灰（renderEditor 烘焙进 DOM 的
+    disabled 属性没随 validated=true 重烘）。
+    主路径：premium 建池（在跑 TXT 单候选）→ 开高级编辑器 → 预览 →
+    双协议均「选择 TXT」且应用钮可点 → 应用 → 编辑器收尾 + revision
+    推进（配置真落盘）。"""
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # premium 建池：在跑 TXT 单候选（premium 在 test_03 被拦未配置，干净）
+    page.locator('select[data-mp-config-pool="premium"]') \
+        .select_option(value=f"local:{TXT_MODEL}")
+    _apply_inline_diff(page)
+    _poll(page, "#mp-card-premium", "e => e.className", "if-card mp-pool",
+          msg="premium 卡未转已配置")
+    rev_before = _get_json(scratch_base, "/admin/model-pools")["revision"]
+    # 开高级编辑器 → 预览
+    page.click('#mp-card-premium [data-mp-edit="premium"]')
+    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
+    page.click('#mpModal [data-mp-act="preview"]')
+    # 预览结果：双协议均有选择（选择行显示候选 id；premium-1 = 本地 TXT）。
+    # bug #1 修复前 anthropic 行是 no_compatible_target
+    deadline = time.monotonic() + 15
+    pv = ""
+    while time.monotonic() < deadline:
+        pv = page.eval_on_selector_all(
+            "#mpPreview", "els => els.length ? els[0].innerText : ''")
+        if "openai → 选择" in pv and "anthropic → 选择" in pv:
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail(f"预览未完成或双协议未识别（期望 openai/anthropic 均有"
+                    f"选择；bug #1 修复前 anthropic 是 no_compatible_target）: {pv!r}")
+    assert "no_" not in pv and "无可用候选" not in pv, pv
+    # bug #2 修复前：预览通过但应用钮保持 disabled（编辑态没重烘进 DOM）
+    apply_disabled = page.eval_on_selector_all(
+        "#mpModal [data-mp-act='apply']",
+        "els => els.length && els[0].disabled")
+    assert not apply_disabled, "预览通过后应用钮必须点亮"
+    # 应用 → 编辑器收尾（模态清空）+ revision 推进（一次 CAS 写）
+    page.click("#mpModal [data-mp-act='apply']")
+    deadline = time.monotonic() + 15
+    n = -1
+    while time.monotonic() < deadline:
+        n = page.eval_on_selector_all("#mpModal [data-mp-editor]",
+                                      "els => els.length")
+        if n == 0:
+            break
+        time.sleep(0.2)
+    assert n == 0, "应用后编辑器未收尾（模态未清空）"
+    rev_after = _get_json(scratch_base, "/admin/model-pools")["revision"]
+    assert rev_after == rev_before + 1, (rev_before, rev_after)
+    # 数据层复核：应用的仍是本地 TXT 候选（选择行只显示候选 id）
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    assert raw["pools"]["premium"]["candidates"][0]["model_name"] == TXT_MODEL
+    # 卡保持已配置（应用后的重渲染没把池弄丢）
+    cls = page.eval_on_selector("#mp-card-premium", "e => e.className")
+    assert cls == "if-card mp-pool", cls
 
 
 def _post_chat(base: str, model: str):

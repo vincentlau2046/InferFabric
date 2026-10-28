@@ -87,12 +87,18 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const toasts = [];
 const elements = {};
 const writeCounts = {};
+const attrOps = [];   // 池 bug #2 加法：setAttribute/removeAttribute 记录
+                      // （扁平 mock 无真实属性 — 预览点亮应用钮在此可断言）
 function el(id) {
   if (!elements[id]) {
     const e = {
       id: id, textContent: '', className: '',
       style: {setProperty: function (k, v) { this[k] = v; }},
       addEventListener: function () {}, classList: {add(){}, remove(){}},
+      setAttribute: function (k, v) { attrOps.push({id: id, op: 'set',
+                                                    k: k, v: v}); },
+      removeAttribute: function (k) { attrOps.push({id: id, op: 'remove',
+                                                    k: k}); },
     };
     let _html = '';
     Object.defineProperty(e, 'innerHTML', {
@@ -260,7 +266,7 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
   }
   console.log(JSON.stringify({html, modalHtml, previewHtml, toasts, calls,
                               fetchSnapshots, clipboardWrites, htmlFinal,
-                              writeCounts, dyn, results}));
+                              writeCounts, attrOps, dyn, results}));
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;
@@ -1552,6 +1558,54 @@ class TestFixPassEditorGates:
         m = re.search(r'data-mp-act="apply"([^>]*)>', out["modalHtml"])
         assert m, "modal must render apply button"
         assert "disabled" in m.group(1)
+
+    def test_editor_preview_success_enables_apply_button(self, run_panel):
+        # 池 bug #2（2026-10-28）：预览通过 → 外科点亮应用钮
+        # （$('mpEditApply').removeAttribute，不整模态重绘 — 预览结果必须
+        # 保留）。真实 DOM 行为由浏览器门禁 test_05c 钉住；此处钉逻辑层
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        removes = [o for o in out["attrOps"]
+                   if o["id"] == "mpEditApply" and o["k"] == "disabled"]
+        assert removes, "预览通过后必须移除应用钮 disabled（点亮）"
+        assert any("预览完成" in t["message"] for t in out["toasts"])
+        # 点亮后 apply 真正放行（POST 到达；无「请先点预览」拦截 toast）
+        assert _last_update_post(out)
+        assert not any("请先点" in t["message"] for t in out["toasts"])
+
+    def test_editor_mutation_during_inflight_preview_does_not_rearm(
+            self, run_panel):
+        # PR-21 评审 I-1：预演在途时改动候选（mutator 就地改 _edit，身份
+        # 不变 → 会话令牌不设防）→ 迟到的预演完成把 validated 重新置真，
+        # 用户没见过结果的配置被放行应用 = 三段门禁绕过。行内编辑器同纪律
+        # 见 startInlineSession 会话换代；模态侧用 rev 代次作废迟到续体。
+        routes = _editor_routes()
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200, "yieldTicks": 20,   # 慢 dry-run → 在途窗口确定存在
+            "body": {"chosen": "newloc", "error": None, "decisions": [],
+                     "pool": "fast", "protocol": "openai"},
+        }
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": [], "noAwait": True},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},  # 在途改动
+            {"fn": "_drain", "args": [300]},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        # 迟到完成作废：不点亮应用钮、apply 被守卫拦下（无 POST、有引导 toast）
+        assert not [o for o in out["attrOps"]
+                    if o["id"] == "mpEditApply" and o["k"] == "disabled"], \
+            "在途改动后的迟到预演完成不得点亮应用钮"
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools"
+                    and c["method"] == "POST"], \
+            "未重新预演的改动不得被应用（门禁绕过）"
+        assert any("请先点" in t["message"] for t in out["toasts"])
 
     def test_editor_preview_both_protocols_unavailable_blocks_apply(
             self, run_panel):
