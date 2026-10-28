@@ -34,9 +34,19 @@ def _metrics_text(kp=0.42, running=3, tokens=1000):
     )
 
 
-def _model(log_file):
-    cfg = NInferConfig(port=PORT, max_concurrency=4, log_file=str(log_file))
+def _model():
+    cfg = NInferConfig(port=PORT, container_name="iff-ninfer-test",
+                       max_concurrency=4)
     return ModelConfig(name="t", description="d", type="ninfer", ninfer=cfg)
+
+
+def _patch_docker_logs(monkeypatch, text="", rc=0):
+    """PR-22A：引擎日志源 = `docker logs --tail <N> <container>`（detached 后
+    不再经 attached 客户端流式落盘）。patch 全局 subprocess.run — adapter
+    函数体内 import subprocess，调用期查属性即命中。"""
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda args, **kw: MagicMock(returncode=rc, stdout=text, stderr=""))
 
 
 def _metrics_text_hist(kp=0.42, running=3, tokens=1000):
@@ -105,14 +115,13 @@ def _clean_collector():
     VllmMetricsCollector.throughput_ema.pop(PORT, None)
 
 
-def test_engine_metrics_override_log_fallback(tmp_path, monkeypatch):
-    log = tmp_path / "ninfer.log"
-    log.write_text("")  # 空日志 → 引擎 /metrics 是 KV/Batch/Throughput 的唯一来源
+def test_engine_metrics_override_log_fallback(monkeypatch):
+    _patch_docker_logs(monkeypatch, text="")  # 空日志 → 引擎 /metrics 是 KV/Batch/Throughput 的唯一来源
     _patch_urlopen(monkeypatch, text=_metrics_text(kp=0.42, running=3, tokens=1000))
     # 预置 EMA 前值，使单次调用即产出 throughput（首个样本无前值 → 无法求 delta）。
     VllmMetricsCollector.gen_counters[PORT] = (time.time() - 10.0, 500)
 
-    result = NInferAdapter().fetch_engine_metrics(_model(log))
+    result = NInferAdapter().fetch_engine_metrics(_model())
 
     assert result is not None
     assert result["kv_cache_usage_perc"] == 42.0  # 0.42 * 100
@@ -121,13 +130,14 @@ def test_engine_metrics_override_log_fallback(tmp_path, monkeypatch):
     assert result["max_batch"] == 4
 
 
-def test_engine_metrics_absent_falls_back_to_log(tmp_path, monkeypatch):
-    log = tmp_path / "ninfer.log"
+def test_engine_metrics_absent_falls_back_to_log(monkeypatch):
     # 一条 req#done 行 → seq/TTFT/TPOT 仍由日志派生；/metrics 不可达 → KV 缺省。
-    log.write_text("req#7 done prompt 1,024 | output 512 TTFT 250ms decode 18.0k tok/s\n")
+    _patch_docker_logs(
+        monkeypatch,
+        text="req#7 done prompt 1,024 | output 512 TTFT 250ms decode 18.0k tok/s\n")
     _patch_urlopen(monkeypatch, raise_exc=True)
 
-    result = NInferAdapter().fetch_engine_metrics(_model(log))
+    result = NInferAdapter().fetch_engine_metrics(_model())
 
     assert result is not None
     assert "kv_cache_usage_perc" not in result  # 回退：无引擎值
@@ -135,25 +145,33 @@ def test_engine_metrics_absent_falls_back_to_log(tmp_path, monkeypatch):
     assert result["max_batch"] == 4
 
 
-def test_no_metrics_and_empty_log_returns_sleep_only(tmp_path, monkeypatch):
-    log = tmp_path / "ninfer.log"
-    log.write_text("")
+def test_no_metrics_and_empty_log_returns_sleep_only(monkeypatch):
+    _patch_docker_logs(monkeypatch, text="")
     _patch_urlopen(monkeypatch, raise_exc=True)
 
-    result = NInferAdapter().fetch_engine_metrics(_model(log))
+    result = NInferAdapter().fetch_engine_metrics(_model())
 
     assert result == {"sleep_state": 0}
 
 
-def test_engine_histograms_override_log_derived_seq_ttft_tpot(tmp_path, monkeypatch):
-    log = tmp_path / "ninfer.log"
+def test_docker_logs_unavailable_returns_none(monkeypatch):
+    """docker logs 失败（容器不在/driver 不支持）→ None（fail-soft，同旧缺文件行为）。"""
+    _patch_docker_logs(monkeypatch, rc=1)
+    _patch_urlopen(monkeypatch, raise_exc=True)
+
+    assert NInferAdapter().fetch_engine_metrics(_model()) is None
+
+
+def test_engine_histograms_override_log_derived_seq_ttft_tpot(monkeypatch):
     # 日志行给出不同的 seq/TTFT/TPOT；引擎直方图值应覆盖（权威）。
-    log.write_text("req#7 done prompt 1,024 | output 512 TTFT 250ms decode 18.0k tok/s\n")
+    _patch_docker_logs(
+        monkeypatch,
+        text="req#7 done prompt 1,024 | output 512 TTFT 250ms decode 18.0k tok/s\n")
     _patch_urlopen(monkeypatch, text=_metrics_text_hist())
     # 预置 EMA 前值，使单次调用即产出 throughput。
     VllmMetricsCollector.gen_counters[PORT] = (time.time() - 10.0, 500)
 
-    result = NInferAdapter().fetch_engine_metrics(_model(log))
+    result = NInferAdapter().fetch_engine_metrics(_model())
 
     assert result is not None
     # 引擎直方图权威值覆盖日志派生（日志会给出 seq_length=1536 / ttft mean=0.25）。

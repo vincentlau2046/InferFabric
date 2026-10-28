@@ -745,7 +745,7 @@ class TestNInferEngineMetricsRunningBatch:
 
         monkeypatch.setattr("urllib.request.urlopen", _block)
 
-    def _make_model(self, log_file, max_concurrency=4):
+    def _make_model(self, max_concurrency=4):
         from inferfabric.config import ModelConfig, NInferConfig
         cfg = NInferConfig(
             port=8007, container_name="iff-ninfer-qwen38",
@@ -753,15 +753,17 @@ class TestNInferEngineMetricsRunningBatch:
             model_id="Qwen38-27B-TXT", max_concurrency=max_concurrency,
             max_context=262144, kv_capacity=0, default_max_tokens=32000,
             pending_timeout_ms=600000, kv_dtype="nvfp4", prefill_chunk=4096,
-            log_file=str(log_file),
         )
         return ModelConfig(name="Qwen38-27B-TXT", description="d",
                            type="ninfer", ninfer=cfg)
 
-    def _log(self, tmp_path, lines):
-        p = tmp_path / "ninfer-test.log"
-        p.write_text("\n".join(lines) + "\n")
-        return p
+    def _logs(self, monkeypatch, lines):
+        """PR-22A：日志源 = docker logs（detached 后不再流式落盘 log_file）。"""
+        from unittest.mock import MagicMock
+        text = "\n".join(lines) + "\n"
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda args, **kw: MagicMock(returncode=0, stdout=text, stderr=""))
 
     def _tp(self, running):
         return (f"2026-09-21 13:20:00.000  INFO  throughput | 5.0s | "
@@ -771,45 +773,45 @@ class TestNInferEngineMetricsRunningBatch:
             "prompt 91,688 | output 907 | cache 28,079 (30.6%) | TTFT 16.0s | "
             "total 20.9s | decode 184.6 tok/s")
 
-    def test_running_batch_is_nonzero_average_not_single_point(self, tmp_path):
+    def test_running_batch_is_nonzero_average_not_single_point(self, monkeypatch):
         """非零 running 采样 [1, 2] → running_batch=1.5（非单点取最后一条，也非含零均值）。"""
-        log = self._log(tmp_path, [self._tp(1), self.DONE, self._tp(2)])
+        self._logs(monkeypatch, [self._tp(1), self.DONE, self._tp(2)])
         from inferfabric.engine_adapter.ninfer import NInferAdapter
-        model = self._make_model(log)
+        model = self._make_model()
         r = NInferAdapter().fetch_engine_metrics(model)
         assert r.get("running_batch") == 1.5
         assert r.get("max_batch") == 4
         assert r.get("seq_count") == 1  # 累计完成数仍在，但 KPI 不再用它
 
-    def test_running_batch_ignores_zero_samples(self, tmp_path):
+    def test_running_batch_ignores_zero_samples(self, monkeypatch):
         """running 序列 0,1,0,2,0 → 只取非零 [1,2] 平均=1.5（非单点 last=0，非含零均值 0.6）。"""
-        log = self._log(tmp_path, [self._tp(0), self._tp(1), self._tp(0), self._tp(2), self._tp(0)])
+        self._logs(monkeypatch, [self._tp(0), self._tp(1), self._tp(0), self._tp(2), self._tp(0)])
         from inferfabric.engine_adapter.ninfer import NInferAdapter
-        model = self._make_model(log)
+        model = self._make_model()
         r = NInferAdapter().fetch_engine_metrics(model)
         assert r.get("running_batch") == 1.5
 
-    def test_running_batch_window_caps_at_20(self, tmp_path):
+    def test_running_batch_window_caps_at_20(self, monkeypatch):
         """>20 条非零采样：只取最近 20 条。前 5 条=1、后 20 条=3 → 均值取后 20 条=3.0（若含全部则 2.6）。"""
-        log = self._log(tmp_path, [self._tp(1)] * 5 + [self._tp(3)] * 20)
+        self._logs(monkeypatch, [self._tp(1)] * 5 + [self._tp(3)] * 20)
         from inferfabric.engine_adapter.ninfer import NInferAdapter
-        model = self._make_model(log)
+        model = self._make_model()
         r = NInferAdapter().fetch_engine_metrics(model)
         assert r.get("running_batch") == 3.0
 
-    def test_running_batch_all_zero_absent(self, tmp_path):
+    def test_running_batch_all_zero_absent(self, monkeypatch):
         """全程 running 0（持续 idle，无非零采样）→ running_batch 不设键（前端落 —）。"""
-        log = self._log(tmp_path, [self._tp(0), self._tp(0)])
+        self._logs(monkeypatch, [self._tp(0), self._tp(0)])
         from inferfabric.engine_adapter.ninfer import NInferAdapter
-        model = self._make_model(log)
+        model = self._make_model()
         r = NInferAdapter().fetch_engine_metrics(model)
         assert "running_batch" not in r
 
-    def test_running_batch_absent_when_no_throughput_line(self, tmp_path):
+    def test_running_batch_absent_when_no_throughput_line(self, monkeypatch):
         """日志无 throughput 行 → running_batch 不设键（前端落 —）。"""
-        log = self._log(tmp_path, [self.DONE])
+        self._logs(monkeypatch, [self.DONE])
         from inferfabric.engine_adapter.ninfer import NInferAdapter
-        model = self._make_model(log)
+        model = self._make_model()
         r = NInferAdapter().fetch_engine_metrics(model)
         assert "running_batch" not in r
 
