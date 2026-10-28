@@ -1462,7 +1462,7 @@
     // 借新 revision 通过 CAS 覆盖他人修改（安全评审 — 固定基点，
     // 他人改动后 apply 只会 409，需重开编辑器取新基底）
     _edit = { pool: pool, base: base, work: deepCopy(base), catalog: null,
-              base_revision: _state.def.revision, validated: false };
+              base_revision: _state.def.revision, validated: false, rev: 0 };
     renderEditor();
     try { _edit.catalog = await fetchCandidateCatalog(); }
     catch (e) { _edit.catalog = null; }
@@ -1470,6 +1470,15 @@
   }
 
   // 候选操作（无 inline onclick；模态内事件委托调用这些函数）
+
+  // 任何编辑操作共用的失效拍子（终审 I1 + PR-21 评审 I-1）：
+  // validated 失效 + rev 代次推进。五个 mutator 都就地改 _edit（身份
+  // 不变 → mpEditPreview 的会话令牌不设防），在途预演的迟到完成只能靠
+  // rev 对不上来作废 — 不作废 = 用户没见过结果的配置被置真放行（门禁绕过）
+  function mpEditInvalidated() {
+    _edit.validated = false;
+    _edit.rev++;
+  }
 
   function mpEditReplace(candidateId, newCand) {
     if (!_edit) return;
@@ -1483,7 +1492,7 @@
     // D4 一键换模语义：直接替换候选，继承原优先级（不做优先级重排）
     c.priority = cands[i].priority;
     cands[i] = c;
-    _edit.validated = false;   // 任何变更使上次预览失效（终审 I1）
+    mpEditInvalidated();   // 任何变更使上次预览失效
     renderEditor();
   }
 
@@ -1494,7 +1503,7 @@
     var c = deepCopy(newCand);
     c.priority = maxP + 1;   // 链尾 = 最低优先级
     cands.push(c);
-    _edit.validated = false;
+    mpEditInvalidated();
     renderEditor();
   }
 
@@ -1504,7 +1513,7 @@
     var i = cands.findIndex(function (c) { return c.id === candidateId; });
     if (i >= 0) {
       cands.splice(i, 1);
-      _edit.validated = false;
+      mpEditInvalidated();
     }
     renderEditor();
   }
@@ -1518,16 +1527,15 @@
     var tmp = cands[i]; cands[i] = cands[j]; cands[j] = tmp;
     // 交换优先级，保持链序与优先级一致
     var p = cands[i].priority; cands[i].priority = cands[j].priority; cands[j].priority = p;
-    _edit.validated = false;
+    mpEditInvalidated();
     renderEditor();
   }
 
   function mpEditPoolParam(key, value) {
     if (!_edit) return;
     _edit.work.pools[_edit.pool][key] = value;
-    _edit.validated = false;
-    renderEditor();   // 与其他编辑操作一致：失效必须重烘按钮态
-                      // （防预览通过后改池参数，应用钮仍亮着旧状态）
+    mpEditInvalidated();   // 池参数也是编辑：失效必须重烘按钮态
+    renderEditor();        // （防预览通过后改池参数，应用钮仍亮着旧状态）
   }
 
   // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
@@ -1596,14 +1604,18 @@
   }
 
   // 预览（模态）：结果写入 #mpPreview，toast 按 code 映射。
-  // 会话令牌：await 之后编辑器可能已被关闭/重开 — 陈旧续体一律放弃。
+  // 会话令牌 + 代次（PR-21 评审 I-1）：await 之后编辑器可能已被关闭/重开
+  // （_edit 身份变化），或预演在途期间被改动/发了新预演（rev 推进）—
+  // 陈旧续体一律放弃，迟到结果不得回写/置 validated/点亮应用钮。
   async function mpEditPreview() {
     if (!_edit) return;
     var session = _edit;
-    var pv = $('mpPreview');
     _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
+    _edit.rev++;               // 本代预演；在途改动/新预演都使本代作废
+    var rev = _edit.rev;
     var out = await previewWork(_edit.work, _edit.pool);
-    if (_edit !== session) return;
+    if (_edit !== session || _edit.rev !== rev) return;
+    var pv = $('mpPreview');   // await 后重查（在途 renderEditor 可能已换节点）
     if (out.code === 'error') {
       UI.toast('预览请求异常：' + out.message, 'error');
       return;

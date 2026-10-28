@@ -1577,6 +1577,36 @@ class TestFixPassEditorGates:
         assert _last_update_post(out)
         assert not any("请先点" in t["message"] for t in out["toasts"])
 
+    def test_editor_mutation_during_inflight_preview_does_not_rearm(
+            self, run_panel):
+        # PR-21 评审 I-1：预演在途时改动候选（mutator 就地改 _edit，身份
+        # 不变 → 会话令牌不设防）→ 迟到的预演完成把 validated 重新置真，
+        # 用户没见过结果的配置被放行应用 = 三段门禁绕过。行内编辑器同纪律
+        # 见 startInlineSession 会话换代；模态侧用 rev 代次作废迟到续体。
+        routes = _editor_routes()
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200, "yieldTicks": 20,   # 慢 dry-run → 在途窗口确定存在
+            "body": {"chosen": "newloc", "error": None, "decisions": [],
+                     "pool": "fast", "protocol": "openai"},
+        }
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": [], "noAwait": True},
+            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},  # 在途改动
+            {"fn": "_drain", "args": [300]},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(routes, actions=actions)
+        # 迟到完成作废：不点亮应用钮、apply 被守卫拦下（无 POST、有引导 toast）
+        assert not [o for o in out["attrOps"]
+                    if o["id"] == "mpEditApply" and o["k"] == "disabled"], \
+            "在途改动后的迟到预演完成不得点亮应用钮"
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools"
+                    and c["method"] == "POST"], \
+            "未重新预演的改动不得被应用（门禁绕过）"
+        assert any("请先点" in t["message"] for t in out["toasts"])
+
     def test_editor_preview_both_protocols_unavailable_blocks_apply(
             self, run_panel):
         # spec §3.2：两协议均无可用候选 → 阻止应用（黄灯单协议缺失仍允许）

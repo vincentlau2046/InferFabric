@@ -190,6 +190,18 @@ class TestCandidateResolution:
         assert set(c2.evidence) == {"openai"}
         assert c2.evidence["openai"].state == EvidenceState.DECLARED
 
+    def test_local_rederive_callback_none_falls_back_to_saved(self, tmp_path):
+        # 回调返回 None（known_local 捕获后、回调调用前模型消失等）→
+        # 退回存盘声明（PR-21 评审 M-4 补测）
+        reg = _make_registry(tmp_path, local_protocols=lambda n: None)
+        raw = _raw_config()
+        raw["pools"]["fast"]["candidates"][1][
+            "declared_protocols"] = ["openai", "anthropic"]
+        reg.update(raw, expected_revision=0)
+        c2 = reg.snapshot().pools["fast"].candidates[1]
+        assert set(c2.evidence) == {"openai", "anthropic"}
+        assert c2.evidence["anthropic"].state == EvidenceState.DECLARED
+
 
 class TestCASUpdate:
     def test_update_success_increments_revision_and_persists(self, tmp_path):
