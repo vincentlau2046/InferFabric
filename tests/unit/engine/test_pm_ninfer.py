@@ -29,43 +29,38 @@ def _make_cfg():
 
 
 class TestStartNInferContainerName:
+    """PR-22A 后启动 = subprocess.run("docker run -d")。参数名契约不变；
+    pid/container 追踪契约由 TestStartDetached 覆盖（pid 恒 None）。"""
+
     def test_start_uses_param_container_name_not_rederive(self, monkeypatch, tmp_path):
         """start_ninfer(cfg, container_name) 必须用参数名，不重推 cfg.container_name。"""
         pm = _make_pm(tmp_path)
         cfg = _make_cfg()
         # 参数给一个与 cfg.container_name 不同的名，验证用的是参数
-        passed_names = []
+        runs = []
 
-        def fake_popen(cmd, **kw):
-            # 捕获 --name 后的值
-            if "--name" in cmd:
-                idx = cmd.index("--name")
-                passed_names.append(cmd[idx + 1])
-            proc = MagicMock()
-            proc.pid = 12345
-            proc.poll.return_value = None  # 不立即退出
-            return proc
+        def fake_run(args, **kwargs):
+            if args[:2] == ["docker", "run"]:
+                runs.append(args)
+                return MagicMock(returncode=0, stdout="cid123", stderr="")
+            if args[:2] == ["docker", "inspect"]:
+                if "\t" in args[3]:
+                    # 3 字段身份探测（收养判定）→ 容器不存在，走创建路径
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                # PR-22A 1 字段存活探测（detached 启动确认）→ 在跑
+                return MagicMock(returncode=0, stdout="true", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr=b"")
 
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.Popen", fake_popen)
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run", lambda *a, **k: MagicMock(returncode=0))
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run", fake_run)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.time.sleep", lambda s: None)
         monkeypatch.setattr("inferfabric.process_manager.ninfer.wait_http", lambda url, timeout=120: True)
 
         pm.start_ninfer(cfg, container_name="custom-name-from-param")
-        assert passed_names == ["custom-name-from-param"], \
-            f"应用参数名，实际 docker run --name: {passed_names}"
-
-    def test_start_tracks_pid_and_container(self, monkeypatch, tmp_path):
-        """start_ninfer 成功后记录 PID + container 到 state。"""
-        pm = _make_pm(tmp_path)
-        cfg = _make_cfg()
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.Popen",
-                            lambda cmd, **kw: MagicMock(pid=999, poll=lambda: None))
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run",
-                            lambda *a, **k: MagicMock(returncode=0))
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.wait_http", lambda url, timeout=120: True)
-        pm.start_ninfer(cfg, container_name="ninfer-8007")
-        assert pm.ninfer_pid == 999
-        assert pm.ninfer_container == "ninfer-8007"
+        assert runs, "必须有一次 docker run（detached）"
+        cmd = runs[0]
+        idx = cmd.index("--name")
+        assert cmd[idx + 1] == "custom-name-from-param", \
+            f"应用参数名，实际 docker run --name: {cmd[idx + 1]}"
 
 
 class TestStopNInferGraceful:
@@ -121,6 +116,155 @@ def _docker_ts(seconds_ago: float) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}789Z"
 
 
+class TestStartDetached:
+    """PR-22A：`docker run -d` — 客户端即退，引擎不随 proxy 停机陪葬。
+
+    生产实证（2026-10-28 21:12）：attached 客户端是 proxy 子进程（同 cgroup），
+    KillMode=control-group 的停机 SIGTERM 经 sig-proxy 转发进容器 → 引擎死 +
+    --rm 销毁 → 收养无对象（PR-20 ② 从未在生产跑通）。detached 后无长驻
+    子进程；日志走 docker logs（--log-opt 旋转防长驻容器无界）。
+    """
+
+    NAME = "iff-ninfer-qwen38"
+
+    def _patch_detached(self, monkeypatch, *, run_rc=0, run_stdout="abc123",
+                        run_stderr="", liveness="true", wait_ok=True,
+                        logs_rc=0, logs_stdout="engine boot failed: boom",
+                        logs_stderr="", logs_exc=False):
+        """detached 全套替身。
+
+        liveness：单值或逐轮序列，每轮 —
+          "true"  → 存活探测 rc=0 Running=true
+          "false" → rc=0 Running=false（已退出、--rm 未及移除）
+          None    → rc=1（容器已被 --rm 移除）
+          "EXC"   → 探测抛 OSError（daemon 卡死 / docker 缺失，评审 M-1）
+        logs_rc/logs_stdout/logs_stderr/logs_exc：docker logs 应答（诊断文本源）。
+        收养身份探测（3 字段格式）恒 rc=1 → 走创建路径。
+        """
+        rounds = list(liveness) if isinstance(liveness, (list, tuple)) else None
+        calls = {"run": [], "popen": 0, "logs": 0, "inspect": 0}
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["docker", "run"]:
+                calls["run"].append(args)
+                return MagicMock(returncode=run_rc, stdout=run_stdout,
+                                 stderr=run_stderr)
+            if args[:2] == ["docker", "inspect"]:
+                if "\t" in args[3]:
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                calls["inspect"] += 1
+                v = rounds[calls["inspect"] - 1] if rounds else liveness
+                if v == "EXC":
+                    raise OSError("docker daemon wedged")
+                if v is None:
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                return MagicMock(returncode=0, stdout=v, stderr="")
+            if args[:2] == ["docker", "logs"]:
+                calls["logs"] += 1
+                if logs_exc:
+                    raise OSError("docker daemon wedged")
+                return MagicMock(returncode=logs_rc, stdout=logs_stdout,
+                                 stderr=logs_stderr)
+            if args[:2] == ["docker", "stop"]:
+                return MagicMock(returncode=0, stderr=b"")
+            return MagicMock(returncode=0, stdout="", stderr=b"")
+
+        def no_popen(*a, **k):
+            calls["popen"] += 1
+            raise AssertionError("detached 路径不得遗留 Popen 长驻客户端")
+
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run", fake_run)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.Popen", no_popen)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.time.sleep",
+                            lambda s: None)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.wait_http",
+                            lambda url, timeout=120: wait_ok)
+        return calls
+
+    def test_detached_flag_and_log_rotation(self, monkeypatch, tmp_path):
+        """docker run 必须带 -d + 日志旋转 opt；不得有长驻 Popen 客户端。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "healthy"
+        assert calls["popen"] == 0
+        cmd = calls["run"][0]
+        assert "-d" in cmd, "必须 docker run -d（detached）"
+        assert "max-size=50m" in cmd and "max-file=3" in cmd, \
+            "长驻容器日志必须 --log-opt 旋转"
+
+    def test_detached_healthy_watches_full_exit_window(self, monkeypatch, tmp_path):
+        """评审 I-1：退出观察窗必须满 6 轮（~3s），不得首轮 true 即断 —
+        否则 0.3–3s 快退带漏检 → 烧满 startup_timeout 误报 timeout。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "healthy"
+        assert calls["inspect"] == 6, \
+            f"健康启动应观察满 6 轮探活（实际 {calls['inspect']}）"
+
+    def test_detached_healthy_tracks_container_pid_none(self, monkeypatch, tmp_path):
+        """成功启动：container 入 state，pid=None（无本进程子 PID，与收养同构）。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        self._patch_detached(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "healthy"
+        assert result["pid"] is None
+        assert pm.ninfer_pid is None
+        assert pm.ninfer_container == self.NAME
+
+    def test_detached_run_failure_returns_error(self, monkeypatch, tmp_path):
+        """docker run -d 非零 rc → error + stderr 片段。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        self._patch_detached(monkeypatch, run_rc=1,
+                             run_stderr="docker: port is already allocated")
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "port is already allocated" in result["message"]
+
+    def test_detached_exit_within_window_recovers_engine_logs(self, monkeypatch, tmp_path):
+        """评审 I-1 主修：0.3–3s 快退带 — 探活见 Running=false（--rm 未及
+        移除）→ 立即断出抢 docker logs 取真实报错，不等 120s 假超时。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(monkeypatch, liveness=["true", "false"])
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "boom" in result["message"], "必须抢在 --rm 移除前取回引擎真实报错"
+        assert calls["logs"] == 1
+        assert calls["inspect"] == 2, "见 false 即断，不必烧满窗口"
+        assert pm.ninfer_container is None, "失败路径必须回滚容器追踪"
+
+    def test_detached_immediate_exit_removed_container(self, monkeypatch, tmp_path):
+        """启动即退且 --rm 移除竞态已过（探活恒 rc=1）→ error；docker logs
+        亦不可得 → 诊断文本为 daemon 错误（实测可观察行为，非机制）+ 回滚。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(
+            monkeypatch, liveness=None, logs_rc=1,
+            logs_stderr="Error response from daemon: No such container: iff-ninfer-qwen38")
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "No such container" in result["message"]
+        assert calls["logs"] >= 1
+        assert pm.ninfer_container is None, "失败路径必须回滚容器追踪"
+
+    def test_detached_probe_error_failsoft(self, monkeypatch, tmp_path):
+        """评审 M-1：探活 6 轮全异常（daemon 卡死/docker 缺失）→ 不抛，
+        走失败路径；docker logs 同抛 → 诊断含不可用提示 + 回滚。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        self._patch_detached(monkeypatch, liveness="EXC", logs_exc=True)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "docker logs unavailable" in result["message"]
+        assert pm.ninfer_container is None
+
+
 class TestStartNInferAdopt:
     """PR-20 ② 三态收养：健在健康 → 收养；年轻未就绪 → 等宽限；否则重建。"""
 
@@ -131,32 +275,41 @@ class TestStartNInferAdopt:
                grace=None):
         """docker inspect / stop / run / 健康探测全套替身。
 
-        inspect_running=None → inspect rc=1（容器不存在）。
-        返回 calls 字典收集 stop / popen / wait_timeout 证据。
+        inspect_running=None → 身份探测 rc=1（容器不存在）。
+        PR-22A：inspect 双格式 — 3 字段身份探测（收养判定）按参数应答；
+        1 字段存活探测（detached 启动确认）恒「在跑」（刚 docker run 完）。
+        重建路径 = docker run -d（subprocess.run，非 Popen）。
+        返回 calls 字典收集 stop / run / wait_timeout 证据。
         """
-        calls = {"stop": 0, "popen": [], "wait_timeouts": []}
+        calls = {"stop": 0, "run": [], "wait_timeouts": [], "popen": 0}
 
         def fake_run(args, **kwargs):
             if args[:2] == ["docker", "inspect"]:
+                if "\t" not in args[3]:
+                    return MagicMock(returncode=0, stdout="true", stderr="")
                 if inspect_running is None:
                     return MagicMock(returncode=1, stdout="", stderr="")
                 stdout = (f"true\t{_docker_ts(inspect_age)}\t{inspect_image}"
                           if inspect_running else "false\t\t")
                 return MagicMock(returncode=0, stdout=stdout, stderr="")
+            if args[:2] == ["docker", "run"]:
+                calls["run"].append(args)
+                return MagicMock(returncode=0, stdout="cid123", stderr="")
+            if args[:2] == ["docker", "logs"]:
+                return MagicMock(returncode=0, stdout="", stderr="")
             if args[:2] == ["docker", "stop"]:
                 calls["stop"] += 1
                 return MagicMock(returncode=0, stderr=b"")
             return MagicMock(returncode=0, stdout="", stderr=b"")
 
-        def fake_popen(cmd, **kw):
-            calls["popen"].append(cmd)
-            proc = MagicMock()
-            proc.pid = 4242
-            proc.poll.return_value = None
-            return proc
+        def no_popen(*a, **k):
+            calls["popen"] += 1
+            raise AssertionError("PR-22A 后启动只有 docker run -d，不得遗留 Popen 客户端")
 
         monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run", fake_run)
-        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.Popen", fake_popen)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.Popen", no_popen)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.time.sleep",
+                            lambda s: None)
         monkeypatch.setattr("inferfabric.process_manager.ninfer.check_http_status",
                             lambda url, timeout=2: health)
         # wait_ok 可为序列：第 i 次调用取 waits[i]（收养等待与重建后健康
@@ -186,7 +339,7 @@ class TestStartNInferAdopt:
         assert result["adopted"] is True
         assert result["port"] == cfg.port
         assert calls["stop"] == 0
-        assert calls["popen"] == []
+        assert calls["run"] == []
 
     def test_adopt_records_container_without_pid(self, monkeypatch, tmp_path):
         """收养后记录容器名，PID 置空（容器不是本进程的子进程）。"""
@@ -206,7 +359,7 @@ class TestStartNInferAdopt:
         assert result["status"] == "healthy"
         assert result["adopted"] is True
         assert calls["stop"] == 0
-        assert calls["popen"] == []
+        assert calls["run"] == []
         # 等待上限 = 宽限剩余（默认 1200 - 100），不是 startup_timeout=120
         assert calls["wait_timeouts"] and 1000 <= calls["wait_timeouts"][0] <= 1200
 
@@ -219,7 +372,7 @@ class TestStartNInferAdopt:
         assert result["status"] == "healthy"  # 重建后正常启动
         assert "adopted" not in result
         assert calls["stop"] == 1
-        assert len(calls["popen"]) == 1
+        assert len(calls["run"]) == 1
 
     def test_rebuild_old_unhealthy_container(self, monkeypatch, tmp_path):
         """年老不健康（疑似挂死）→ 立即重建，不等宽限。"""
@@ -230,7 +383,7 @@ class TestStartNInferAdopt:
         assert result["status"] == "healthy"
         assert "adopted" not in result
         assert calls["stop"] == 1
-        assert len(calls["popen"]) == 1
+        assert len(calls["run"]) == 1
         # 只有重建后的健康检查（timeout=startup_timeout=120），没走 adopt-wait
         assert calls["wait_timeouts"] == [120]
 
@@ -242,7 +395,7 @@ class TestStartNInferAdopt:
         result = pm.start_ninfer(_make_cfg(), container_name=self.NAME)
         assert "adopted" not in result
         assert calls["stop"] == 1
-        assert len(calls["popen"]) == 1
+        assert len(calls["run"]) == 1
 
     def test_create_when_container_absent(self, monkeypatch, tmp_path):
         """容器不存在 → 原创建路径（inspect rc=1；docker stop 为无害 no-op）。"""
@@ -252,7 +405,7 @@ class TestStartNInferAdopt:
         assert result["status"] == "healthy"
         assert "adopted" not in result
         assert calls["stop"] == 1
-        assert len(calls["popen"]) == 1
+        assert len(calls["run"]) == 1
 
     def test_grace_env_override(self, monkeypatch, tmp_path):
         """IFF_NINFER_ADOPT_GRACE 可调：age 500 < grace 600 → 仍走收养等待。"""

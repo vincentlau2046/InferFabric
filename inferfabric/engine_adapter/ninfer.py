@@ -186,15 +186,21 @@ class NInferAdapter(EngineAdapter):
     def fetch_engine_metrics(self, model: ModelConfig) -> dict | None:
         if not model.ninfer: return None
         import re as _re
-        from pathlib import Path
+        import subprocess
         cfg = model.ninfer
-        log_path = Path(cfg.log_file or f"/tmp/ninfer-{cfg.port}.log")
-        if not log_path.exists(): return None
-        size = log_path.stat().st_size
-        chunk = min(size, 500 * 1024)
-        with open(log_path) as f:
-            if chunk < size: f.seek(size - chunk); f.readline()
-            lines = f.readlines()
+        # PR-22A：引擎日志源 = `docker logs --tail`（detached 后不再经 attached
+        # 客户端流式落盘 log_file）。失败（容器不在等）→ None，与旧缺文件同语义。
+        # 5000 行 ≈ 原 500KB 窗口的行数等价；日志经 --log-opt 旋转有界。
+        try:
+            r = subprocess.run(
+                ["docker", "logs", "--tail", "5000", model.container_name],
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return None
+        if r.returncode != 0:
+            return None
+        lines = ((r.stdout or "") + (r.stderr or "")).splitlines()
         reqs = []; tput = None; run_samples = []; saw_running = False
         for line in lines:
             line = line.strip()

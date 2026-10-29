@@ -152,8 +152,42 @@ class NInferProcessManager(BaseProcessManager):
                     container_name, "unknown" if age is None else f"{age:.0f}s")
         return None
 
+    def _docker_logs_tail(self, container_name: str, lines: int = 200) -> str:
+        """PR-22A：引擎日志诊断源 — `docker logs --tail`（best-effort，容器已被
+        --rm 移除时返回不可用提示，不抛）。errors=replace：引擎崩溃输出可能
+        含非 UTF-8 字节，不得让解码错误炸掉启动错误路径（评审 M-2）。"""
+        try:
+            r = subprocess.run(
+                ["docker", "logs", "--tail", str(lines), container_name],
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            return f"(docker logs unavailable: {e})"
+        return ((r.stdout or "") + (r.stderr or ""))[-2000:]
+
+    def _probe_container_running(self, container_name: str) -> bool | None:
+        """按名探活单轮（PR-22A 立即退出检测）。
+
+        True=在跑；False=已退出且容器还在（Running=false，--rm 未及移除）；
+        None=未确认（探测超时/docker 缺失，或容器已被 --rm 移除 rc≠0）—
+        调用方按旧 6 轮语义重试，异常绝不抛（评审 M-1）。
+        """
+        try:
+            r = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return None
+        out = (r.stdout or "").strip()
+        if out == "true":
+            return True
+        if out == "false":
+            return False
+        return None
+
     def start_ninfer(self, cfg, container_name: str) -> dict:
-        """Start NInfer via Docker container — PR-20 ② 三态收养。
+        """Start NInfer via Docker container — PR-20 ② 三态收养 + PR-22A detached。
 
         Migrated from engine_adapter/ninfer.py:63-124. container_name is now
         a parameter (was cfg.container_name or f"ninfer-{cfg.port}").
@@ -162,6 +196,13 @@ class NInferProcessManager(BaseProcessManager):
         否则回落原 pre-start cleanup 路径（docker stop stale + 2s settle）。
         返回值兼容：收养返回 status="healthy" + adopted=True（消费方
         model_lifecycle 只认 healthy/started/ok，不感知收养）。
+
+        PR-22A：`docker run -d`（detached）— attached 客户端是 proxy 子进程
+        （同 systemd cgroup），停机 SIGTERM 经 sig-proxy 转发进容器，引擎随
+        网关陪葬（2026-10-28 21:12 生产实证，收养因此从未有对象）。detached
+        后客户端即退，无长驻子进程；引擎日志不再经客户端流式落盘 → 统一走
+        `docker logs`（本类诊断 + adapter fetch_engine_metrics 同源），--log-opt
+        旋转防长驻容器日志无界。pid 恒 None（与收养路径同构，无本进程子 PID）。
         """
         if not cfg:
             return {"status": "error", "message": "No ninfer config"}
@@ -181,7 +222,8 @@ class NInferProcessManager(BaseProcessManager):
         weight_dir = str(weight_path.parent)
 
         cmd = [
-            "docker", "run", "--gpus", "all", "--rm",
+            "docker", "run", "-d", "--gpus", "all", "--rm",
+            "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
             "-v", f"{weight_dir}:/workspace",
             "-p", f"{cfg.port}:8080",
             "--name", container_name,
@@ -212,44 +254,53 @@ class NInferProcessManager(BaseProcessManager):
         if mem > 0:
             cmd.extend(["--media-live-mib", str(mem)])
 
-        log.info("Starting NInfer: %s", " ".join(cmd))
-        log_file = Path(cfg.log_file or f"/tmp/ninfer-{cfg.port}.log")
-        log_file.write_text("")
-
+        log.info("Starting NInfer (detached): %s", " ".join(cmd))
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=log_file.open("a"),
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        except Exception as e:
+            r = subprocess.run(cmd, timeout=60, capture_output=True,
+                               text=True, errors="replace", check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             log.error("Failed to start NInfer: %s", e)
-            return {"status": "error", "message": f"Popen failed: {e}"}
+            return {"status": "error", "message": f"docker run failed: {e}"}
+        if r.returncode != 0:
+            err = (r.stderr or "")[-500:]
+            log.error("NInfer docker run failed (rc=%d): %s", r.returncode, err)
+            return {"status": "error",
+                    "message": f"docker run exit {r.returncode}: {err}"}
 
-        pgid = proc.pid  # start_new_session → PID == PGID
-        self._set_ninfer_pid(pgid)
+        self._set_ninfer_pid(None)  # detached：无本进程子 PID（与收养同构）
         self._set_ninfer_container(container_name)
-        log.info("NInfer docker PID=%s container=%s", proc.pid, container_name)
+        log.info("NInfer container %s started (detached, id=%s)",
+                 container_name, (r.stdout or "").strip()[:12])
 
-        # Immediate-exit detection (保留 ninfer adapter:117-120 的 6 轮 poll)
+        # Immediate-exit detection（原 6 轮 client poll 的 detached 等价物：
+        # 观察满 ~3s 退出窗口，评审 I-1 修复 — 不得首轮 true 即断，否则
+        # 0.3–3s 快退带（参数 throw / 早期 CUDA 失败）漏检 → 烧满
+        # startup_timeout 误报 timeout 且零诊断。每轮按名探活：
+        # Running=false（已退出、--rm 未及移除）→ 立即断出抢 `docker logs`
+        # 拿真实报错尾；未确认（探测异常 / 已被 --rm 移除）→ 按旧语义重试，
+        # 6 轮全未确认 → 失败路径不抛。健康启动多付 ~3s 观察，对 15min
+        # NVFP4 冷加载可忽略。）
+        running = False
         for _ in range(6):
-            ret = proc.poll()
-            if ret is not None:
-                try:
-                    err = log_file.read_text()[-2000:]
-                except Exception:
-                    err = "read log failed"
-                log.error("NInfer exited immediately (ret=%d): %s", ret, err[-500:])
-                self._set_ninfer_pid(None)
-                self._set_ninfer_container(None)
-                return {"status": "error", "message": f"NInfer exited with code {ret}",
-                        "log": str(log_file)}
+            state = self._probe_container_running(container_name)
+            if state is False:
+                running = False
+                break
+            if state is True:
+                running = True
             time.sleep(0.5)
+        if not running:
+            err = self._docker_logs_tail(container_name)
+            log.error("NInfer exited immediately: %s", err[-500:])
+            self._set_ninfer_pid(None)
+            self._set_ninfer_container(None)
+            return {"status": "error",
+                    "message": f"NInfer exited immediately: {err[-500:]}"}
 
         timeout = cfg.startup_timeout or 120
         healthy = wait_http(f"http://localhost:{cfg.port}/v1/models", timeout=timeout)
         if healthy:
-            return {"status": "healthy", "port": cfg.port, "pid": proc.pid}
+            return {"status": "healthy", "port": cfg.port, "pid": None}
         # 健康超时 → 清理
         self.stop_ninfer(container_name)
         return {"status": "timeout",
