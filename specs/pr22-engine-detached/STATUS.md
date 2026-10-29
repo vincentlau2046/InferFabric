@@ -8,10 +8,10 @@
 | 全量回归 | ✅ | 1816 passed（unit+integration；评审修复后：+3 新测 I-1 窗口/快退抢日志/探测 fail-soft） |
 | 沙箱实弹冒烟 | ✅ 2026-10-29 | 假引擎（python:3.13-slim 自制 ninfer-serve=http.server）+ `systemd-run --user -p KillMode=control-group`：A) 4s 健康、LogConfig `max-file:3 max-size:50m`；B) **unit stop 整 cgroup kill → 容器 Running=true 仍服务 200**；C) 二次启动 `NInfer adopt — reusing (no cold start)` + `adopted:true`（PR-20 收养首次有对象）；`docker logs` 请求行可取 |
 | import 冒烟 | ✅ | `python3 -c "import inferfabric"` → 7.6.2 |
-| 干净 worktree 复验 | ✅ | 提交树全量 1813 passed（首commit；评审修复后另行复验）|
+| 干净 worktree 复验 | ✅ | 提交树全量 1813 passed（首 commit dc87276 前）；评审修复后复验 1816 passed；生产树合并后 1816 passed |
 | cross-review | ✅ 2026-10-29 | fresh-context subagent：无 Critical；I-1（退出窗口缩水+诊断死带）当场 TDD 修复；M-1/M-2/M-5 并入同段；M-3/M-4/M-6 存档下方 |
 | 版本 | ✅ | 7.6.2（补丁位自主升级） |
-| 合并/部署 | ⏳ | 合并生产 + push 后，**下次引擎启动生效**；生产实弹验证需用户授权重启 proxy |
+| 合并/部署 | ✅ 2026-10-29 | 0d0d78d 合并生产 + push；两次授权重启实弹验收通过（见下方生产验收记录） |
 
 ## 冒烟过程记录
 
@@ -47,3 +47,24 @@
   `_restore_dead_pids` 会把 fuser 找到的 docker-proxy pid 写进 ninfer_pid
   （无杀伤方、orphan 检测自清 — 语义噪音非错误）；M-6 `NInferConfig.log_file`
   成零读者死字段（无害，后续清理决策归用户）。
+
+## 生产验收记录（2026-10-29 两次授权重启）
+
+- **重启 #1（15:52:54，v7.6.2 就位）**：旧 attached 引擎按预期死亡 —
+  docker events 15:52:54 kill（SIGTERM，sig-proxy 链）→ 15:52:59
+  die+destroy；这是它的**最后一次死亡**。15:57:29 分类器请求触发
+  auto-switch → journal `Starting NInfer (detached): docker run -d --gpus
+  all --rm --log-opt max-size=50m --log-opt max-file=3 …` → `NInfer
+  container iff-ninfer-qwen38 started (detached, id=80a6ce9dbd1d)`；
+  proxy cgroup 内零 docker 客户端子进程（架构主张成立）；
+  LogConfig=`{json-file map[max-file:3 max-size:50m]}`。加载仅 ~7s
+  （权重页缓存热；真冷启仍按 ~15min 预期，立即退出探测窗口不受影响）。
+- **重启 #2（16:02:00，验收目标）**：90s 幸存观察器 **45/45 轮 Running=true
+  + 45/45 轮 :8007 健康 200，零中断**；StartedAt 不变（同一容器，无重建）；
+  docker events 重启窗口**零事件**（无 kill/die/destroy/create/start）。
+  首个 TXT 请求（16:03:00，分类器）被直接路由
+  `[matched by model=Qwen38-27B-TXT]` — 引擎全程健在，GPU 状态机从端口/
+  健康扫描直接推导 TXT active，**连 switch 都无需触发**（adopt 路径保留
+  给状态库陈旧/显式切换场景，沙箱冒烟 C 步已证其可用）。分类器恢复
+  ~30s（对比 #1 的 4.5min、真冷启 ~15min）。
+- 验收后 `./iff status`：GPU exclusive，Qwen38-27B-TXT ✅ + bge-m3 ✅。
