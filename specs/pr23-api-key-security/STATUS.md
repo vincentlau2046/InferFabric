@@ -19,7 +19,7 @@
 | 隔离 HTTP 冒烟 | ✅ | ThreadingHTTPServer 与 aiohttp ephemeral loopback 端口，临时 store；health200→登录200→生成201→列表200→策略→吊销200→拒绝401→登出；没有真实后端/GPU推理，合法池请求抵达 unknown_pool404 证明通过鉴权 |
 | import | ✅ | 7.6.3 |
 | 独立评审 | ✅ | 一次 fresh-context subagent（opus）评审 ef3c5d5..7984273：0 Critical / 1 Important / 8 Minor。Important 已修复（上行）；Minor 全部留档（见评审记录） |
-| 干净提交树复验 | ⏳ | 修复提交后于 detached 干净 worktree 再次复验 |
+| 干净提交树复验 | ✅ | detached checkout 07cd511（干净 worktree，PYTHONPATH 含 _deps）：1868 passed（31.47s），import 7.6.3 |
 | 生产合并/激活 | 未执行 | 激活与强制策略必须独立于代码部署 |
 
 ## 评审记录（durable）
