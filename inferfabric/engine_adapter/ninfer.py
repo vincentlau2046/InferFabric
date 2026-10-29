@@ -194,7 +194,8 @@ class NInferAdapter(EngineAdapter):
         try:
             r = subprocess.run(
                 ["docker", "logs", "--tail", "5000", model.container_name],
-                timeout=10, capture_output=True, text=True, check=False)
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             return None
         if r.returncode != 0:

@@ -43,10 +43,15 @@ def _model():
 def _patch_docker_logs(monkeypatch, text="", rc=0):
     """PR-22A：引擎日志源 = `docker logs --tail <N> <container>`（detached 后
     不再经 attached 客户端流式落盘）。patch 全局 subprocess.run — adapter
-    函数体内 import subprocess，调用期查属性即命中。"""
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda args, **kw: MagicMock(returncode=rc, stdout=text, stderr=""))
+    函数体内 import subprocess，调用期查属性即命中。返回 recorded 供命令形状断言。"""
+    recorded = {}
+
+    def _fake(args, **kw):
+        recorded["args"] = args
+        return MagicMock(returncode=rc, stdout=text, stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake)
+    return recorded
 
 
 def _metrics_text_hist(kp=0.42, running=3, tokens=1000):
@@ -132,7 +137,7 @@ def test_engine_metrics_override_log_fallback(monkeypatch):
 
 def test_engine_metrics_absent_falls_back_to_log(monkeypatch):
     # 一条 req#done 行 → seq/TTFT/TPOT 仍由日志派生；/metrics 不可达 → KV 缺省。
-    _patch_docker_logs(
+    rec = _patch_docker_logs(
         monkeypatch,
         text="req#7 done prompt 1,024 | output 512 TTFT 250ms decode 18.0k tok/s\n")
     _patch_urlopen(monkeypatch, raise_exc=True)
@@ -143,6 +148,8 @@ def test_engine_metrics_absent_falls_back_to_log(monkeypatch):
     assert "kv_cache_usage_perc" not in result  # 回退：无引擎值
     assert result["seq_length"] == 1024 + 512   # 日志派生 seq 仍在
     assert result["max_batch"] == 4
+    # 评审 M-5：钉住日志源命令形状（tail 行数 + 目标容器名）
+    assert rec["args"] == ["docker", "logs", "--tail", "5000", "iff-ninfer-test"]
 
 
 def test_no_metrics_and_empty_log_returns_sleep_only(monkeypatch):

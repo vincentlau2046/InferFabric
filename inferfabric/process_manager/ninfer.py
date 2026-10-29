@@ -154,14 +154,37 @@ class NInferProcessManager(BaseProcessManager):
 
     def _docker_logs_tail(self, container_name: str, lines: int = 200) -> str:
         """PR-22A：引擎日志诊断源 — `docker logs --tail`（best-effort，容器已被
-        --rm 移除时返回不可用提示，不抛）。"""
+        --rm 移除时返回不可用提示，不抛）。errors=replace：引擎崩溃输出可能
+        含非 UTF-8 字节，不得让解码错误炸掉启动错误路径（评审 M-2）。"""
         try:
             r = subprocess.run(
                 ["docker", "logs", "--tail", str(lines), container_name],
-                timeout=10, capture_output=True, text=True, check=False)
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             return f"(docker logs unavailable: {e})"
         return ((r.stdout or "") + (r.stderr or ""))[-2000:]
+
+    def _probe_container_running(self, container_name: str) -> bool | None:
+        """按名探活单轮（PR-22A 立即退出检测）。
+
+        True=在跑；False=已退出且容器还在（Running=false，--rm 未及移除）；
+        None=未确认（探测超时/docker 缺失，或容器已被 --rm 移除 rc≠0）—
+        调用方按旧 6 轮语义重试，异常绝不抛（评审 M-1）。
+        """
+        try:
+            r = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
+                timeout=10, capture_output=True, text=True,
+                errors="replace", check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return None
+        out = (r.stdout or "").strip()
+        if out == "true":
+            return True
+        if out == "false":
+            return False
+        return None
 
     def start_ninfer(self, cfg, container_name: str) -> dict:
         """Start NInfer via Docker container — PR-20 ② 三态收养 + PR-22A detached。
@@ -234,7 +257,7 @@ class NInferProcessManager(BaseProcessManager):
         log.info("Starting NInfer (detached): %s", " ".join(cmd))
         try:
             r = subprocess.run(cmd, timeout=60, capture_output=True,
-                               text=True, check=False)
+                               text=True, errors="replace", check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             log.error("Failed to start NInfer: %s", e)
             return {"status": "error", "message": f"docker run failed: {e}"}
@@ -250,15 +273,21 @@ class NInferProcessManager(BaseProcessManager):
                  container_name, (r.stdout or "").strip()[:12])
 
         # Immediate-exit detection（原 6 轮 client poll 的 detached 等价物：
-        # 容器名探活；--rm 容器退出即被移除 → inspect rc!=0）
+        # 观察满 ~3s 退出窗口，评审 I-1 修复 — 不得首轮 true 即断，否则
+        # 0.3–3s 快退带（参数 throw / 早期 CUDA 失败）漏检 → 烧满
+        # startup_timeout 误报 timeout 且零诊断。每轮按名探活：
+        # Running=false（已退出、--rm 未及移除）→ 立即断出抢 `docker logs`
+        # 拿真实报错尾；未确认（探测异常 / 已被 --rm 移除）→ 按旧语义重试，
+        # 6 轮全未确认 → 失败路径不抛。健康启动多付 ~3s 观察，对 15min
+        # NVFP4 冷加载可忽略。）
         running = False
         for _ in range(6):
-            probe = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Running}}", container_name],
-                timeout=10, capture_output=True, text=True, check=False)
-            if probe.returncode == 0 and probe.stdout.strip() == "true":
-                running = True
+            state = self._probe_container_running(container_name)
+            if state is False:
+                running = False
                 break
+            if state is True:
+                running = True
             time.sleep(0.5)
         if not running:
             err = self._docker_logs_tail(container_name)

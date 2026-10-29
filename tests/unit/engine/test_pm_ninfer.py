@@ -128,9 +128,21 @@ class TestStartDetached:
     NAME = "iff-ninfer-qwen38"
 
     def _patch_detached(self, monkeypatch, *, run_rc=0, run_stdout="abc123",
-                        run_stderr="", liveness="true", wait_ok=True):
-        """detached 全套替身。liveness=None → 存活探测 rc=1（容器已退出+--rm）。"""
-        calls = {"run": [], "popen": 0, "logs": 0}
+                        run_stderr="", liveness="true", wait_ok=True,
+                        logs_rc=0, logs_stdout="engine boot failed: boom",
+                        logs_stderr="", logs_exc=False):
+        """detached 全套替身。
+
+        liveness：单值或逐轮序列，每轮 —
+          "true"  → 存活探测 rc=0 Running=true
+          "false" → rc=0 Running=false（已退出、--rm 未及移除）
+          None    → rc=1（容器已被 --rm 移除）
+          "EXC"   → 探测抛 OSError（daemon 卡死 / docker 缺失，评审 M-1）
+        logs_rc/logs_stdout/logs_stderr/logs_exc：docker logs 应答（诊断文本源）。
+        收养身份探测（3 字段格式）恒 rc=1 → 走创建路径。
+        """
+        rounds = list(liveness) if isinstance(liveness, (list, tuple)) else None
+        calls = {"run": [], "popen": 0, "logs": 0, "inspect": 0}
 
         def fake_run(args, **kwargs):
             if args[:2] == ["docker", "run"]:
@@ -138,12 +150,21 @@ class TestStartDetached:
                 return MagicMock(returncode=run_rc, stdout=run_stdout,
                                  stderr=run_stderr)
             if args[:2] == ["docker", "inspect"]:
-                return MagicMock(returncode=0 if liveness is not None else 1,
-                                 stdout=liveness or "", stderr="")
+                if "\t" in args[3]:
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                calls["inspect"] += 1
+                v = rounds[calls["inspect"] - 1] if rounds else liveness
+                if v == "EXC":
+                    raise OSError("docker daemon wedged")
+                if v is None:
+                    return MagicMock(returncode=1, stdout="", stderr="")
+                return MagicMock(returncode=0, stdout=v, stderr="")
             if args[:2] == ["docker", "logs"]:
                 calls["logs"] += 1
-                return MagicMock(returncode=0,
-                                 stdout="engine boot failed: boom", stderr="")
+                if logs_exc:
+                    raise OSError("docker daemon wedged")
+                return MagicMock(returncode=logs_rc, stdout=logs_stdout,
+                                 stderr=logs_stderr)
             if args[:2] == ["docker", "stop"]:
                 return MagicMock(returncode=0, stderr=b"")
             return MagicMock(returncode=0, stdout="", stderr=b"")
@@ -173,6 +194,17 @@ class TestStartDetached:
         assert "max-size=50m" in cmd and "max-file=3" in cmd, \
             "长驻容器日志必须 --log-opt 旋转"
 
+    def test_detached_healthy_watches_full_exit_window(self, monkeypatch, tmp_path):
+        """评审 I-1：退出观察窗必须满 6 轮（~3s），不得首轮 true 即断 —
+        否则 0.3–3s 快退带漏检 → 烧满 startup_timeout 误报 timeout。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "healthy"
+        assert calls["inspect"] == 6, \
+            f"健康启动应观察满 6 轮探活（实际 {calls['inspect']}）"
+
     def test_detached_healthy_tracks_container_pid_none(self, monkeypatch, tmp_path):
         """成功启动：container 入 state，pid=None（无本进程子 PID，与收养同构）。"""
         pm = _make_pm(tmp_path)
@@ -194,16 +226,43 @@ class TestStartDetached:
         assert result["status"] == "error"
         assert "port is already allocated" in result["message"]
 
-    def test_detached_immediate_exit_detected_with_docker_logs(self, monkeypatch, tmp_path):
-        """容器立即退出（存活探测失败）→ error + docker logs 诊断 + 回滚追踪。"""
+    def test_detached_exit_within_window_recovers_engine_logs(self, monkeypatch, tmp_path):
+        """评审 I-1 主修：0.3–3s 快退带 — 探活见 Running=false（--rm 未及
+        移除）→ 立即断出抢 docker logs 取真实报错，不等 120s 假超时。"""
         pm = _make_pm(tmp_path)
         cfg = _make_cfg()
-        calls = self._patch_detached(monkeypatch, liveness=None)
+        calls = self._patch_detached(monkeypatch, liveness=["true", "false"])
         result = pm.start_ninfer(cfg, container_name=self.NAME)
         assert result["status"] == "error"
-        assert "boom" in result["message"], "诊断文本必须来自 docker logs"
+        assert "boom" in result["message"], "必须抢在 --rm 移除前取回引擎真实报错"
+        assert calls["logs"] == 1
+        assert calls["inspect"] == 2, "见 false 即断，不必烧满窗口"
+        assert pm.ninfer_container is None, "失败路径必须回滚容器追踪"
+
+    def test_detached_immediate_exit_removed_container(self, monkeypatch, tmp_path):
+        """启动即退且 --rm 移除竞态已过（探活恒 rc=1）→ error；docker logs
+        亦不可得 → 诊断文本为 daemon 错误（实测可观察行为，非机制）+ 回滚。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch_detached(
+            monkeypatch, liveness=None, logs_rc=1,
+            logs_stderr="Error response from daemon: No such container: iff-ninfer-qwen38")
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "No such container" in result["message"]
         assert calls["logs"] >= 1
         assert pm.ninfer_container is None, "失败路径必须回滚容器追踪"
+
+    def test_detached_probe_error_failsoft(self, monkeypatch, tmp_path):
+        """评审 M-1：探活 6 轮全异常（daemon 卡死/docker 缺失）→ 不抛，
+        走失败路径；docker logs 同抛 → 诊断含不可用提示 + 回滚。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        self._patch_detached(monkeypatch, liveness="EXC", logs_exc=True)
+        result = pm.start_ninfer(cfg, container_name=self.NAME)
+        assert result["status"] == "error"
+        assert "docker logs unavailable" in result["message"]
+        assert pm.ninfer_container is None
 
 
 class TestStartNInferAdopt:

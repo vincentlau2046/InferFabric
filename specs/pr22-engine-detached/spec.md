@@ -40,11 +40,18 @@ attached docker 客户端**不在被停 unit 的 cgroup 里**（手工前台运�
   （宿主 docker 日志驱动 json-file，实测接受旋转选项；防长驻容器日志无界）。
 - `subprocess.Popen`（长驻客户端）→ `subprocess.run(timeout=60)`，rc≠0 →
   error + stderr 尾 500 字符。
-- **立即退出探测**：attached 时代靠客户端 `poll()`；detached 等价物 = 6 轮
-  `docker inspect -f {{.State.Running}} <name>`（0.5s 间隔）——`--rm` 容器
-  退出即被移除，inspect rc≠0 ⇒ 立即退出。失败时 `_docker_logs_tail()`
-  取 `docker logs --tail 200` 作诊断（best-effort，容器已移除时返回
-  不可用提示不抛），并回滚容器追踪。
+- **立即退出探测**（评审 I-1 修复后语义）：attached 时代靠客户端 `poll()`
+  观察 ~3s；detached 等价物 = 6 轮 `_probe_container_running()`（单轮
+  `docker inspect -f {{.State.Running}} <name>`，0.5s 间隔），**观察满
+  全窗口，不得首轮 true 即断**（否则 0.3–3s 快退带漏检 → 烧满
+  startup_timeout 误报 timeout 且零诊断）。三态：
+  - `true` → 在跑，继续观察到满窗（healthy 启动多付 ~3s，对 15min
+    NVFP4 冷载可忽略）；
+  - `false`（已退出、`--rm` 未及移除）→ 立即断出，抢 `_docker_logs_tail()`
+    在移除前拿到真实引擎报错尾（移除后只剩 "No such container"）；
+  - 未确认（探测异常 / rc≠0 容器已被 `--rm` 移除）→ 按旧 6 轮语义重试，
+    探测异常绝不抛（fail-soft）；6 轮全未确认 → 失败路径 + docker logs
+    best-effort 诊断，回滚容器追踪。
 - `pid` 恒 `None`（与收养路径同构，容器非本进程子进程）；消费方
   `gpu_state._detect_orphan_pids`（跳过 falsy pid）与 `facade.stop` 均已容忍。
 - 收养前探测 / pre-start cleanup / 三态收养逻辑零改动。
@@ -67,7 +74,9 @@ attached docker 客户端**不在被停 unit 的 cgroup 里**（手工前台运�
 ## 验证
 
 1. **单测 TDD**：`TestStartDetached` 4 例（-d+旋转 opt / 成功追踪容器且
-   pid=None / run 失败 error / 立即退出+docker logs 诊断+回滚），另收养与
+   pid=None / run 失败 error / 立即退出+docker logs 诊断+回滚）+ 评审
+   I-1 修复 3 例（观察满 6 轮退出窗口 / 窗口内快退抢 docker logs /
+   探测异常 fail-soft），另收养与
    重建旧测试迁至 subprocess.run 契约（inspect 双格式区分：3 字段身份
    探测 vs 1 字段存活探测）。
 2. **沙箱 systemd 实弹冒烟**（假引擎镜像，真实 docker + 真实 systemd
