@@ -1,6 +1,6 @@
 # PR-23：API KEY 安全与渐进迁移
 
-日期：2026-10-29。状态：产品决策已批准，实施计划待审阅；尚未实施。
+日期：2026-10-29。状态：产品决策及实施计划已批准；PR-23a 后端已实现并通过一次独立评审（1 项 Important 已修复、8 项 Minor 留档，见 `specs/pr23-api-key-security/STATUS.md`），PR-23b 面板未实施。生产鉴权尚未激活。
 
 本文件取代 `docs/API-KEY-SECURITY-PLAN-2026-10-29.md` 中与之冲突的建议。
 

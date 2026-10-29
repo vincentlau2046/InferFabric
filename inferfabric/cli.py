@@ -25,6 +25,7 @@ import json
 import logging
 import datetime
 from pathlib import Path
+import sqlite3
 
 # Bootstrap logging
 logging.basicConfig(
@@ -568,7 +569,7 @@ def main():
         from inferfabric.security.cli import run_keys
         try:
             run_keys(rest)
-        except (ValueError, OSError) as e:
+        except (ValueError, OSError, sqlite3.Error) as e:
             print(f"Keys: {e}", file=sys.stderr)
             sys.exit(1)
     else:
