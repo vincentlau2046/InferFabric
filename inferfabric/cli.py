@@ -25,6 +25,7 @@ import json
 import logging
 import datetime
 from pathlib import Path
+import sqlite3
 
 # Bootstrap logging
 logging.basicConfig(
@@ -564,6 +565,13 @@ def main():
         cmd_gpu_clear(rest)
     elif cmd == "tune":
         cmd_tune(rest)
+    elif cmd == "keys":
+        from inferfabric.security.cli import run_keys
+        try:
+            run_keys(rest)
+        except (ValueError, OSError, sqlite3.Error) as e:
+            print(f"Keys: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")
         print("Available: status, models, switch, stop, pull, list-downloaded, sleep, wake, history, reset, reconcile, gpu-clear, tune")
