@@ -188,6 +188,7 @@ def _serve_api_spec(handler, pm):
 
 # 逻辑模型池管理接口（admin 路由表引用；零协议转换、零出网校验）
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
+from inferfabric.security import admin as key_admin  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
@@ -228,9 +229,15 @@ _GET_ROUTES = {
     "/admin/model-pools/latency":   _admin(lambda h, pm: mp_admin.handle_get_model_pools_latency(h, pm)),
     "/admin/model-pools/events":    _admin(lambda h, pm: mp_admin.handle_get_model_pools_events(h, pm)),
     "/api/openapi.json":        _serve_api_spec,
+    "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "list")),
 }
 
 _POST_ROUTES = {
+    "/admin/keys/login":        _admin(lambda h, pm: key_admin.handle(h, pm, "login")),
+    "/admin/keys/logout":       _admin(lambda h, pm: key_admin.handle(h, pm, "logout")),
+    "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "create")),
+    "/admin/keys/revoke":       _admin(lambda h, pm: key_admin.handle(h, pm, "revoke")),
+    "/admin/keys/policy":       _admin(lambda h, pm: key_admin.handle(h, pm, "policy")),
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),

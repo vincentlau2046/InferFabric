@@ -62,7 +62,7 @@
 
 ### Task 3: 密码、会话与管理 API/CLI
 
-**Files:** Create `inferfabric/security/console_auth.py`, `inferfabric/security/admin.py`; Modify `inferfabric/cli.py`, `inferfabric/proxy/handler.py`（仅路由项）、`inferfabric/proxy_manager.py`（依赖装配）；Test `tests/unit/security/test_console_auth.py`, `tests/unit/security/test_admin.py`, `tests/integration/test_security_admin.py`。
+**Files:** Create `inferfabric/security/console_auth.py`, `inferfabric/security/admin.py`; Modify `inferfabric/cli.py`, `inferfabric/proxy/handler.py`（仅路由项）、`inferfabric/proxy_manager.py`（依赖装配）；Test `tests/unit/security/test_console_auth.py`, `tests/unit/security/test_key_admin.py`, `tests/integration/test_security_admin.py`。
 
 **Interfaces:**
 - Consumes Task 1/2；管理服务直接使用同一 KeyStore，提交后新请求立即见吊销结果。

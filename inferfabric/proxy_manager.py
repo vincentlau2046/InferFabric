@@ -19,7 +19,7 @@ import yaml as _yaml
 from inferfabric.manager import ModelManager
 from inferfabric.state import GPUMode
 from inferfabric.config import MODELS_DIR, ConfigError
-from inferfabric.security.auth_facade import build_auth
+from inferfabric.security.auth_facade import SecurityAuth, build_auth
 from inferfabric.agent_registry import AgentRegistry
 from inferfabric.cloud_discovery import CloudDiscovery, CloudModel
 from inferfabric.ratelimit import DualGateLimiter, RateLimiterV2
@@ -62,6 +62,18 @@ class ProxyManager:
         self._switch_lock = threading.Lock()
         # PR-A: Auth manager
         self.auth = build_auth(IFF_DATA_DIR)
+        self.security_admin = None
+        if isinstance(self.auth, SecurityAuth):
+            from inferfabric.security.admin import SecurityAdmin
+            configured = os.environ.get("IFF_CONSOLE_ORIGINS", "")
+            origins = [o.strip() for o in configured.split(",") if o.strip()] if configured else [
+                f"http://127.0.0.1:{PROXY_PORT}", f"http://localhost:{PROXY_PORT}",
+                f"http://[::1]:{PROXY_PORT}",
+            ]
+            if PROXY_HOST not in ("127.0.0.1", "localhost", "::1") and (
+                    not configured or any(not o.startswith("https://") for o in origins)):
+                raise ValueError("Remote console requires explicit HTTPS IFF_CONSOLE_ORIGINS")
+            self.security_admin = SecurityAdmin(self.auth.store, origins=origins)
         # v6.5: 客户端 Agent 识别引擎（agents.d 双目录；用户目录 ~/.inferfabric/agents.d）
         self.agent_registry = AgentRegistry(
             builtin_dir=_Path(__file__).parent / "agents.d",
