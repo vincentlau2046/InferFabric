@@ -19,7 +19,7 @@ import yaml as _yaml
 from inferfabric.manager import ModelManager
 from inferfabric.state import GPUMode
 from inferfabric.config import MODELS_DIR, ConfigError
-from inferfabric.proxy.auth import AuthManager
+from inferfabric.security.auth_facade import build_auth
 from inferfabric.agent_registry import AgentRegistry
 from inferfabric.cloud_discovery import CloudDiscovery, CloudModel
 from inferfabric.ratelimit import DualGateLimiter, RateLimiterV2
@@ -61,7 +61,7 @@ class ProxyManager:
         self._cooldown = 10
         self._switch_lock = threading.Lock()
         # PR-A: Auth manager
-        self.auth = AuthManager(IFF_DATA_DIR / "api_keys.yaml")
+        self.auth = build_auth(IFF_DATA_DIR)
         # v6.5: 客户端 Agent 识别引擎（agents.d 双目录；用户目录 ~/.inferfabric/agents.d）
         self.agent_registry = AgentRegistry(
             builtin_dir=_Path(__file__).parent / "agents.d",
