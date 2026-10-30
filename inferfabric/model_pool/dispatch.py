@@ -218,6 +218,30 @@ def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, messa
                        extra_headers=extra)
 
 
+def _no_eligible_message(model: str, sel) -> str:
+    """no eligible target 的自解释消息（OpenAI/Anthropic 共用）。
+
+    7.8.0：逐候选给出 id + 原因 + feature 明细；能力约束导致的拒绝
+    附修复指引 — 「feature_unsupported」读起来像模型不支持，实际是
+    候选显式声明了约束，得告诉用户去哪解除。
+    """
+    parts = []
+    for d in sel.decisions:
+        if d.included:
+            continue
+        s = f"{d.candidate_id}: {d.reason}"
+        if d.detail:
+            s += f" [{d.detail}]"
+        parts.append(s)
+    msg = f"No eligible target for {model} ({', '.join(parts) or 'no candidates'})"
+    if any((not d.included) and d.reason == "feature_unsupported"
+           for d in sel.decisions):
+        msg += (" — candidate capability is declared-constrained; if the model "
+                "supports this request, clear its features constraint in the "
+                "pool config (dashboard: 模型池 → 编辑 → 能力)")
+    return msg
+
+
 def handle_pool_chat(handler, pm, data, model) -> bool:
     """OpenAI /v1/chat/completions 的 iff/ 池分支。
 
@@ -260,8 +284,7 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
         _send_pool_error_openai(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code=sel.error or "no_compatible_target",
-            message=f"No eligible target for {model} "
-                    f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
+            message=_no_eligible_message(model, sel))
         return True
 
     # spec §7：不可迁移历史 + 多候选可服务 → 拒绝（无从安全迁移）。
@@ -379,8 +402,7 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
         _send_pool_error_anthropic(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code=sel.error or "no_compatible_target",
-            message=f"No eligible target for {model} "
-                    f"({', '.join(d.reason for d in sel.decisions if not d.included) or 'no candidates'})")
+            message=_no_eligible_message(model, sel))
         return True
 
     # spec §7：不可迁移历史（thinking 签名/tool_use/tool_result）+ 多候选

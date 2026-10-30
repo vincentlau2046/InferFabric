@@ -369,7 +369,12 @@ class TestPoolChatDispatch:
         assert body["status"] == "pool_disabled"
         assert any(k.lower() == "retry-after" for k in (hdrs or {}))
 
-    def test_vision_request_to_text_only_candidates_rejected(self, registry):
+    def test_vision_request_blocked_only_by_explicit_constraint(self, registry):
+        # 7.8.0：空声明不再拦 vision — 显式声明 features 才构成约束
+        cfg = _raw_config()
+        for c in cfg["pools"]["fast"]["candidates"]:
+            c["features"] = ["tools", "stream", "structured"]
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
@@ -387,14 +392,54 @@ class TestPoolChatDispatch:
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["status"] == "no_compatible_target"
+        # 自解释：候选 id + 缺失/声明明细
+        assert "loc: feature_unsupported" in body["error"]
+        assert "missing=vision" in body["error"]
+
+    def test_vision_request_passes_empty_declaration(self, registry, forwarded):
+        # 空声明 = 无约束（全能力默认）→ vision 请求照常路由
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": object()},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        assert len(forwarded) == 1
+
+    def test_feature_unsupported_400_message_self_explaining(self, registry):
+        # 400 消息自解释：候选 id + missing/declared + 修复指引；日志 error 码不变
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"] = [
+            {"id": "cld", "priority": 1, "kind": "cloud",
+             "provider": "prov", "model_id": "cloud-m",
+             "declared_protocols": ["openai"], "features": ["vision"]}]
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, cloud_models={"prov/cloud-m": object()})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [],
+                "tools": [{"name": "t", "input_schema": {}}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        status, body, _ = h.sent[-1]
+        assert status == 400
+        msg = body["error"]
+        assert "No eligible target for iff/fast" in msg
+        assert "cld: feature_unsupported [missing=tools; declared=[vision]]" in msg
+        assert "clear its features constraint" in msg
+        assert pm.logger.entries[-1].error == "no_compatible_target"
 
     def test_tools_request_routed_but_normalized(self, registry, forwarded):
+        # 7.8.0：tools 是 agent 基础能力 — 空声明（默认）即可路由
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
-        # 候选需声明 tools 才可选
-        cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"][0]["features"] = ["tools"]
-        registry.update(cfg, expected_revision=registry.snapshot().revision)
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": [], "tools": [
             {"name": "t", "description": "d", "input_schema": {"type": "object"}}]}

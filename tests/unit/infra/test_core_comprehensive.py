@@ -1255,8 +1255,9 @@ class TestCloudModelCapabilities:
         m = CloudModel(model_id="test", provider="prov")
         assert m.context_window is None
         assert m.max_output_tokens is None
-        assert m.supports_vision is False
-        assert m.supports_tools is False
+        # 7.8.0 三态：默认 None = 未设置（全能力默认），False = 显式约束
+        assert m.supports_vision is None
+        assert m.supports_tools is None
         assert m.extra == {}
 
     def test_cloud_model_with_capabilities(self):
@@ -1278,8 +1279,9 @@ class TestCloudModelCapabilities:
         assert d["id"] == "test"
         assert d["owned_by"] == "cloud:baidu"
         caps = d.get("capabilities", {})
-        assert caps.get("supports_vision") is False
-        assert caps.get("supports_tools") is False
+        # 7.8.0 三态：未设置序列化为 null（JS falsy，展示不变）
+        assert caps.get("supports_vision") is None
+        assert caps.get("supports_tools") is None
 
     def test_to_api_dict_with_caps(self):
         from inferfabric.cloud_discovery import CloudModel
@@ -1295,7 +1297,7 @@ class TestCloudModelCapabilities:
         assert caps["context_window"] == 131072
         assert caps["max_output_tokens"] == 16384
         assert caps["supports_tools"] is True
-        assert caps["supports_vision"] is False  # Always emitted
+        assert caps["supports_vision"] is None   # 7.8.0：未设置 = null
         assert caps["pricing_tier"] == "free"
 
     def test_to_api_dict_vision_included(self):

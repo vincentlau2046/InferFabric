@@ -7,12 +7,13 @@
 语义：
   - local  = models.d 中 model_type 为 llm/vl 的模型（chat 池；TTS/ASR/
     embedding 不进 chat 池 — 选了也永远不可用）。条目名 = served_name
-    （池候选引用 served_name，dispatch 评审 #15）。features 由 modality
-    推导（text-vision/multimodal → vision），与云候选同构 — 面板建候选
-    时快照进池配置，selector 据此做模态路由。
+    （池候选引用 served_name，dispatch 评审 #15）。features 一律空
+    （7.8.0：空 = 无约束/全能力默认），modality 保留供编辑器提示展示。
   - cloud  = cloud_models（发现后可路由集合）— 与 runtime_view 同源，
     「目录里出现的 ⇔ dispatch 能路由到的」按构造一致。provider.candidates
-    里的非 routable 别名（如 glm-5-failover）按构造不进目录。
+    里的非 routable 别名（如 glm-5-failover）按构造不进目录。能力标志
+    三态：未设置/True → features=[]（全能力默认）；显式 False → 排除该
+    词、features 写剩余词表（7.8.0）。
   - protocols：云来自发现结果（openai/anthropic available），本地按引擎
     映射声明（declared 态 — 证据系统区分 declared/probed，语义不变）。
 
@@ -25,6 +26,9 @@
 import logging
 
 log = logging.getLogger("inferfabric.model_pool.catalog")
+
+# 功能词表规范序（7.8.0 云候选约束快照用；与 config.VALID_FEATURES 同集）
+_FEATURE_ORDER = ("tools", "stream", "vision", "structured")
 
 # 本地引擎 → 声明协议。vllm/ninfer/sglang 有本地 anthropic 路径
 # （forward_anthropic_local 直通引擎原生 /v1/messages，不翻译）→ 双协议声明；
@@ -76,9 +80,10 @@ def _local_entries(pm) -> list[dict]:
             except Exception:
                 served = name
         engine = m.get("type") or ""
-        # features 由 modality 推导（与云候选 supports_vision → features 同构）：
-        # 池候选建库时快照，selector 据此做模态路由
-        features = ["vision"] if m.get("modality") in ("text-vision", "multimodal") else []
+        # 7.8.0 语义反转：本地 features 一律空（= 无约束/全能力默认）。
+        # modality 保留供编辑器提示展示，但不再构成快照约束 — 视觉请求
+        # 到文本模型直通上游裁定，池 failover 兜底。
+        features = []
         out.append({
             "name": served,
             "active": bool(m.get("active")),
@@ -106,11 +111,18 @@ def _cloud_entries(pm) -> list[dict]:
         ) if ok]
         if not protocols:
             protocols = ["openai"]   # 至少声明 openai（无可用标志 = 老条目）
-        features = []
-        if getattr(cm, "supports_tools", False):
-            features.append("tools")
-        if getattr(cm, "supports_vision", False):
-            features.append("vision")
+        # 7.8.0 三态推导：未设置/True = 默认全能力（[]，不构成信息）；
+        # 显式 False = 约束该词 — features 写剩余词表（规范序），池候选
+        # 建库时快照，selector 据此做严格约束路由
+        excluded = set()
+        if getattr(cm, "supports_tools", None) is False:
+            excluded.add("tools")
+        if getattr(cm, "supports_vision", None) is False:
+            excluded.add("vision")
+        if excluded:
+            features = [f for f in _FEATURE_ORDER if f not in excluded]
+        else:
+            features = []
         out.append({
             "provider": provider,
             "model_id": model_id,

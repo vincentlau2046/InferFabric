@@ -50,8 +50,10 @@ class CloudModel:
     maxTokens: int | None = None            # 实际建议最大输出 (考虑流控)
     input: list[str] = field(default_factory=lambda: ["text"])  # 输入模态
     reasoning: bool = False           # 是否支持思考模式
-    supports_vision: bool = False
-    supports_tools: bool = False
+    # 7.8.0 三态能力标志：None=未设置（默认全能力，不构成信息）/
+    # True=确认支持 / False=显式约束（catalog 据此出 features 约束快照）
+    supports_vision: bool | None = None
+    supports_tools: bool | None = None
     # G-2: 价格字段 (¥/1M tokens)
     price_input: float = 0.0
     price_output: float = 0.0

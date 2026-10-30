@@ -197,7 +197,8 @@ class TestDryRun:
         assert status == 200
         assert body["chosen"] == "loc"
         assert body["error"] is None
-        assert body["decisions"][0] == {"id": "loc", "included": True, "reason": "ok"}
+        assert body["decisions"][0] == {"id": "loc", "included": True,
+                                        "reason": "ok", "detail": ""}
 
     def test_dry_run_anthropic_explains_exclusion(self, pm):
         h = AdminHandler(body={"pool": "fast", "protocol": "anthropic"})
@@ -208,15 +209,30 @@ class TestDryRun:
         assert body["chosen"] is None
         assert body["error"] == "no_compatible_target"
 
-    def test_dry_run_with_requirements(self, pm):
+    def test_dry_run_empty_declaration_passes_requirements(self, pm):
+        # 7.8.0：空声明 = 无约束 → 带 tools/stream/vision 需求也可选
         h = AdminHandler(body={"pool": "fast", "protocol": "openai",
                                "tools": True, "stream": True, "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
-        # 无候选声明 vision → 全排除
+        assert body["chosen"] == "loc"
+
+    def test_dry_run_feature_unsupported_detail_passthrough(self, pm):
+        # 显式约束候选 → decisions 带 missing/declared 明细（自解释）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"] = [
+            {"id": "cld", "priority": 1, "kind": "cloud",
+             "provider": "prov", "model_id": "cloud-m",
+             "declared_protocols": ["openai"], "features": ["vision"]}]
+        pm.pool_registry.update(cfg, expected_revision=pm.pool_registry.snapshot().revision)
+        h = AdminHandler(body={"pool": "fast", "protocol": "openai",
+                               "tools": True})
+        mp_admin.handle_post_model_pools_dry_run(h, pm)
+        _, body = h.sent[-1]
         assert body["chosen"] is None
-        reasons = {d["reason"] for d in body["decisions"]}
-        assert "feature_unsupported" in reasons
+        d = body["decisions"][0]
+        assert d["reason"] == "feature_unsupported"
+        assert d["detail"] == "missing=tools; declared=[vision]"
 
     def test_dry_run_unknown_pool_404(self, pm):
         h = AdminHandler(body={"pool": "nope", "protocol": "openai"})

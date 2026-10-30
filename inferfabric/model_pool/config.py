@@ -19,7 +19,7 @@
           model_id: model_a             # cloud 必填
           # kind: local 时用 model_name（models.d 的 served_name）
           declared_protocols: [openai]  # 管理员声明（declared 证据）
-          features: [tools, stream]     # 默认空 = 仅纯文本
+          features: [tools, stream]     # 空 = 无约束（全能力默认）；非空 = 严格限定
 
 纯解析 + 静态校验，不做任何 I/O 副作用或运行时查询（models.d / provider
 存在性由 registry 阶段校验，见 registry.py）。
@@ -80,7 +80,9 @@ class CandidateConfig:
     provider: str = ""                          # cloud: provider 名
     model_id: str = ""                          # cloud: 上游模型 ID
     declared_protocols: tuple[str, ...] = ()    # 管理员声明的协议
-    features: tuple[str, ...] = ()              # 支持的功能（默认仅纯文本）
+    # 7.8.0 语义反转：空 = 无约束（全能力默认，tools 是 agent 调用基础）；
+    # 非空 = 严格限定（required ⊆ features，超出即 feature_unsupported）
+    features: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

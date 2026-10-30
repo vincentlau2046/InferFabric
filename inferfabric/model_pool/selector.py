@@ -6,7 +6,9 @@ dry-run / status 与真实选择共用同一函数（零副差别名）。
 排除原因（CandidateDecision.reason）：
   location_not_allowed  候选位置不在池 allowed_locations
   no_evidence           协议证据不足（UNKNOWN/FAILED/STALE，或 DECLARED 而池未接受）
-  feature_unsupported   请求要求的功能候选未覆盖
+  feature_unsupported   请求要求的功能不在候选显式声明的约束集内
+                        （7.8.0：空声明 = 无约束/全能力默认，不拒；
+                        仅非空声明构成严格约束，detail 给 missing/declared 明细）
   local_not_ready       本地候选未激活（ready_only：只选已启动端口，绝不自动启动）
   cloud_model_missing   云模型未在发现列表中
   cooldown              端点冷却中（P2 注入，见 pool_forward.CooldownStore）
@@ -59,6 +61,9 @@ class CandidateDecision:
     candidate_id: str
     included: bool
     reason: str
+    # 7.8.0：feature_unsupported 的自解释明细 "missing=<f,...>; declared=[<f,...>]"
+    # 其余原因为空串 — 追加字段向后兼容
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,26 +93,31 @@ def _evidence_ok(resolved: ResolvedCandidate, protocol: str,
 
 
 def _static_reason(resolved: ResolvedCandidate, pool, req: RequestRequirements,
-                   required_features: tuple[str, ...]) -> str | None:
-    """静态兼容检查（位置/协议证据/功能覆盖）。None = 兼容。
+                   required_features: tuple[str, ...]) -> tuple[str | None, str]:
+    """静态兼容检查（位置/协议证据/功能覆盖）。(None, "") = 兼容。
 
     与就绪/冷却无关 — 这层结果决定 home 位置与 compatible_count，
     必须先于任何运行时状态过滤计算（终审 #2/#3）。
+    返回 (reason, detail)：detail 仅 feature_unsupported 非空（自解释明细）。
     """
     cand = resolved.candidate
     location = "local" if cand.kind == "local" else "cloud"
     if location not in pool.allowed_locations:
-        return "location_not_allowed"
+        return "location_not_allowed", ""
     if not _evidence_ok(resolved, req.protocol, pool.accept_declared):
-        return "no_evidence"
-    # 功能覆盖以「本次放行的证据」为准（评审 #4）：PROBED 证据只
-    # 背书探测过的功能，声明式证据由 registry 镜像 cand.features。
-    # 证据未覆盖的功能不投递（未知能力不默认当作支持）。
+        return "no_evidence", ""
+    # 功能覆盖以「本次放行的证据」为准（评审 #4）：PROBED 证据只背书
+    # 探测过的功能，声明式证据由 registry 镜像 cand.features。
+    # 7.8.0 语义反转：空声明 = 无约束（全能力默认）— tools 是 agent
+    # 调用的基础，「没声明」不得构成拦截；仅显式非空声明构成严格约束。
     ev = resolved.evidence.get(req.protocol)
     allowed_features = ev.features if ev is not None else ()
-    if not set(required_features) <= set(allowed_features):
-        return "feature_unsupported"
-    return None
+    missing = set(required_features) - set(allowed_features)
+    if allowed_features and missing:
+        detail = (f"missing={','.join(sorted(missing))}; "
+                  f"declared=[{', '.join(sorted(allowed_features))}]")
+        return "feature_unsupported", detail
+    return None, ""
 
 
 def select(pool_snap: PoolSnapshot, req: RequestRequirements,
@@ -135,14 +145,14 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
     home_loc = None
     if not pool.allow_cross_location:
         for resolved in ordered:
-            if static_reasons[resolved.candidate.id] is None:
+            if static_reasons[resolved.candidate.id][0] is None:
                 home_loc = "local" if resolved.candidate.kind == "local" else "cloud"
                 break
 
     for resolved in ordered:
         cand = resolved.candidate
         loc = "local" if cand.kind == "local" else "cloud"
-        sreason = static_reasons[cand.id]
+        sreason, sdetail = static_reasons[cand.id]
         if sreason is not None:
             reason = sreason
         elif home_loc is not None and loc != home_loc:
@@ -167,7 +177,8 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
 
         included = reason == "ok"
         decisions.append(CandidateDecision(candidate_id=cand.id,
-                                           included=included, reason=reason))
+                                           included=included, reason=reason,
+                                           detail=sdetail))
         if included and chosen is None:
             chosen = resolved
         if included:

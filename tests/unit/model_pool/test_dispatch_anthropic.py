@@ -184,7 +184,12 @@ class TestPoolMessagesDispatch:
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
         assert len(anth_local) == 1
 
-    def test_anthropic_vision_blocks_text_only(self, registry):
+    def test_anthropic_vision_blocked_only_by_explicit_constraint(self, registry):
+        # 7.8.0：空声明不再拦 vision — 显式声明 features 才构成约束
+        cfg = _raw_config_anthropic()
+        for c in cfg["pools"]["fast"]["candidates"]:
+            c["features"] = ["tools", "stream"]
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
@@ -201,11 +206,27 @@ class TestPoolMessagesDispatch:
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["error"]["type"] == "invalid_request_error"
+        assert "missing=vision" in body["error"]["message"]
+
+    def test_anthropic_vision_passes_empty_declaration(self, registry, anth_local):
+        # 空声明 = 无约束（全能力默认）→ vision 请求照常路由
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": object()},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
+        h = FakeMessagesHandler()
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "data": "x"}},
+            ]}]}
+
+        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert len(anth_local) == 1
 
     def test_tools_requirement_checked(self, registry, anth_local):
-        cfg = _raw_config_anthropic()
-        cfg["pools"]["fast"]["candidates"][0]["features"] = ["tools"]
-        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        # 7.8.0：tools 是 agent 基础能力 — 空声明（默认）即可路由
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeMessagesHandler()

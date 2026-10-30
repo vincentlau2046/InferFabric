@@ -132,13 +132,31 @@ class TestEvidenceRules:
 
 
 class TestFeatures:
-    def test_tools_request_excludes_text_only_candidate(self):
-        cands = [_cand("t1", 1, features=()),   # 纯文本
+    """7.8.0 语义反转：空声明 = 无约束（全能力默认），非空声明 = 严格约束。
+
+    agent 调用是基础场景，「没声明」不得构成拦截；仅显式声明的
+    features 才约束路由。
+    """
+
+    def test_empty_declaration_passes_all_requirements(self):
+        cand = _cand("e1", 1, features=())
+        snap = _pool_snap([cand])
+        for kw in ({"tools": True}, {"stream": True}, {"vision": True},
+                   {"structured": True},
+                   {"tools": True, "stream": True, "vision": True,
+                    "structured": True}):
+            sel = select(snap, _req(**kw), _rt(cand))
+            assert sel.chosen is not None, kw
+            assert sel.chosen.candidate.id == "e1", kw
+
+    def test_declared_constraint_still_rejects_missing(self):
+        cands = [_cand("t1", 1, features=("vision",)),   # 显式约束：仅 vision
                  _cand("t2", 2, features=("tools",))]
         snap = _pool_snap(cands)
         sel = select(snap, _req(tools=True), _rt(*cands))
         assert sel.chosen.candidate.id == "t2"
-        assert {d.candidate_id: d.reason for d in sel.decisions}["t1"] == "feature_unsupported"
+        assert ({d.candidate_id: d.reason for d in sel.decisions}["t1"]
+                == "feature_unsupported")
 
     def test_vision_request_excludes_non_vision(self):
         snap = _pool_snap([_cand("v1", 1, features=("tools",))])
@@ -151,6 +169,31 @@ class TestFeatures:
         snap = _pool_snap([cand])
         assert select(snap, _req(stream=True), _rt(cand)).chosen.candidate.id == "s1"
         assert select(snap, _req(structured=True), _runtime()).decisions[0].reason == "feature_unsupported"
+
+    def test_feature_unsupported_detail_reports_missing_and_declared(self):
+        snap = _pool_snap([_cand("v1", 1, features=("tools", "stream"))])
+        sel = select(snap, _req(vision=True, structured=True), _runtime())
+        d = sel.decisions[0]
+        assert d.reason == "feature_unsupported"
+        assert d.detail == "missing=structured,vision; declared=[stream, tools]"
+
+    def test_empty_evidence_features_do_not_constrain(self):
+        # 证据 features 为空（探测未记录任何功能）同样视为无约束
+        cand = _cand("p1", 1, features=("vision",))   # 候选声明非空但证据为空
+        snap = _pool_snap([cand])
+        # _resolved 用 cand.features 填证据 — 手工构造空证据
+        from inferfabric.model_pool.registry import ResolvedCandidate
+        from inferfabric.model_pool.evidence import Evidence, EvidenceState
+        rc = ResolvedCandidate(
+            candidate=cand, endpoint_fingerprint=f"fp-{cand.id}",
+            evidence={"openai": Evidence(
+                state=EvidenceState.PROBED, protocol="openai",
+                features=(), fingerprint=f"fp-{cand.id}",
+                recorded_at="t", source="admin-probe")})
+        snap = PoolSnapshot(revision=1, pool=snap.pool, candidates=(rc,))
+        sel = select(snap, _req(tools=True), _rt(cand))
+        assert sel.chosen is not None
+        assert sel.chosen.candidate.id == "p1"
 
 
 class TestLocationAndReadiness:
