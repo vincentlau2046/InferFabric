@@ -15,6 +15,13 @@
 并注入第二个本地模型（目录隔离自证 + 负路径靶 — 它未在跑，选它必须被
 三段门禁拦住）。
 
+TXT 的 ready 源是 fixture 内**桩引擎**（随机端口，GET /v1/models → 200；
+check_http_status 200→✅ → reconcile 进 active_services）。2026-10-30 根因
+修复：本地 ready 探测原落在生产 TXT 引擎端口（8007）——VL 独占时生产 TXT
+停摆 → 本地候选 local_not_ready → 预览判不过 → 5/9 级联漂移（门禁拦截逻辑
+本身按设计正确，漂移的是环境依赖）。桩化后门禁 hermetic：任何 GPU 状态
+（VL 独占 / idle / TXT 独占）下均确定可跑。
+
 换模靶 = 假云 provider（同在 scratch HOME）：cloud_provider.yaml 的静态
 models: 段启动即注册、零探测零出网（_register_spec_only_models）；dry-run
 为纯内存选择模拟（selector.select），云候选 ready 只查注册表不看本地
@@ -51,7 +58,7 @@ except Exception as _e:  # noqa: BLE001
 
 REPO_ROOT = Path(__file__).resolve().parents[2]   # sandbox 仓库根
 TXT_YAML = REPO_ROOT / "models.d" / "Qwen38-27B-TXT.yaml"
-TXT_MODEL = "Qwen38-27B-TXT"                       # 唯一在跑的本地模型（独占 GPU）
+TXT_MODEL = "Qwen38-27B-TXT"                       # scratch 内唯一「在跑」的本地模型（桩引擎，GPU 状态无关）
 SWAP_MODEL = "SwapTarget-TXT"                      # 负路径靶（scratch 注入，未在跑）
 CLOUD_PROVIDER = "iff-gate"                        # 假云 provider（静态注册零出网）
 CLOUD_SWAP = f"cloud:{CLOUD_PROVIDER}/swap-target"  # 换模靶（dry-run 纯内存）
@@ -80,9 +87,14 @@ def _free_port(prefer=8998):
     raise RuntimeError("no free port")
 
 
-def _build_scratch_repo(base: Path) -> Path:
+def _build_scratch_repo(base: Path, txt_port: int = 8007) -> Path:
     """scratch 仓库：inferfabric/_deps 符号链接（BASE_DIR=scratch，代码即当前
-    树）+ 独立 models.d（TXT + 换模靶 SwapTarget — 目录第二选项）。"""
+    树）+ 独立 models.d（TXT + 换模靶 SwapTarget — 目录第二选项）。
+
+    txt_port：TXT yaml 的端口 — 门禁 hermetic 化后指向 fixture 桩引擎的随机
+    端口（本地 ready 探测落桩，与生产 TXT 引擎 8007 活死无关）。顺序纪律：
+    SwapTarget 必须先从**原文**（8007）派生，再改写 TXT 端口 — 反过来则
+    swap 的 'port: 8007' 替换目标消失，两模型共桩端口。"""
     repo = base / "scratch-repo"
     repo.mkdir()
     os.symlink(REPO_ROOT / "inferfabric", repo / "inferfabric")
@@ -90,7 +102,6 @@ def _build_scratch_repo(base: Path) -> Path:
     md = repo / "models.d"
     md.mkdir()
     txt = TXT_YAML.read_text(encoding="utf-8")
-    (md / "Qwen38-27B-TXT.yaml").write_text(txt, encoding="utf-8")
     # 换模靶：同引擎同权重（目录只列不发请求），名/端口/容器错开
     swap = (txt
             .replace("name: Qwen38-27B-TXT", f"name: {SWAP_MODEL}")
@@ -101,7 +112,30 @@ def _build_scratch_repo(base: Path) -> Path:
                      "container_name: iff-ninfer-swaptarget")
             .replace("port: 8007", "port: 18907"))
     (md / f"{SWAP_MODEL}.yaml").write_text(swap, encoding="utf-8")
+    (md / "Qwen38-27B-TXT.yaml").write_text(
+        txt.replace("port: 8007", f"port: {txt_port}"), encoding="utf-8")
     return repo
+
+
+class _StubEngine(BaseHTTPRequestHandler):
+    """桩引擎：GET 一律 200（/v1/models 形状）— 使 scratch 的 TXT 候选在
+    adapter 健康探测（check_http_status 200→✅）下「实际在跑」。
+
+    探测只认状态码不读 body；body 仍按引擎 /v1/models 形状返回保真。不发
+    任何真实推理；门禁无路径会向它转发 chat（换模靶均为云候选）。"""
+
+    def do_GET(self):  # noqa: N802 — http.server 约定
+        body = json.dumps({"object": "list", "data": [
+            {"id": TXT_MODEL, "object": "model", "owned_by": "stub"}]}
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):   # 静默 — 不污染 pytest 输出
+        pass
 
 
 class _Always401(BaseHTTPRequestHandler):
@@ -177,6 +211,14 @@ def _get_json(base: str, path: str):
         return json.loads(r.read().decode("utf-8"))
 
 
+def _post_json(base: str, path: str, body: dict):
+    req = urllib.request.Request(
+        base + path, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
 @pytest.fixture(scope="session")
 def scratch_base(tmp_path_factory):
     """启动 scratch 代理（session 级）。EXTERNAL_BASE 模式下直接用外部目标。"""
@@ -187,7 +229,11 @@ def scratch_base(tmp_path_factory):
         pytest.fail(f"playwright 不可用 — 硬门禁必须 fail 不 skip: "
                     f"{_PW_IMPORT_ERROR}")
     base_dir = tmp_path_factory.mktemp("iff-browser-gate")
-    repo = _build_scratch_repo(base_dir)
+    # hermetic 地基（2026-10-30）：桩引擎先于代理起（代理启动 reconcile 即可见），
+    # 端口写进 scratch TXT yaml → TXT「在跑」的唯一源是桩，与生产 8007 活死无关
+    stub = HTTPServer(("127.0.0.1", 0), _StubEngine)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    repo = _build_scratch_repo(base_dir, txt_port=stub.server_address[1])
     home = base_dir / "scratch-home"       # HOME 覆盖 → 空数据目录（零池）
     home.mkdir()
     # 终审 I3：先起 401 服务器（端口进 yaml），再写 provider 配置
@@ -207,6 +253,12 @@ def scratch_base(tmp_path_factory):
     try:
         health = _wait_health(base)
         assert health.get("status") == "ok", health
+        # 就绪自检（hermetic）：强制 reconcile 确认 TXT 已进 actual_services
+        # （桩 200→✅→active）— 不依赖 60s 健康循环；桩失效时在此快速失败，
+        # 而不是让 5 个用例各自烧 15s 超时
+        recon = _post_json(base, "/reconcile", {})
+        assert TXT_MODEL in recon.get("actual_services", []), \
+            f"桩引擎未生效（TXT 不在 actual_services）: {recon}"
         # 隔离自证：零池起步 + 两个本地目录选项（符号链接 BASE_DIR 生效）
         pools = _get_json(base, "/admin/model-pools")
         assert pools.get("pools") == {} and pools.get("configured") is False, \
@@ -230,6 +282,7 @@ def scratch_base(tmp_path_factory):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=10)
+        stub.shutdown()
         httpd401.shutdown()
 
 
@@ -335,8 +388,10 @@ def test_02_select_apply_creates_pool_flips_card_and_tree(page, scratch_base):
           msg="fast 卡未转已配置")
     state = page.eval_on_selector("#mp-tstate-fast", "e => e.textContent")
     assert state != "未配置", state
+    # L3 完整候选链（8f0e8b7）：已配置池叶 = .mp-tree-cands 内每候选一个
+    # .mp-tree-cand（五态灯+名）；单候选池 fast-1 的候选名即模型名
     leaf = page.eval_on_selector(
-        '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-leaf',
+        '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
         "e => e.textContent")
     assert leaf == TXT_MODEL, leaf
     # 已配置卡动作俱在（编辑/接入片段/启用开关 — 配置界面不再消失）
@@ -382,8 +437,9 @@ def test_03_gate_blocks_not_ready_local_target(page, scratch_base):
 def test_04_swap_model_updates_tree_leaf(page, scratch_base):
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)
+    # L3 候选链叶（.mp-tree-cand）：单候选池候选名 = 模型名/云靶
     before = page.eval_on_selector(
-        '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-leaf',
+        '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
         "e => e.textContent")
     assert before == TXT_MODEL, before
     # 行内「替换为…」换成假云靶（ready 只查注册表，双协议声明 → 双预演
@@ -392,7 +448,7 @@ def test_04_swap_model_updates_tree_leaf(page, scratch_base):
         .select_option(value=CLOUD_SWAP)
     _apply_inline_diff(page)
     _poll(page,
-          '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-leaf',
+          '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
           "e => e.textContent", f"{CLOUD_PROVIDER}/swap-target",
           msg="树模型叶未更新")
     # 会话收尾：应用成功 → diff 条消失（_inline 置空）
@@ -527,7 +583,7 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
     page.locator('select[data-mp-inline-replace="fast|fast-1"]') \
         .select_option(value=CLOUD_401_SWAP)
     _apply_inline_diff(page)
-    _poll(page, '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-leaf',
+    _poll(page, '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
           "e => e.textContent", f"{CLOUD_401_PROVIDER}/unauthorized-model",
           msg="401 云靶未换上")
     # 真实 dispatch：唯一候选上游 401 → 冷却 + 队列耗尽 503 pool_unavailable
@@ -572,6 +628,7 @@ el => {
                '.mp-role-desc', '.mp-config-line', '.if-card-title',
                '.mp-edit-btn', 'select.mp-inline-sel', 'option',
                '.mp-tree-port', '.mp-tree-role', '.mp-tree-leaf',
+               '.mp-tree-cand',
                '.mp-diff-old', '.mp-diff-arrow', '.mp-diff-new',
                '.mp-inline-preview', '.mp-tree-state-cooldown',
                '.mp-inline-apply:not([disabled])'];
