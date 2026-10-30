@@ -203,9 +203,12 @@
       }
       return 'local:' + sorted[0].name;
     }
+    // premium/small 同 fast/classifier 优先 active — L2a 把 VL 纳入目录后，
+    // 全量按上下文选会选中平时不激活、需 iff switch 的独占 VL 模型；
+    // active 优先让文本池默认建议落在「当前可用」的模型上
     if (roleName === 'fast') return pick(act.length ? act : llms, false);
-    if (roleName === 'premium') return pick(llms, true);
-    if (roleName === 'small') return pick(llms, false);
+    if (roleName === 'premium') return pick(act.length ? act : llms, true);
+    if (roleName === 'small') return pick(act.length ? act : llms, false);
     if (roleName === 'classifier') {
       return act.length ? 'local:' + act[0].name : pick(llms, false);
     }

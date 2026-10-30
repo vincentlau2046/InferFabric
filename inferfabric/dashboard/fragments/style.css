@@ -1649,9 +1649,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-dot-flow { background: #30d158;
   box-shadow: 0 0 6px rgba(48, 209, 88, .5);
   animation: mp-breathe 2.4s var(--ease) infinite; }
+/* 挂掉 / 耗尽（冷却隔离）统一灰色 — 用户规格「挂了或耗尽→X或灰」：
+   off（未启动/未路由）与 cool（故障后隔离、暂时不可路由）同为「不可用」，
+   共用 var(--border) 灰；probe 保留黄色呼吸作为「正在恢复」的独立信号。 */
 .mp-dot-probe { background: #ffd60a;
   animation: mp-breathe .9s var(--ease) infinite; }
-.mp-dot-cool { background: #ffd60a; opacity: .5; }
+.mp-dot-cool { background: var(--border); }
 .mp-dot-off  { background: var(--border); }
 
 @keyframes mp-breathe {

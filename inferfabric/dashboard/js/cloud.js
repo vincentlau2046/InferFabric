@@ -427,7 +427,9 @@
         var chips = availabilityChips(p);
         // 已入注册表（可路由）的候选才给打标入口 — 打标即声明（创建 spec，
         // 恒可路由），未勾选候选不给，避免「只是想标注」意外放行路由
-        var capBtns = rcaps[mid] ? capChips(nameAttr, mid,
+        // provider 传原始名 — _capChip 内只 esc 一次（nameAttr 已 esc，
+        // 再传会双转义，含 HTML 特殊字符的厂商名打标后变 AT&amp;T → 404）
+        var capBtns = rcaps[mid] ? capChips(p.name, mid,
           rcaps[mid].supports_vision, rcaps[mid].supports_tools) : '';
         return '<label class="cpm-item" data-action="cpm-toggle" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '">' +
           '<input type="checkbox" class="cpm-check" ' + (checked ? 'checked' : '') + ' aria-label="' + esc(mid) + '">' +
@@ -450,7 +452,7 @@
           '<span class="cpm-check-ph" aria-hidden="true"></span>' +
           '<span class="cpm-id mono">' + esc(s.id) + '</span>' +
           '<span class="cpm-src">' + label + '</span>' +
-          capChips(nameAttr, s.id, s.supports_vision, s.supports_tools) +
+          capChips(p.name, s.id, s.supports_vision, s.supports_tools) +
           '<span class="cpm-ops">' +
             '<button type="button" class="btn btn-danger btn-xs" data-action="cpm-remove" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">移除</button>' +
           '</span>' +
