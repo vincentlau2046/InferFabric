@@ -8,10 +8,10 @@
 | 浏览器门禁 | ✅ commit 2b9c7fa | test_08 端到端（约束 → 自解释 400 → 解除 → 200 直通）；10/10 passed |
 | 顺带修复 | ✅ commit 2b9c7fa | `_forward_request` 池路径 `settimeout` 必败 bug（本地池候选 unreachable）→ make_conn 构造参数；单测 RED→GREEN |
 | TDD | ✅ | 单测逐条先观察到 RED；test_08 RED×2（declared 序断言修正 + 503 揭出 settimeout bug）后 GREEN |
-| 全量回归 | ⏳ | 待跑（基线 1903 + 新增） |
-| import 冒烟 | ⏳ | 待跑（期望 7.8.0） |
-| 干净 worktree 复验 | ⏳ | 沙箱工作区绿 ≠ 提交树绿 |
-| cross-review | ⏳ | fresh-context subagent 一次 |
+| 全量回归 | ✅ | 1914 passed（unit+integration；基线 1903 + 新增 11） |
+| import 冒烟 | ✅ | `python3 -c "import inferfabric"` → 7.8.0 |
+| 干净 worktree 复验 | ✅ | 提交树 440f31a：全量 1914 passed + 浏览器门禁 10/10（沙箱工作区绿 ≠ 提交树绿，故独立复验） |
+| cross-review | ⏳ | fresh-context subagent 评审中 |
 | 版本 | ✅ | 7.8.0（minor，用户随方案 B 批准）；README 历史表已加行 |
 | 合并/部署 | ⏳ | ff-merge 生产 main + BatchMode push；**重启需用户单独授权**；重启后 dry-run 验证 `iff/premium` tools=true → chosen |
 
