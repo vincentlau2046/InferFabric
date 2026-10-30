@@ -1703,6 +1703,16 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .mp-tree-port { color: var(--ink-2); }
 .mp-tree-leaf { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* L3：树行完整候选链 — 每候选 = 五态灯 + 名；候选多时横向滚动不挤压态徽标 */
+.mp-tree-cands {
+  display: inline-flex; align-items: center; gap: 10px;
+  flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; padding-bottom: 1px;
+  font-size: var(--fs-table); color: var(--ink); white-space: nowrap;
+}
+.mp-tree-cand { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+/* 挂掉/未启动（off）：文字降暗 — 点色由 mp-dot-off 灰承担，双编码 */
+.mp-tree-cand-dim { color: var(--ink-3); }
 .mp-link {
   flex: 1 1 24px; min-width: 16px; height: 2px;
   border-radius: 1px; background: var(--border);
