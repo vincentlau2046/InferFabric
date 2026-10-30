@@ -5,9 +5,11 @@
 恒空）；现由后端一次性构建权威视图，前端只消费。
 
 语义：
-  - local  = models.d 中 model_type=='llm' 的模型（chat 池；TTS/ASR/
+  - local  = models.d 中 model_type 为 llm/vl 的模型（chat 池；TTS/ASR/
     embedding 不进 chat 池 — 选了也永远不可用）。条目名 = served_name
-    （池候选引用 served_name，dispatch 评审 #15）。
+    （池候选引用 served_name，dispatch 评审 #15）。features 由 modality
+    推导（text-vision/multimodal → vision），与云候选同构 — 面板建候选
+    时快照进池配置，selector 据此做模态路由。
   - cloud  = cloud_models（发现后可路由集合）— 与 runtime_view 同源，
     「目录里出现的 ⇔ dispatch 能路由到的」按构造一致。provider.candidates
     里的非 routable 别名（如 glm-5-failover）按构造不进目录。
@@ -60,7 +62,7 @@ def _local_entries(pm) -> list[dict]:
     get_model = getattr(mgr, "get_model", None)
     out = []
     for m in models:
-        if not isinstance(m, dict) or m.get("model_type") != "llm":
+        if not isinstance(m, dict) or m.get("model_type") not in ("llm", "vl"):
             continue
         name = m.get("name")
         if not name:
@@ -74,6 +76,9 @@ def _local_entries(pm) -> list[dict]:
             except Exception:
                 served = name
         engine = m.get("type") or ""
+        # features 由 modality 推导（与云候选 supports_vision → features 同构）：
+        # 池候选建库时快照，selector 据此做模态路由
+        features = ["vision"] if m.get("modality") in ("text-vision", "multimodal") else []
         out.append({
             "name": served,
             "active": bool(m.get("active")),
@@ -81,6 +86,7 @@ def _local_entries(pm) -> list[dict]:
             "modality": m.get("modality"),
             "context_window": m.get("context_window"),
             "protocols": local_protocols_for_engine(engine),
+            "features": features,
         })
     return out
 
