@@ -28,7 +28,27 @@ def test_off_grace_allows_unregistered_key_with_warning(auth, caplog):
     auth.store.set_policy('off')
     with caplog.at_level('WARNING', logger='inferfabric.security'):
         assert auth.check('Bearer not-a-real-key', 'iff/work')[0]
-    assert any('not-a-real-key' not in r.message and 'off' in r.message for r in caplog.records)
+    # 钉死宽限 warning 本身（且原值 key 不进日志）
+    assert any('off policy' in r.message and 'unknown' in r.message
+               and 'not-a-real-key' not in r.message for r in caplog.records)
+
+
+def test_off_grace_denies_unknown_key_when_legacy_enabled(tmp_path):
+    # legacy YAML 开启时 legacy 语义接管 — 未注册 key 无宽限
+    path = tmp_path / 'api_keys.yaml'
+    path.write_text('primary: legacy-root\n')
+    auth = SecurityAuth(AuthManager(path), KeyStore(tmp_path / 'security.db', provision=True))
+    auth.store.set_policy('off')
+    assert not auth.check('Bearer unknown-key', 'local')[0]
+
+
+def test_expired_key_denied_under_pools(auth, monkeypatch):
+    # 过期 key 只在 off 宽限放行；pools/all 一律拒绝
+    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    _, token = auth.store.create_key('exp', None, deadline)
+    monkeypatch.setattr(auth.store, '_now', lambda: deadline.timestamp() + 10)
+    auth.store.set_policy('pools')
+    assert not auth.check(token, 'local')[0]
 
 
 def test_off_grace_rejects_revoked_and_out_of_scope(auth):

@@ -33,6 +33,8 @@
 - 损坏存储上的 init/set-password/policy 错误改为指向 recover；主 CLI `keys` 分发补捕获 `sqlite3.Error`，不再 traceback。
 - 运行中的网关无需重启即在新请求使用新库（每操作按路径新开 mode=rw 连接）；旧管理会话随密码记录变更失效。
 
+**off 宽限 7.6.4 评审（fresh-context subagent，2831d6a..78765e9）**：0 Critical / 0 Important，裁决 Clean。3 项 Minor 已当场修复：(1) 过期+scoped key 在 off 下按 validity 宽限放行（视同匿名、不扩权）→ spec 补一行边界说明；(2) 补两个测试 pin（legacy 开启时 off 无宽限、过期 key 在 pools 拒绝）；(3) 收紧 warning 断言（钉 `off policy`+`unknown` 且原值 key 不进日志）。2 项 Informational 留档不修：legacy YAML 开启时宽限不生效（生产无 api_keys.yaml，非现状）；off 下宽限 warning 无速率上限（迁移期可接受）。
+
 **Minor（留档不修）**：
 
 1. 默认端口来源 `http://127.0.0.1:80` / `:443` 的 Host 匹配缺口（当前 8999 部署不受影响）
