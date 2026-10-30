@@ -218,6 +218,89 @@ class TestCurationMethods:
         assert cd.get_candidates("test-provider") == []
 
 
+class TestCapabilityTagging:
+    """模态/能力打标（L2b）：update_model_spec 写 model_specs → 注册表 → 持久化。
+
+    云模型能力上游 /models 不提供（_discover_provider 只取 id），必须人工
+    声明。model_specs 是唯一注入点（_merge_model_spec），打标即写 spec。
+    """
+
+    _cd = TestCurationMethods._cd
+
+    def test_tag_vision_on_manual_model(self, tmp_path, mock_port):
+        cd = self._cd(tmp_path, mock_port)
+        cd.add_manual_model("test-provider", "my-custom-glm")
+        count = cd.update_model_spec("test-provider", "my-custom-glm",
+                                     {"supports_vision": True})
+        m = cd.cloud_models.get("my-custom-glm")
+        assert m is not None
+        assert m.supports_vision is True
+        assert count == 1
+
+    def test_tag_creates_spec_for_new_model(self, tmp_path, mock_port):
+        # 打标未知模型 = 声明：创建 spec（恒可路由语义，与手填同管道）
+        cd = self._cd(tmp_path, mock_port)
+        cd.update_model_spec("test-provider", "brand-new-model",
+                             {"supports_vision": True})
+        assert cd.providers["test-provider"].model_specs["brand-new-model"] == {
+            "supports_vision": True}
+        assert cd.cloud_models["brand-new-model"].supports_vision is True
+
+    def test_tag_merges_into_enabled_candidate(self, tmp_path, mock_port):
+        # 已勾选的发现候选：spec 经 _merge_model_spec 合并进候选
+        cd = self._cd(tmp_path, mock_port, enabled_models=["glm-5"])
+        cd.discover_all()
+        cd.update_model_spec("test-provider", "glm-5", {"supports_tools": True})
+        assert cd.cloud_models["glm-5"].supports_tools is True
+
+    def test_tag_persists_roundtrip(self, tmp_path, mock_port):
+        # 序列化契约：supports_vision/supports_tools 必须落盘（此前在 known
+        # 排除集里被静默丢弃 — 打标后任一策展操作 save_config 即丢失）
+        cd = self._cd(tmp_path, mock_port)
+        cd.update_model_spec("test-provider", "my-custom-glm",
+                             {"supports_vision": True, "supports_tools": True})
+        cd.save_config()
+        cd2 = CloudDiscovery(tmp_path / "cloud_provider.yaml")
+        m = cd2.cloud_models.get("my-custom-glm")
+        assert m is not None
+        assert m.supports_vision is True
+        assert m.supports_tools is True
+
+    def test_tag_off_persists_false(self, tmp_path, mock_port):
+        # 关闭标签：显式 False 落盘，重载后不复活
+        cd = self._cd(tmp_path, mock_port)
+        cd.update_model_spec("test-provider", "my-custom-glm",
+                             {"supports_vision": True})
+        cd.update_model_spec("test-provider", "my-custom-glm",
+                             {"supports_vision": False})
+        cd.save_config()
+        cd2 = CloudDiscovery(tmp_path / "cloud_provider.yaml")
+        assert cd2.cloud_models["my-custom-glm"].supports_vision is False
+
+    def test_add_manual_model_with_caps(self, tmp_path, mock_port):
+        cd = self._cd(tmp_path, mock_port)
+        cd.add_manual_model("test-provider", "my-custom-glm",
+                            caps={"supports_vision": True})
+        assert cd.cloud_models["my-custom-glm"].supports_vision is True
+        saved = cd._serialize_providers()
+        assert saved["providers"]["test-provider"]["models"]["my-custom-glm"][
+            "supports_vision"] is True
+
+    def test_tag_unknown_provider_raises(self, tmp_path, mock_port):
+        cd = self._cd(tmp_path, mock_port)
+        with pytest.raises(KeyError):
+            cd.update_model_spec("ghost-provider", "glm-5", {"supports_vision": True})
+
+    def test_tag_unknown_capability_ignored(self, tmp_path, mock_port):
+        # 契约：只接受 supports_vision/supports_tools（handler 已校验；
+        # 方法层防御性丢弃未知键，不写脏 spec）
+        cd = self._cd(tmp_path, mock_port)
+        cd.update_model_spec("test-provider", "my-custom-glm",
+                             {"supports_vision": True, "evil_key": "x"})
+        spec = cd.providers["test-provider"].model_specs["my-custom-glm"]
+        assert "evil_key" not in spec
+
+
 class TestPersistence:
     """enabled_models + 空 spec 手填模型的 YAML 往返。"""
 

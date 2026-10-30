@@ -1338,6 +1338,44 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .cpm-chips { margin-left: auto; }
 .cpm-ops { margin-left: auto; flex-shrink: 0; }
 .btn-xs { padding: 1px 8px; font-size: 11px; }
+/* 能力打标 chips（视觉/工具）：候选/已声明行内点击切换 → tag 动作 */
+.cpm-cap-chips { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.cpm-cap-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 0 8px;
+  line-height: 17px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.cpm-cap-chip:hover {
+  color: var(--ink-1);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.cpm-cap-chip.on {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface-2));
+}
+.cpm-cap-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 手填表单能力选择框（添加时即声明） */
+.cpm-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cpm-cap input { accent-color: var(--accent); margin: 0; }
 .cpm-add {
   display: flex;
   gap: var(--sp-1);

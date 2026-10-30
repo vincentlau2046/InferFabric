@@ -3,19 +3,26 @@
  * （行内 测试/发现/模型/删除，模型 = 行下内联策展面板）
  * + 手动配置表单 + 可路由模型列表。
  *
- * 策展语义（v6.1 Phase 1 白名单制）：
+ * 策展语义（v6.1 Phase 1 白名单制；L2b 能力打标）：
  *   - 发现候选 = 上游 /models 快照，默认不勾、不路由 → 注销不路由
  *   - 勾选 = 可路由；取消 = 隐藏；手填 = 新增（恒可路由）
- *   - 操作即生效：勾选/移除/添加即时 POST，无「保存」按钮
+ *   - 能力打标（视觉/工具）：上游 /models 不提供能力元数据，人工声明写
+ *     model_specs → 注册表 → catalog features，池模态路由据此选路。
+ *     添加时勾选、行内 chips 点击切换；未入注册表的候选不给打标入口
+ *     （打标即声明，会让模型恒可路由）
+ *   - 操作即生效：勾选/移除/添加/打标即时 POST，无「保存」按钮
  *
  * 数据源（全部 /admin/cloud/*，UI.adminHeaders()）：
  *   - GET    /admin/cloud/presets    — {presets:[…]}
  *   - GET    /admin/cloud/providers  — {providers:[{name,enabled,openai_base,anthropic_base,
- *            discovery_enabled,discovery_interval,enabled_models,model_specs:[{id,manual}],
+ *            discovery_enabled,discovery_interval,enabled_models,
+ *            model_specs:[{id,manual,supports_vision,supports_tools}],
+ *            routable_caps:{<mid>:{supports_vision,supports_tools}},
  *            candidates,routable_count,key_env_var,key_env_set,preset_id}], models:[…],
  *            total_cloud_models, last_discovery}
  *   - POST   /admin/cloud/providers  — 预设 {preset, api_key}；手动 {name, api_key, openai_base, anthropic_base}
- *   - POST   /admin/cloud/provider-models — {provider, action: enable|disable|add|remove, model}
+ *   - POST   /admin/cloud/provider-models — {provider, action: enable|disable|add|remove|tag, model,
+ *            supports_vision?, supports_tools?}
  *   - DELETE /admin/cloud/providers  — {name}
  *   - POST   /admin/cloud/test       — {url(base 去尾斜杠, 不拼 /models), api_key, protocol, probe_model?}
  *                                       → {status, pass, message, ...}（pass = 可添加门禁）
@@ -33,7 +40,7 @@
  *   - window.tabRenderers['tab-cloud'] = renderCloud；window.renderCloud
  *   - window.doCloudAdd() / doCloudAddPreset() / doCloudTest(opts) / doCloudDiscover() / doCloudDelete() / doCloudReload()
  *       doCloudTest(opts)：opts={base,key,protocol,probeModel}，返回 Promise<{ok,pass,data,error}>
- *   - window.doCpmToggle() / doCpmAdd() / doCpmRemove() / doCpmRefresh()
+ *   - window.doCpmToggle() / doCpmAdd() / doCpmRemove() / doCpmRefresh() / doCpmTag()
  */
 (function () {
   'use strict';
@@ -414,13 +421,19 @@
       // 千帆类厂商无 /models 列表端点（404）→ 发现永远拉不到候选，不再让用户重复点「发现」
       candHtml = '<div class="if-empty">该厂商未提供 /models 列表（或上游未返回模型）— 在下方「已声明」添加模型名（恒可路由）</div>';
     } else {
+      var rcaps = p.routable_caps || {};
       candHtml = cands.map(function (mid) {
         var checked = !!enableSet[mid];
         var chips = availabilityChips(p);
+        // 已入注册表（可路由）的候选才给打标入口 — 打标即声明（创建 spec，
+        // 恒可路由），未勾选候选不给，避免「只是想标注」意外放行路由
+        var capBtns = rcaps[mid] ? capChips(nameAttr, mid,
+          rcaps[mid].supports_vision, rcaps[mid].supports_tools) : '';
         return '<label class="cpm-item" data-action="cpm-toggle" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '">' +
           '<input type="checkbox" class="cpm-check" ' + (checked ? 'checked' : '') + ' aria-label="' + esc(mid) + '">' +
           '<span class="cpm-id mono">' + esc(mid) + '</span>' +
           '<span class="cpm-src">发现</span>' +
+          capBtns +
           chips +
         '</label>';
       }).join('');
@@ -437,6 +450,7 @@
           '<span class="cpm-check-ph" aria-hidden="true"></span>' +
           '<span class="cpm-id mono">' + esc(s.id) + '</span>' +
           '<span class="cpm-src">' + label + '</span>' +
+          capChips(nameAttr, s.id, s.supports_vision, s.supports_tools) +
           '<span class="cpm-ops">' +
             '<button type="button" class="btn btn-danger btn-xs" data-action="cpm-remove" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">移除</button>' +
           '</span>' +
@@ -467,12 +481,38 @@
             '<div class="cpm-add">' +
               '<input type="text" class="if-field-input mono cpm-add-input" placeholder="模型名，如 my-glm" ' +
                 'autocomplete="off" spellcheck="false" data-action="cpm-add" data-provider="' + nameAttr + '" aria-label="添加模型名">' +
+              '<label class="cpm-cap" title="声明该模型支持图像输入 — 池模态路由据此为视觉请求选路">' +
+                '<input type="checkbox" class="cpm-cap-vision">视觉</label>' +
+              '<label class="cpm-cap" title="声明该模型支持工具调用（function calling）">' +
+                '<input type="checkbox" class="cpm-cap-tools">工具</label>' +
               '<button type="button" class="btn btn-pri btn-sm" data-action="cpm-add" data-provider="' + nameAttr + '">添加</button>' +
             '</div>' +
           '</section>' +
         '</div>' +
         '<div class="cpm-foot">路由只认「已启用」 — 未勾选的候选按未知模型返回 404，不静默兜底</div>' +
       '</div>';
+  }
+
+  // 能力打标 chips（候选/已声明行内，点击切换 → tag 动作）。
+  // 按钮在 <label class="cpm-item"> 内：交互后代上的点击 label 不转发给
+  // 关联 checkbox（HTML label 激活规则），勾选态不受影响。
+  var _CAP_LABELS = { supports_vision: '视觉', supports_tools: '工具' };
+
+  function capChips(provider, mid, vision, tools) {
+    return '<span class="cpm-cap-chips">' +
+      _capChip(provider, mid, 'supports_vision', !!vision) +
+      _capChip(provider, mid, 'supports_tools', !!tools) +
+      '</span>';
+  }
+
+  function _capChip(provider, mid, cap, on) {
+    var label = _CAP_LABELS[cap] || cap;
+    return '<button type="button" class="cpm-cap-chip' + (on ? ' on' : '') +
+      '" data-action="cpm-tag" data-provider="' + esc(provider) +
+      '" data-model="' + esc(mid) + '" data-cap="' + cap +
+      '" data-val="' + (on ? '1' : '0') + '" aria-pressed="' + (on ? 'true' : 'false') +
+      '" title="点击切换「' + label + '」能力标签（写入模型声明，池模态路由据此选路）">' +
+      label + '</button>';
   }
 
   // 协议可用徽标（面板行内用，OpenAI/Anthropic 双编码）
@@ -493,11 +533,15 @@
   }
 
   /* ══ 策展动作：POST /admin/cloud/provider-models ══ */
-  async function callProviderModels(provider, action, model) {
+  async function callProviderModels(provider, action, model, extra) {
+    var body = { provider: provider, action: action, model: model };
+    if (extra) {
+      Object.keys(extra).forEach(function (k) { body[k] = extra[k]; });
+    }
     var res = await fetch('/admin/cloud/provider-models', {
       method: 'POST',
       headers: UI.adminHeaders(),
-      body: JSON.stringify({ provider: provider, action: action, model: model }),
+      body: JSON.stringify(body),
     });
     var d = null;
     try { d = await res.json(); } catch (_) {}
@@ -522,17 +566,47 @@
   window.doCpmAdd = async function (provider, inputEl) {
     var model = (inputEl ? inputEl.value : '').trim();
     if (!model) { UI.toast('请填写模型名', 'error'); return; }
+    // 添加时即声明能力（选择框）：只传勾选项 — 未勾 = 不写键（默认 False）
+    var wrap = inputEl && inputEl.closest ? inputEl.closest('.cpm-add') : null;
+    var visEl = wrap ? wrap.querySelector('.cpm-cap-vision') : null;
+    var tlsEl = wrap ? wrap.querySelector('.cpm-cap-tools') : null;
+    var caps = {};
+    if (visEl && visEl.checked) caps.supports_vision = true;
+    if (tlsEl && tlsEl.checked) caps.supports_tools = true;
     try {
-      var r = await callProviderModels(provider, 'add', model);
+      var r = await callProviderModels(provider, 'add', model, caps);
       if (!r.ok || !r.data || r.data.error) {
         UI.toast((r.data && r.data.error) || ('添加失败 · HTTP ' + r.status), 'error');
         return;
       }
-      UI.toast(model + ' 已添加（恒可路由）', 'success');
+      var capTxt = '';
+      if (caps.supports_vision) capTxt += ' · 视觉';
+      if (caps.supports_tools) capTxt += ' · 工具';
+      UI.toast(model + ' 已添加（恒可路由' + capTxt + '）', 'success');
       if (inputEl) inputEl.value = '';
+      if (visEl) visEl.checked = false;
+      if (tlsEl) tlsEl.checked = false;
       await cloudLoadProviders();
     } catch (e) {
       UI.toast('添加失败: ' + (e.message || e), 'error');
+    }
+  };
+
+  window.doCpmTag = async function (provider, model, cap, nextVal) {
+    if (!provider || !model || !cap) { UI.toast('缺少打标参数', 'error'); return; }
+    var extra = {};
+    extra[cap] = !!nextVal;
+    try {
+      var r = await callProviderModels(provider, 'tag', model, extra);
+      if (!r.ok || !r.data || r.data.error) {
+        UI.toast((r.data && r.data.error) || ('打标失败 · HTTP ' + r.status), 'error');
+        return;
+      }
+      UI.toast(model + '「' + (_CAP_LABELS[cap] || cap) + '」已' +
+               (nextVal ? '开启' : '关闭'), 'success');
+      await cloudLoadProviders();
+    } catch (e) {
+      UI.toast('打标失败: ' + (e.message || e), 'error');
     }
   };
 
@@ -817,7 +891,7 @@
    * checkbox 的动作挂 label：点击文本/控件都能命中（closest 上溯到 label），
    * label 原生切换 checkbox → 读 checked 得新状态。
    * 预设卡 / 添加输入为 div/input → keydown Enter/Space 亦触发。 */
-  async function handleAction(el) {
+  async function handleAction(el, ev) {
     var act = el.getAttribute('data-action');
     if (!act || el.disabled) return;
     var provider = el.getAttribute('data-provider');
@@ -906,6 +980,16 @@
       case 'cpm-remove':
         if (provider) window.doCpmRemove(provider, el.getAttribute('data-model'));
         break;
+      case 'cpm-tag': {
+        // chips 是 <label class="cpm-item"> 内的交互后代 — label 不转发激活，
+        // 但显式 preventDefault 兜底（浏览器实现差异），确保勾选态零扰动
+        if (ev && ev.preventDefault) ev.preventDefault();
+        if (!provider) return;
+        window.doCpmTag(provider, el.getAttribute('data-model'),
+                        el.getAttribute('data-cap'),
+                        el.getAttribute('data-val') === '1' ? false : true);
+        break;
+      }
       case 'provider-test': {
         if (!provider) return;
         var p = null;
@@ -965,7 +1049,7 @@
     root.addEventListener('click', function (ev) {
       var el = ev.target.closest ? ev.target.closest('[data-action]') : null;
       if (!el || !root.contains(el)) return;
-      handleAction(el);
+      handleAction(el, ev);
     });
     root.addEventListener('keydown', function (ev) {
       var t = ev.target;
@@ -976,7 +1060,7 @@
       var el = t.closest ? t.closest('[data-action]') : null;
       if (!el || !root.contains(el) || el.tagName === 'BUTTON') return;
       ev.preventDefault();
-      handleAction(el);
+      handleAction(el, ev);
     });
 
     // R1/R2 失效规则：已通过的测试，任一表单字段 change → 重新禁用"添加" + 结果条提示
