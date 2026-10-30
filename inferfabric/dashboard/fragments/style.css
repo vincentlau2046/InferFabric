@@ -1562,6 +1562,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: var(--radius-pill); padding: 1px 8px;
 }
+/* 7.8.0 全能力徽章：空声明 = 无约束默认态 — 与约束 chips 视觉区分（绿色系） */
+.mp-feat-all { color: #30d158;
+  border-color: color-mix(in srgb, #30d158 35%, transparent); }
+.mp-feat-opts { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
+.mp-feat-opt { font-size: 11px; color: var(--ink-2); display: inline-flex;
+  align-items: center; gap: 2px; }
 .mp-cand-rt { font-size: var(--fs-table); color: var(--ink-2);
   display: flex; align-items: center; gap: var(--sp-1); }
 /* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */

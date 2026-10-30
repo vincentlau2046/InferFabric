@@ -2656,3 +2656,124 @@ class TestTreeInteractions:
         actions = [{"fn": "doMpTreeDiag", "args": ["fast"]}] * 2
         out = run_panel(routes, actions=actions)
         assert "mp-tree-tl-fast" not in out["htmlFinal"], "再点收起"
+
+
+# ── 7.8.0 能力默认语义：空声明 = 全能力徽章；编辑器能力约束控件 ──
+
+class TestCapabilityDefaults:
+    def test_card_renders_full_capability_badge_for_empty_features(self, run_panel):
+        # loc=显式 tools 约束 → chips；cld=空声明 → 全能力徽章（7.8.0：
+        # 空声明不得被读作「仅纯文本」— 卡片必须显式标出全能力默认）
+        out = run_panel(_ops_routes())
+        assert '<span class="mp-feat">tools</span>' in out["html"]
+        assert "全能力" in out["html"]
+        assert "mp-feat-all" in out["html"]
+
+    def test_tree_constrained_candidate_title(self, run_panel):
+        # 树叶节点：约束候选带 title 列出声明集（轻量，不改 DOM 结构）
+        out = run_panel(_ops_routes())
+        assert 'title="能力约束：tools"' in out["html"]
+
+
+class TestCapabilityEditor:
+    def test_editor_renders_capability_cell(self, run_panel):
+        actions = [{"fn": "doMpEdit", "args": ["fast"]}]
+        out = run_panel(_editor_routes(), actions=actions)
+        m = out["modalHtml"]
+        assert "<th>能力</th>" in m                       # 候选表新增能力列
+        assert "全能力" in m                               # dang 空声明
+        assert 'data-mp-act="feat-edit"' in m             # 编辑能力入口
+        assert 'data-mp-act="feat-clear"' in m            # loc 有约束 → 解除按钮
+        assert 'data-mp-cand="loc" data-mp-act="feat-clear"' in m
+
+    def test_editor_feat_edit_open_renders_checkboxes(self, run_panel):
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpFeatEditOpen", "args": ["loc"]},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        m = out["modalHtml"]
+        # 4 词表复选框（checked=允许）；loc 约束 ["tools"] → tools 勾、其余空
+        for w in ("tools", "stream", "vision", "structured"):
+            assert 'data-mp-feat="%s"' % w in m, w
+        assert m.count('checked') >= 1
+        assert 'data-mp-act="feat-save"' in m
+        assert 'data-mp-act="feat-cancel"' in m
+
+    def test_editor_feat_save_updates_work_and_posts(self, run_panel):
+        # dang（空=全勾）→ 取消 tools → 保存 → features=[stream,vision,structured]
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpFeatEditOpen", "args": ["dang"]},
+            {"fn": "mpFeatDraftToggle", "args": ["dang", "tools", False]},
+            {"fn": "mpFeatSave", "args": ["dang"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        dang = next(c for c in body["pools"]["fast"]["candidates"]
+                    if c["id"] == "dang")
+        assert dang["features"] == ["stream", "vision", "structured"]
+
+    def test_editor_feat_save_all_checked_normalizes_to_empty(self, run_panel):
+        # loc（["tools"]）→ 补勾其余 3 项 → 全勾保存 → 规范式 features=[]
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpFeatEditOpen", "args": ["loc"]},
+            {"fn": "mpFeatDraftToggle", "args": ["loc", "stream", True]},
+            {"fn": "mpFeatDraftToggle", "args": ["loc", "vision", True]},
+            {"fn": "mpFeatDraftToggle", "args": ["loc", "structured", True]},
+            {"fn": "mpFeatSave", "args": ["loc"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        loc = next(c for c in body["pools"]["fast"]["candidates"]
+                   if c["id"] == "loc")
+        assert loc["features"] == []
+
+    def test_editor_feat_save_empty_draft_rejected(self, run_panel):
+        # 空声明 = 全能力，无法表达「完全不支持」→ 全不勾保存被拒并提示
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpFeatEditOpen", "args": ["loc"]},
+            {"fn": "mpFeatDraftToggle", "args": ["loc", "tools", False]},
+            {"fn": "mpFeatSave", "args": ["loc"]},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        assert any("至少保留一项" in t["message"] for t in out["toasts"])
+        # work copy 未被改：仍为 ["tools"]
+        body = _last_update_post(out) if any(
+            c["method"] == "POST" and c["url"] == "/admin/model-pools"
+            for c in out["calls"]) else []
+        assert body == []   # 拒绝 → 未发任何更新
+
+    def test_editor_feat_clear_removes_constraint(self, run_panel):
+        # 解除约束按钮：loc ["tools"] → features=[]（全能力）
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpFeatClear", "args": ["loc"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        loc = next(c for c in body["pools"]["fast"]["candidates"]
+                   if c["id"] == "loc")
+        assert loc["features"] == []
+
+    def test_editor_feat_change_invalidates_preview(self, run_panel):
+        # 预览通过后再改能力 → 应用必须被阻（validated 失效重烘）
+        actions = [
+            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "mpEditPreview", "args": []},
+            {"fn": "mpFeatClear", "args": ["loc"]},
+            {"fn": "mpEditApply", "args": []},
+        ]
+        out = run_panel(_editor_routes(), actions=actions)
+        posts = [c for c in out["calls"]
+                 if c["method"] == "POST" and c["url"] == "/admin/model-pools"]
+        assert posts == []   # 未重新预览 → 不得 POST
+        assert any("预览" in t["message"] for t in out["toasts"])
