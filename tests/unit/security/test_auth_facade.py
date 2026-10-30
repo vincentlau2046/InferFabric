@@ -13,13 +13,42 @@ def auth(tmp_path):
     return SecurityAuth(AuthManager(), KeyStore(tmp_path / 'security.db', provision=True))
 
 
-@pytest.mark.parametrize('policy,pool_ok,direct_ok', [('off', True, True), ('pools', False, True), ('all', False, False)])
-def test_anonymous_matrix(auth, policy, pool_ok, direct_ok):
+@pytest.mark.parametrize('policy,pool_ok,direct_ok,bogus_ok', [
+    ('off', True, True, True), ('pools', False, True, False), ('all', False, False, False)])
+def test_anonymous_matrix(auth, policy, pool_ok, direct_ok, bogus_ok):
+    # off = 迁移宽限：未注册凭证不拦（记 warning）；pools/all 一律拒绝。
     auth.store.set_policy(policy)
     assert auth.enabled
     assert auth.check('', 'iff/work')[0] is pool_ok
     assert auth.check('', 'local')[0] is direct_ok
-    assert not auth.check('Bearer bogus', 'local')[0]
+    assert auth.check('Bearer bogus', 'local')[0] is bogus_ok
+
+
+def test_off_grace_allows_unregistered_key_with_warning(auth, caplog):
+    auth.store.set_policy('off')
+    with caplog.at_level('WARNING', logger='inferfabric.security'):
+        assert auth.check('Bearer not-a-real-key', 'iff/work')[0]
+    assert any('not-a-real-key' not in r.message and 'off' in r.message for r in caplog.records)
+
+
+def test_off_grace_rejects_revoked_and_out_of_scope(auth):
+    auth.store.set_policy('off')
+    meta, token = auth.store.create_key('client', ['iff/work'], None)
+    auth.store.revoke_key(meta['id'])
+    assert not auth.check(token, 'iff/work')[0]
+    meta2, scoped = auth.store.create_key('scoped', ['iff/work'], None)
+    assert not auth.check(scoped, 'iff/other')[0]
+    assert auth.check(scoped, 'iff/work')[0]
+
+
+def test_off_grace_allows_expired_key(auth, monkeypatch):
+    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    _, token = auth.store.create_key('exp', None, deadline)
+    monkeypatch.setattr(auth.store, '_now', lambda: deadline.timestamp())
+    auth.store.set_policy('off')
+    assert auth.check(token, 'local')[0]
+    auth.store.set_policy('all')
+    assert not auth.check(token, 'local')[0]
 
 
 @pytest.mark.parametrize('policy', ['off', 'pools', 'all'])
@@ -33,13 +62,6 @@ def test_credential_scope_and_live_revocation(auth, policy):
     assert not auth.check(token, 'iff/other')[0]
     auth.store.revoke_key(meta['id'])
     assert not auth.check(token, 'iff/work')[0]
-
-
-def test_expired_token_denied_even_off(auth, monkeypatch):
-    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
-    _, token = auth.store.create_key('exp', None, deadline)
-    monkeypatch.setattr(auth.store, '_now', lambda: deadline.timestamp())
-    assert not auth.check(token, 'local')[0]
 
 
 @pytest.mark.parametrize('policy', ['off', 'pools', 'all'])

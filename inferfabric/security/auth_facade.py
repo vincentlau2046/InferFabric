@@ -32,6 +32,15 @@ class SecurityAuth:
                 return result
             if self.legacy.enabled:
                 return self.legacy.check(header, model)
+            if policy == 'off':
+                # off = 迁移宽限：未注册/过期凭证不拦（2026-10-30 事故：客户端带
+                # 占位 key 在激活瞬间被 401 打挂）。吊销与 scope 边界始终生效。
+                status = self.store.key_status(token)
+                if status in ('unknown', 'expired'):
+                    log.warning('API key %s passed under off policy (model=%s); '
+                                'register or rotate it before enforcement',
+                                status, model)
+                    return True, 'ok'
             return result
         except (OSError, sqlite3.DatabaseError, ValueError):
             log.error('Security store unavailable; request denied')

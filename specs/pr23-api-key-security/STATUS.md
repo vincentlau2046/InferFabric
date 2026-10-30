@@ -1,6 +1,6 @@
 # PR-23a API KEY 安全后端 — STATUS
 
-日期：2026-10-29。分支：sandbox/pr23a-security。版本：7.6.3。
+日期：2026-10-29。分支：sandbox/main（pr23a-security 已合并）。版本：7.6.4（off 宽限语义修正）。
 规格：`../pr23-api-key-security-spec.md`。
 
 ## 授权与边界
@@ -20,7 +20,8 @@
 | import | ✅ | 7.6.3 |
 | 独立评审 | ✅ | 一次 fresh-context subagent（opus）评审 ef3c5d5..7984273：0 Critical / 1 Important / 8 Minor。Important 已修复（上行）；Minor 全部留档（见评审记录） |
 | 干净提交树复验 | ✅ | detached checkout 07cd511（干净 worktree，PYTHONPATH 含 _deps）：1868 passed（31.47s），import 7.6.3 |
-| 生产合并/激活 | 未执行 | 激活与强制策略必须独立于代码部署 |
+| off 宽限语义修正（7.6.4） | ✅ | TDD：5 用例 RED（401≠404、key_status 缺失）→ GREEN；`KeyStore.key_status`（valid/unknown/revoked/expired）+ facade off 放行 unknown/expired + warning（吊销/scope 不放宽）；集成回归：off 下未注册 key 过鉴权（404 证明）|
+| 生产合并/激活 | 部分执行 | 7.6.3 已部署并初始化（off + 全权限 key claude-code）；强制策略 pools/all 仍未启用，须独立授权 |
 
 ## 评审记录（durable）
 
@@ -54,7 +55,7 @@
 - 旧全名池 scope 与直连剥前缀 scope 的不对称：保留既有行为，不扩大权限。
 - 空 `IFF_ADMIN_TOKEN` 的 loopback 外层守卫：继承既有 `_admin` 语义；新密钥端点另有密码会话+CSRF 内层守卫。
 - GPU 运行验证：operational 门禁测试有意不执行；不做推理冒烟声明。
-- 迁移可见行为：facade 激活后，即使策略 off，携带占位/无效 KEY 的客户端也会 401（规格允许：无效凭证一律拒绝）。迁移期客户端应完全不发 Authorization 头，取得 KEY 后再携带。
+- 迁移可见行为（**7.6.4 已修正**）：原实现 off 下未注册 KEY 也 401 → 2026-10-30 实测打挂本地 claude-code/curl 等带占位 key 客户端（79 条 401 × 22min，临时用全权限 key 恢复）。修正：off = 迁移宽限——未注册/过期 KEY 放行 + warning；吊销与 scope 边界在 off 下始终生效；pools/all 不变。生产当前：off + 1 个全权限 key（claude-code）。
 
 ## 技术裁定
 
