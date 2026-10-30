@@ -472,9 +472,12 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
     conn = None
     resp = None
     try:
-        conn = pm.make_conn(target_port)
-        if timeout is not None:
-            conn.settimeout(timeout)
+        # 池预算超时必须经构造参数传入：HTTPConnection 无 settimeout
+        # （原 `conn.settimeout(timeout)` AttributeError → 本地池候选必
+        # unreachable，浏览器门禁 test_08 + 单测 test_forward_request_timeout
+        # 实锤）。timeout=None 时保持缺省调用形状（非池路径字节不变）
+        conn = (pm.make_conn(target_port) if timeout is None
+                else pm.make_conn(target_port, timeout=timeout))
         conn.request("POST", upstream_path, body=body,
                       headers={"Content-Type": "application/json"})
         resp = conn.getresponse()

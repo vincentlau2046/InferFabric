@@ -134,6 +134,27 @@ class _StubEngine(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):  # noqa: N802 — http.server 约定
+        # 7.8.0 test_08 直通成功路径：真实 dispatch 转发到本地 TXT 桩端口，
+        # 桩回最小 OpenAI chat completion 200（不读请求体形状 — 转发器只
+        # 透传；读掉 body 以免连接悬挂）
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
+            self.rfile.read(length)
+        body = json.dumps({
+            "id": "chatcmpl-stub", "object": "chat.completion",
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": "pong"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                      "total_tokens": 2},
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *args):   # 静默 — 不污染 pytest 输出
         pass
 
@@ -551,13 +572,16 @@ def test_05c_modal_preview_enables_apply_and_applies(page, scratch_base):
     assert cls == "if-card mp-pool", cls
 
 
-def _post_chat(base: str, model: str):
+def _post_chat(base: str, model: str, extra: dict | None = None):
     """POST /v1/chat/completions（无 api_keys.yaml → 鉴权不启用）。"""
-    payload = json.dumps({"model": model,
-                          "messages": [{"role": "user", "content": "ping"}],
-                          "max_tokens": 1}).encode("utf-8")
+    payload = {"model": model,
+               "messages": [{"role": "user", "content": "ping"}],
+               "max_tokens": 1}
+    if extra:
+        payload.update(extra)
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        base + "/v1/chat/completions", data=payload,
+        base + "/v1/chat/completions", data=data,
         headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -613,6 +637,118 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
     page.wait_for_selector(
         '.mp-tree-row[data-mp-tree-pool="fast"] + .mp-tree-tl'
         ' .mp-tl-dot.mp-tl-cooldown', state="attached")
+
+
+# ── 8. 能力约束编辑 → 自解释 400 → 解除约束直通 200（7.8.0 语义反转）──
+
+def test_08_capability_constraint_and_self_explaining_400(page, scratch_base):
+    """7.8.0 真实浏览器钉子（空声明 = 全能力 / 显式声明 = 约束）：
+
+    编辑器取消勾选 tools（草稿 = stream/vision/structured）→ 预览+应用 →
+    卡片 chips 落盘；带 tools 的真实请求 → 400 自解释消息（候选 id +
+    missing=tools + declared 明细 + 解除指引），日志错误码仍是固定码
+    no_compatible_target；编辑器解除约束 → 同请求 200（桩引擎直通）。
+    """
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # 前置（test_05c 落盘）：premium = 本地 TXT 单候选，空声明（全能力）
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    cands = raw["pools"]["premium"]["candidates"]
+    assert cands and cands[0]["model_name"] == TXT_MODEL \
+        and cands[0].get("features", []) == [], cands
+    # 开编辑器 → 编辑能力 → 取消 tools → 保存（写 work-copy + 预览失效）
+    page.click('#mp-card-premium [data-mp-edit="premium"]')
+    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
+    # 空声明的默认态：全能力徽章（非 chips）+ 编辑能力按钮
+    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
+    assert "全能力" in cell, cell
+    page.click('#mpModal [data-mp-act="feat-edit"][data-mp-cand="premium-1"]')
+    page.wait_for_selector('#mpModal input[data-mp-feat="tools"]')
+    page.uncheck('#mpModal input[data-mp-feat="tools"]')
+    page.click('#mpModal [data-mp-act="feat-save"][data-mp-cand="premium-1"]')
+    # 保存后回默认态：chips = stream/vision/structured（tools 缺席）+ 解除按钮
+    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
+    assert "全能力" not in cell and "解除约束" in cell, cell
+    for f in ("stream", "vision", "structured"):
+        assert f in cell, cell
+    assert "tools" not in cell, cell
+    # 预览（空需求 dry-run：约束不拦无要求请求）→ 应用 → 编辑器收尾
+    page.click('#mpModal [data-mp-act="preview"]')
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if page.eval_on_selector_all(
+                "#mpModal [data-mp-act='apply']",
+                "els => els.length && !els[0].disabled"):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("约束后空需求预演未点亮应用钮")
+    page.click("#mpModal [data-mp-act='apply']")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not page.eval_on_selector_all("#mpModal [data-mp-editor]",
+                                         "els => els.length"):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("应用后编辑器未收尾")
+    # 卡片能力态落盘：chips（stream 等）出现，全能力徽章消失（重渲染异步 → 轮询）
+    deadline = time.monotonic() + 15
+    card = ""
+    while time.monotonic() < deadline:
+        card = page.eval_on_selector("#mp-card-premium", "e => e.innerText")
+        if "全能力" not in card and "stream" in card:
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail(f"卡片能力 chips 未落盘: {card!r}")
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    assert raw["pools"]["premium"]["candidates"][0]["features"] == \
+        ["stream", "vision", "structured"], raw["pools"]["premium"]
+    # 带 tools 的真实请求 → 400 自解释（id + 明细 + 指引；码为固定码）
+    code, body = _post_chat(scratch_base, "iff/premium", extra={
+        "tools": [{"type": "function", "function": {
+            "name": "ping", "parameters": {"type": "object", "properties": {}}}}]})
+    assert code == 400, (code, body)
+    assert body["status"] == "no_compatible_target", body
+    err = body["error"]
+    assert "premium-1: feature_unsupported" in err, err
+    assert "missing=tools" in err, err
+    assert "declared=[stream, structured, vision]" in err, err   # 后端排序稳定
+    assert "clear its features constraint" in err, err
+    # 解除约束（编辑器 feat-clear）→ 预览+应用 → 同请求直通 200
+    page.click('#mp-card-premium [data-mp-edit="premium"]')
+    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
+    page.click('#mpModal [data-mp-cand="premium-1"][data-mp-act="feat-clear"]')
+    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
+    assert "全能力" in cell and "解除约束" not in cell, cell
+    page.click('#mpModal [data-mp-act="preview"]')
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if page.eval_on_selector_all(
+                "#mpModal [data-mp-act='apply']",
+                "els => els.length && !els[0].disabled"):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("解除约束后预演未点亮应用钮")
+    page.click("#mpModal [data-mp-act='apply']")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if not page.eval_on_selector_all("#mpModal [data-mp-editor]",
+                                         "els => els.length"):
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("解除约束应用后编辑器未收尾")
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    assert raw["pools"]["premium"]["candidates"][0]["features"] == [], \
+        raw["pools"]["premium"]
+    code, body = _post_chat(scratch_base, "iff/premium", extra={
+        "tools": [{"type": "function", "function": {
+            "name": "ping", "parameters": {"type": "object", "properties": {}}}}]})
+    assert code == 200, (code, body)
+    assert body["choices"][0]["message"]["content"] == "pong", body
 
 
 # ── 6. 双主题对比度：面板全文本控件 computed contrast ≥ 4.5:1 ───────
