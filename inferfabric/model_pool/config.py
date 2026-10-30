@@ -263,6 +263,22 @@ def load_pools_dict(raw: dict, current_revision: int) -> tuple[PoolsFile | None,
         if pool is not None:
             pools[pool.name] = pool
 
+    # 候选 id 跨池全局唯一（内部不变量 / 稳定标签命名空间）：id 是决策、事件、
+    # 日志引用的标签。当前各记录虽已按池限定（latency 键为 (pool, id)、evidence
+    # 键为 provider:model_id），固定此不变量以防未来出现按 id 键控的视图/指标/
+    # 持久化时产生归属歧义（可维护性）。池内重复已由 _parse_pool 兜底，这里只查
+    # 「同一 id 落在 >1 个不同池」，避免与池内检查重复报错。
+    id_pools: dict[str, set[str]] = {}
+    for p in pools.values():
+        for c in p.candidates:
+            id_pools.setdefault(c.id, set()).add(p.name)
+    for cid, pnames in id_pools.items():
+        if len(pnames) > 1:
+            issues.append(
+                f"candidate id '{cid}' appears in multiple pools "
+                f"({', '.join(sorted(pnames))}) — candidate ids must be "
+                f"globally unique across pools")
+
     if issues:
         return None, issues
     return PoolsFile(schema_version=1, revision=current_revision, pools=pools), []

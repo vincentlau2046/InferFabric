@@ -109,6 +109,27 @@ class TestValidParse:
         assert issues == []
         assert cfg.pools["premium"].enabled is False
 
+    def test_distinct_candidate_ids_across_pools_allowed(self):
+        # 反向守护：跨池全局唯一只禁「同 id」，不同 id 跨池完全合法
+        pools = {
+            "fast": {
+                "enabled": True, "allowed_locations": ["cloud"],
+                "candidates": [{"id": "c1", "priority": 1, "kind": "cloud",
+                                "provider": "a", "model_id": "m1",
+                                "declared_protocols": ["openai"]}],
+            },
+            "premium": {
+                "enabled": True, "allowed_locations": ["cloud"],
+                "candidates": [{"id": "c2", "priority": 1, "kind": "cloud",
+                                "provider": "b", "model_id": "m2",
+                                "declared_protocols": ["openai"]}],
+            },
+        }
+        cfg, issues = load_pools_dict(_raw_file(pools=pools), current_revision=0)
+
+        assert issues == []
+        assert set(cfg.pools) == {"fast", "premium"}
+
 
 class TestValidationIssues:
     def test_wrong_schema_version(self):
@@ -133,6 +154,34 @@ class TestValidationIssues:
 
         assert cfg is None
         assert any("primary" in i and "id" in i for i in issues)
+        # 池内重复只由 _parse_pool 报，不得误触发跨池「globally unique」消息
+        # （若未来把跨池检查改成按出现次数而非按池集合键控，这里会守住边界）
+        assert not any("globally unique" in i for i in issues)
+
+    def test_candidate_id_must_be_unique_across_pools(self):
+        # 候选 id 跨池全局唯一（内部不变量）：id 是决策/事件/日志引用的稳定标签，
+        # 跨池重复会让按 id 的引用归属歧义；当前记录虽已按池限定，固定此规则
+        # 防御未来按 id 键控的视图。池内重复由 _parse_pool 兜底，这里是跨池规则。
+        pools = {
+            "fast": {
+                "enabled": True, "allowed_locations": ["cloud"],
+                "candidates": [{"id": "shared", "priority": 1, "kind": "cloud",
+                                "provider": "a", "model_id": "m1",
+                                "declared_protocols": ["openai"]}],
+            },
+            "premium": {
+                "enabled": True, "allowed_locations": ["cloud"],
+                "candidates": [{"id": "shared", "priority": 1, "kind": "cloud",
+                                "provider": "b", "model_id": "m2",
+                                "declared_protocols": ["openai"]}],
+            },
+        }
+        cfg, issues = load_pools_dict(_raw_file(pools=pools), current_revision=0)
+
+        assert cfg is None
+        assert any("shared" in i and "globally unique" in i for i in issues)
+        # 报出涉事两池，便于定位
+        assert any("fast" in i and "premium" in i for i in issues)
 
     def test_duplicate_priority(self):
         pool = _raw_pool()
