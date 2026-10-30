@@ -2198,13 +2198,21 @@ class TestPersistentCards:
                 {"name": "qwen-turbo", "active": True,
                  "context_window": 32000, "protocols": ["openai"],
                  "features": []},
-                {"name": "qwen-max", "active": False,
+                # 活跃大模型：premium（最大活跃）应选它而非下方不活跃的 VL
+                {"name": "qwen-max", "active": True,
                  "context_window": 128000, "protocols": ["openai"],
                  "features": []},
+                # 独占 VL：平时不激活、需 iff switch；上下文最大。
+                # premium 若仍按全量上下文选会落到它 — L2a 后回归的根因。
+                # 目录里可见（可选），但非文本池默认建议
+                {"name": "qwen-vl", "active": False,
+                 "context_window": 204800, "protocols": ["openai"],
+                 "features": ["vision"]},
             ],
             "cloud": [{"provider": "prov", "model_id": "cloud-m",
                        "protocols": ["openai"], "features": []}],
-            "localValues": ["local:qwen-turbo", "local:qwen-max"],
+            "localValues": ["local:qwen-turbo", "local:qwen-max",
+                            "local:qwen-vl"],
             "cloudValues": ["cloud:prov/cloud-m"],
             "index": {},
         }
@@ -2235,15 +2243,21 @@ class TestPersistentCards:
         assert "mp-unconfigured" in html, "未配置卡有徽标类"
         assert html.count("未配置") >= 4, "四卡各带「未配置」徽标"
         assert 'data-mp-config-pool="fast"' in html
-        # 预填 = cardDefault 启发式：fast→活跃最小 local:qwen-turbo
+        # 预填 = cardDefault 启发式（active 优先）：fast→活跃最小
+        # local:qwen-turbo
         i = html.find('data-mp-config-pool="fast"')
         seg = html[i:html.find("</select>", i)]
         assert 'value="local:qwen-turbo" selected' in seg, \
             "fast 卡下拉预填活跃最小模型"
-        # premium→最大上下文 qwen-max（启发式按角色分异，非同一默认）
+        # premium→最大「活跃」上下文 qwen-max（128k），非不活跃的 VL
+        # qwen-vl（204k，独占需 switch）— active 优先让文本池默认不落到
+        # 需切 GPU 的 VL 模型；按角色分异（premium≠fast），非同一默认
         j = html.find('data-mp-config-pool="premium"')
         segp = html[j:html.find("</select>", j)]
         assert 'value="local:qwen-max" selected' in segp
+        assert 'local:qwen-vl' not in segp or \
+            'value="local:qwen-vl" selected' not in segp, \
+            "premium 不得默认选中不活跃的 VL 模型"
         # 未配置卡也带「高级配置」直通（openEditor 骨架路径，Task 5 接线）
         assert 'data-mp-edit="fast"' in html and "高级配置" in html
 
@@ -2404,12 +2418,16 @@ class TestPersistentCards:
             i = h.find('data-mp-config-pool="%s"' % role)
             return h[i:h.find("</select>", i)]
 
-        # fast=活跃最小 / premium=最大上下文 / small=最小 / classifier=
-        # 首个活跃（目录：qwen-turbo active 32k、qwen-max 128k）
+        # active 优先启发式（目录：qwen-turbo 活跃 32k、qwen-max 活跃
+        # 128k、qwen-vl 不活跃 204k 独占 VL）：
+        # fast=活跃最小 / premium=最大「活跃」上下文 / small=活跃最小 /
+        # classifier=首个活跃。premium 不得默认选中不活跃的 VL（204k）
         assert 'value="local:qwen-turbo" selected' in sel_seg("fast"), \
             "fast 预填非活跃最小本地模型"
         assert 'value="local:qwen-max" selected' in sel_seg("premium"), \
-            "premium 预填非最大上下文本地模型"
+            "premium 预填非最大活跃上下文本地模型"
+        assert 'value="local:qwen-vl" selected' not in sel_seg("premium"), \
+            "premium 不得默认选中不活跃的独占 VL 模型"
         assert 'value="local:qwen-turbo" selected' in sel_seg("small")
         assert 'value="local:qwen-turbo" selected' in sel_seg("classifier")
 

@@ -126,6 +126,76 @@ class TestProviderModels:
         assert cd.resolve_route("my-custom-glm", local_models=set()) is None
 
 
+class TestProviderModelsTag:
+    """tag 动作 + add 带能力标签（L2b）：{supports_vision, supports_tools} → spec。"""
+
+    def test_tag_sets_capability(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
+                                   "model": "glm-5", "supports_vision": True})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 200, data
+        assert data["action"] == "tag"
+        # spec 写入 + 注册表可见 + 持久化
+        assert cd.providers["openai-x"].model_specs["glm-5"]["supports_vision"] is True
+        assert cd.cloud_models["glm-5"].supports_vision is True
+        saved = yaml.safe_load(cfg.read_text())
+        assert saved["providers"]["openai-x"]["models"]["glm-5"]["supports_vision"] is True
+
+    def test_tag_off_capability(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        cd.update_model_spec("openai-x", "glm-5", {"supports_vision": True})
+        h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
+                                   "model": "glm-5", "supports_vision": False})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 200, data
+        assert cd.cloud_models["glm-5"].supports_vision is False
+        saved = yaml.safe_load(cfg.read_text())
+        assert saved["providers"]["openai-x"]["models"]["glm-5"]["supports_vision"] is False
+
+    def test_add_with_caps(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        h = _make_handler("POST", {"provider": "openai-x", "action": "add",
+                                   "model": "my-vlm", "supports_vision": True,
+                                   "supports_tools": True})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 200, data
+        m = cd.cloud_models["my-vlm"]
+        assert m.supports_vision is True and m.supports_tools is True
+        saved = yaml.safe_load(cfg.read_text())
+        spec = saved["providers"]["openai-x"]["models"]["my-vlm"]
+        assert spec["supports_vision"] is True and spec["supports_tools"] is True
+
+    def test_tag_without_caps_400(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
+                                   "model": "glm-5"})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 400
+        # 拒绝时不留半截 spec
+        assert "glm-5" not in cd.providers["openai-x"].model_specs
+
+    def test_tag_non_bool_value_400(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
+                                   "model": "glm-5", "supports_vision": "yes"})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 400
+
+    def test_tag_unknown_provider_404(self, tmp_path):
+        pm, cd, cfg = _make_pm(tmp_path)
+        h = _make_handler("POST", {"provider": "ghost", "action": "tag",
+                                   "model": "glm-5", "supports_vision": True})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 404
+
+
 class TestProviderModelsGET:
     """GET /admin/cloud/providers 契约：策展字段暴露给前端。"""
 
@@ -140,13 +210,48 @@ class TestProviderModelsGET:
         assert status == 200
         p = next(x for x in data["providers"] if x["name"] == "openai-x")
         assert p["enabled_models"] == ["glm-5"]
-        # 手填空 spec → manual=True；带元数据 spec → manual=False
-        assert p["model_specs"] == [{"id": "my-custom-glm", "manual": True}]
+        # 手填空 spec → manual=True；带元数据 spec → manual=False。
+        # supports_vision/supports_tools 恒输出（未声明 = False）— 前端
+        # chips 直接读，不用猜键是否存在
+        assert p["model_specs"] == [{"id": "my-custom-glm", "manual": True,
+                                     "supports_vision": False, "supports_tools": False}]
         assert set(p["candidates"]) == {"glm-5", "deepseek-v4-flash"}
         assert p["routable_count"] == 2
         # 顶层 models 列表 = 可路由集（短名去重）
         ids = {m["id"] for m in data["models"]}
         assert ids == {"glm-5", "my-custom-glm"}
+
+    def test_get_exposes_spec_capabilities(self, tmp_path):
+        # 打标后的 spec 能力必须暴露给前端（chips 状态源）
+        pm, cd, cfg = _make_pm(tmp_path)
+        cd.add_manual_model("openai-x", "my-vlm")
+        cd.update_model_spec("openai-x", "my-vlm", {"supports_vision": True})
+        h = _make_handler("GET", {})
+        h.path = "/admin/cloud/providers"
+        h._handle_cloud_providers(pm)
+        data, status = _last_sent(h)
+        assert status == 200
+        p = next(x for x in data["providers"] if x["name"] == "openai-x")
+        spec = next(s for s in p["model_specs"] if s["id"] == "my-vlm")
+        assert spec["supports_vision"] is True
+        assert spec["supports_tools"] is False
+
+    def test_get_exposes_routable_caps(self, tmp_path):
+        # 候选行 chips 状态源：已入注册表（可路由）的候选带能力快照；
+        # 未勾选候选不在 map（前端不给未路由候选渲染 chips — 打标即声明
+        # 会使其恒可路由，避免意外路由）
+        pm, cd, cfg = _make_pm(tmp_path)
+        cd.enable_model("openai-x", "glm-5")
+        cd.update_model_spec("openai-x", "glm-5", {"supports_tools": True})
+        h = _make_handler("GET", {})
+        h.path = "/admin/cloud/providers"
+        h._handle_cloud_providers(pm)
+        data, status = _last_sent(h)
+        assert status == 200
+        p = next(x for x in data["providers"] if x["name"] == "openai-x")
+        assert p["routable_caps"]["glm-5"] == {"supports_vision": False,
+                                               "supports_tools": True}
+        assert "deepseek-v4-flash" not in p["routable_caps"]
 
 
 class TestProviderModelsErrors:

@@ -41,6 +41,11 @@ def _llm(name="qwen-small", type_="vllm", active=True, ctx=32768):
             "modality": "text", "context_window": ctx}
 
 
+def _vl(name="Qwen38-27B-VL", type_="ninfer", active=False, ctx=204800):
+    return {"name": name, "model_type": "vl", "type": type_, "active": active,
+            "modality": "text-vision", "context_window": ctx}
+
+
 class TestLocalCatalog:
     def test_llm_only_non_chat_filtered(self):
         pm = CatalogPM(model_dicts=[
@@ -58,11 +63,29 @@ class TestLocalCatalog:
         entry = cat["local"][0]
         # 契约精确到键名（前端与 Phase 2/3 扩展依赖这些字段）
         assert set(entry) == {"name", "active", "engine", "modality",
-                              "context_window", "protocols"}
+                              "context_window", "protocols", "features"}
         assert entry["name"] == "qwen-small"
         assert entry["active"] is True
         assert entry["engine"] == "vllm"
         assert entry["context_window"] == 32768
+
+    def test_vl_models_in_catalog(self):
+        # 模态路由端到端（本地侧）：vl 模型必须能进目录，否则面板下拉
+        # 永远选不到 VL、池配置无法引用它做视觉候选
+        pm = CatalogPM(model_dicts=[_llm("qwen-small"), _vl()])
+        cat = build_catalog(pm)
+        assert [e["name"] for e in cat["local"]] == ["qwen-small", "Qwen38-27B-VL"]
+
+    def test_local_features_from_modality(self):
+        # features 由 modality 推导（text-vision/multimodal → vision）——
+        # 与云候选 supports_vision → features 同构，池候选建库时快照
+        omni = {"name": "omni-x", "model_type": "vl", "type": "vllm",
+                "active": False, "modality": "multimodal", "context_window": 8192}
+        pm = CatalogPM(model_dicts=[_llm("qwen-small"), _vl(), omni])
+        by_name = {e["name"]: e for e in build_catalog(pm)["local"]}
+        assert by_name["qwen-small"]["features"] == []
+        assert by_name["Qwen38-27B-VL"]["features"] == ["vision"]
+        assert by_name["omni-x"]["features"] == ["vision"]
 
     def test_local_uses_served_name(self):
         # 池候选引用 served_name（dispatch 评审 #15）— 目录必须给可引用名

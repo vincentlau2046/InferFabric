@@ -29,6 +29,10 @@ log = logging.getLogger("inferfabric.cloud_discovery")
 # 返回 403 error code 1010（浏览器签名封禁）→ 候选列表恒为空。
 _CLOUD_UA = "inferfabric/6.1.6"
 
+# 云模型能力标签键（L2b 打标唯一接受的键）：上游 /models 不提供能力元数据，
+# 人工声明存 model_specs，经 _merge_model_spec 注入注册表。
+_CAPABILITY_KEYS = ("supports_vision", "supports_tools")
+
 
 @dataclass
 class CloudModel:
@@ -395,13 +399,38 @@ class CloudDiscovery:
             self._rebuild_provider_registry(provider, cfg)
         return self._routable_count(provider)
 
-    def add_manual_model(self, provider: str, model_id: str) -> int:
-        """手填模型 → 空 spec 进 model_specs（复用现有管道，spec 恒可路由）。"""
+    def add_manual_model(self, provider: str, model_id: str,
+                         caps: dict | None = None) -> int:
+        """手填模型 → 空 spec 进 model_specs（复用现有管道，spec 恒可路由）。
+
+        caps: 可选能力标签（supports_vision/supports_tools）—— 添加时即声明，
+        面板手填表单的「视觉/工具调用」选择框直接传入。
+        """
         with self._models_lock:
             cfg = self._providers.get(provider)
             if cfg is None:
                 raise KeyError(provider)
-            cfg.model_specs.setdefault(model_id, {})
+            spec = cfg.model_specs.setdefault(model_id, {})
+            if caps:
+                spec.update({k: v for k, v in caps.items()
+                             if k in _CAPABILITY_KEYS})
+            self._rebuild_provider_registry(provider, cfg)
+        return self._routable_count(provider)
+
+    def update_model_spec(self, provider: str, model_id: str, caps: dict) -> int:
+        """能力打标（L2b）：写 model_specs → 重建注册表（catalog 据此出 features）。
+
+        云模型能力上游 /models 不提供（发现只取 id），model_specs 是唯一
+        注入点。spec 不存在则创建 —— 打标即声明，语义与手填/配置声明一致。
+        只接受 _CAPABILITY_KEYS；显式 False 持久化（关闭标签不靠删键复活）。
+        """
+        with self._models_lock:
+            cfg = self._providers.get(provider)
+            if cfg is None:
+                raise KeyError(provider)
+            spec = cfg.model_specs.setdefault(model_id, {})
+            spec.update({k: v for k, v in caps.items()
+                         if k in _CAPABILITY_KEYS})
             self._rebuild_provider_registry(provider, cfg)
         return self._routable_count(provider)
 
@@ -570,6 +599,13 @@ class CloudDiscovery:
                         md["price_input"] = spec["price_input"]
                     if spec.get("price_output"):
                         md["price_output"] = spec["price_output"]
+                    # L2b: 能力标签显式落盘 —— 此前在 known 排除集里被静默
+                    # 丢弃（手写 YAML 标签一经策展操作 save_config 即蒸发）。
+                    # 显式 False 也写：关闭标签靠持久化 false，不靠删键。
+                    if spec.get("supports_vision") is not None:
+                        md["supports_vision"] = bool(spec["supports_vision"])
+                    if spec.get("supports_tools") is not None:
+                        md["supports_tools"] = bool(spec["supports_tools"])
                     # Include other spec fields beyond the known capability keys
                     known = {"name", "contextWindow", "maxTokens", "input", "reasoning",
                              "context_window", "max_output_tokens", "supports_vision", "supports_tools",

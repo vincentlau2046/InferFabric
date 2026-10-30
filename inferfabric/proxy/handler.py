@@ -2016,12 +2016,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "discovery_interval": cfg.discovery_interval,
                     "include_pattern": cfg.include_pattern,
                     "enabled_models": list(cfg.enabled_models),
-                    # model_specs: [{id, manual}] — manual=true 表示空 spec 手填模型
+                    # model_specs: [{id, manual, supports_vision, supports_tools}]
+                    # — manual=true 表示空 spec 手填模型；能力标签恒输出
+                    # （未声明 = False），前端 chips 直接读
                     "model_specs": [
-                        {"id": mid, "manual": not bool(spec)}
+                        {"id": mid, "manual": not bool(spec),
+                         "supports_vision": bool((spec or {}).get("supports_vision")),
+                         "supports_tools": bool((spec or {}).get("supports_tools"))}
                         for mid, spec in cfg.model_specs.items()
                     ],
                     "candidates": [c.model_id for c in pm.cloud.get_candidates(name)],
+                    # 可路由模型的能力快照（短名 → caps）— 候选行 chips 状态源；
+                    # 未入注册表的候选不在 map（不给未路由候选渲染打标入口）
+                    "routable_caps": {
+                        k: {"supports_vision": bool(m.supports_vision),
+                            "supports_tools": bool(m.supports_tools)}
+                        for k, m in all_models.items()
+                        if "/" not in k and m.provider == name
+                    },
                     "routable_count": routable,
                     "model_count": routable,  # 兼容旧字段：语义对齐可路由数
                     "key_env_var": cfg.key_env_var,
@@ -2168,13 +2180,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"status": "added", "provider": name})
 
     def _handle_cloud_provider_models(self, pm):
-        """POST /admin/cloud/provider-models — 模型策展（v6.1 Phase 1）。
+        """POST /admin/cloud/provider-models — 模型策展（v6.1 Phase 1；L2b 打标）。
 
-        body: {provider, action: enable|disable|add|remove, model}
+        body: {provider, action: enable|disable|add|remove|tag, model,
+               supports_vision?, supports_tools?}
         - enable:  勾选发现候选 → 白名单 + 可路由
         - disable: 取消勾选 → 隐藏（spec/manual 同名仍在 spec 侧）
-        - add:     手填模型名 → 空 spec 复用 model_specs 管道（恒可路由）
+        - add:     手填模型名 → 空 spec 复用 model_specs 管道（恒可路由）；
+                   可带能力标签（面板「视觉/工具调用」选择框）
         - remove:  移除手填模型（不存在 → 404）
+        - tag:     能力打标 — 写 model_specs → 重建注册表（catalog 出 features，
+                   池候选据此做模态路由）；spec 不存在则创建（打标即声明）
         每次操作后 save_config() 持久化 + 刷新内存注册表。
         """
         data = self._read_body()
@@ -2183,7 +2199,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         provider = (data.get("provider") or "").strip()
         action = (data.get("action") or "").strip()
         model = (data.get("model") or "").strip()
-        valid_actions = {"enable", "disable", "add", "remove"}
+        valid_actions = {"enable", "disable", "add", "remove", "tag"}
         if not provider or not action or not model:
             self._send_json({"error": "Missing provider/action/model"}, 400)
             return
@@ -2191,13 +2207,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": f"Invalid action '{action}' — expected "
                                       f"{'/'.join(sorted(valid_actions))}"}, 400)
             return
+        # 能力标签：只收 bool；tag 必须至少带一个（否则为空操作）
+        caps = {}
+        for key in ("supports_vision", "supports_tools"):
+            if key in data:
+                val = data[key]
+                if not isinstance(val, bool):
+                    self._send_json({"error": f"'{key}' must be a boolean"}, 400)
+                    return
+                caps[key] = val
+        if action == "tag" and not caps:
+            self._send_json({"error": "tag requires supports_vision and/or "
+                                      "supports_tools"}, 400)
+            return
         try:
             if action == "enable":
                 count = pm.cloud.enable_model(provider, model)
             elif action == "disable":
                 count = pm.cloud.disable_model(provider, model)
             elif action == "add":
-                count = pm.cloud.add_manual_model(provider, model)
+                count = pm.cloud.add_manual_model(provider, model, caps=caps or None)
+            elif action == "tag":
+                count = pm.cloud.update_model_spec(provider, model, caps)
             else:  # remove
                 count = pm.cloud.remove_manual_model(provider, model)
         except KeyError as e:

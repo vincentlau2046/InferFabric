@@ -1338,6 +1338,44 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .cpm-chips { margin-left: auto; }
 .cpm-ops { margin-left: auto; flex-shrink: 0; }
 .btn-xs { padding: 1px 8px; font-size: 11px; }
+/* 能力打标 chips（视觉/工具）：候选/已声明行内点击切换 → tag 动作 */
+.cpm-cap-chips { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.cpm-cap-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 0 8px;
+  line-height: 17px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--ink-3);
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.cpm-cap-chip:hover {
+  color: var(--ink-1);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.cpm-cap-chip.on {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface-2));
+}
+.cpm-cap-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 手填表单能力选择框（添加时即声明） */
+.cpm-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.cpm-cap input { accent-color: var(--accent); margin: 0; }
 .cpm-add {
   display: flex;
   gap: var(--sp-1);
@@ -1611,9 +1649,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mp-dot-flow { background: #30d158;
   box-shadow: 0 0 6px rgba(48, 209, 88, .5);
   animation: mp-breathe 2.4s var(--ease) infinite; }
+/* 挂掉 / 耗尽（冷却隔离）统一灰色 — 用户规格「挂了或耗尽→X或灰」：
+   off（未启动/未路由）与 cool（故障后隔离、暂时不可路由）同为「不可用」，
+   共用 var(--border) 灰；probe 保留黄色呼吸作为「正在恢复」的独立信号。 */
 .mp-dot-probe { background: #ffd60a;
   animation: mp-breathe .9s var(--ease) infinite; }
-.mp-dot-cool { background: #ffd60a; opacity: .5; }
+.mp-dot-cool { background: var(--border); }
 .mp-dot-off  { background: var(--border); }
 
 @keyframes mp-breathe {
@@ -1665,6 +1706,16 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .mp-tree-port { color: var(--ink-2); }
 .mp-tree-leaf { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* L3：树行完整候选链 — 每候选 = 五态灯 + 名；候选多时横向滚动不挤压态徽标 */
+.mp-tree-cands {
+  display: inline-flex; align-items: center; gap: 10px;
+  flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; padding-bottom: 1px;
+  font-size: var(--fs-table); color: var(--ink); white-space: nowrap;
+}
+.mp-tree-cand { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+/* 挂掉/未启动（off）：文字降暗 — 点色由 mp-dot-off 灰承担，双编码 */
+.mp-tree-cand-dim { color: var(--ink-3); }
 .mp-link {
   flex: 1 1 24px; min-width: 16px; height: 2px;
   border-radius: 1px; background: var(--border);

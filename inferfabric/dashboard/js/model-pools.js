@@ -97,7 +97,7 @@
     return { cls: 'idle', label: '空闲' };
   }
 
-  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <模型叶>」+ 态徽标。
+  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
   // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
   function treeHtml(defs, rt) {
     var pools = (defs && defs.pools) || {};
@@ -110,8 +110,32 @@
     order.forEach(function (name) {
       var def = pools[name];
       var ls = linkState(def, rtPools[name]);
-      var cands = (def && def.candidates) || [];
-      var leaf = cands.length ? cands[0].target : '—';
+      // L3：完整候选链 — 池的全部候选按优先级显示（排序同 lampForProtocol），
+      // 每候选 = 五态灯 + 名。tier1-only 是「运营窗口只显示一个模型」的根因。
+      // 挂掉/未启动（off）→ 灰点 + 文字降暗；冷却/探测 → 黄（半明/呼吸）；
+      // 活着的等候（ok）/ 调用中（flow）→ 绿。点与降暗走 applyDynamic
+      // by-id 类翻转（候选结构已进 sig，零闪烁纪律不变）
+      var cands = ((def && def.candidates) || []).slice()
+        .sort(function (a, b) { return (a.priority || 0) - (b.priority || 0); });
+      var rtById = {};
+      ((rtPools[name] || {}).candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
+      var leaf;
+      if (!cands.length) {
+        leaf = '<span class="mp-tree-leaf">—</span>';
+      } else {
+        leaf = '<span class="mp-tree-cands">' + cands.map(function (c) {
+            var tgt = c.target
+              || (c.kind === 'local' ? (c.model_name || '')
+                  : ((c.provider || '') + '/' + (c.model_id || '')));
+            var rt = rtById[c.id];
+            var off = !rt || !rt.active;
+            return '<span class="mp-tree-cand' + (off ? ' mp-tree-cand-dim' : '')
+              + '" id="mp-tcand-' + esc(name) + '-' + esc(c.id) + '">'
+              + '<span class="mp-dot ' + candDotClass(rt)
+              + '" id="mp-tdot-' + esc(name) + '-' + esc(c.id) + '"></span>'
+              + esc(tgt) + '</span>';
+          }).join('') + '</span>';
+      }
       // T5：有事件的行可点（fail/cooldown 必有事件；idle/flowing 有历史
       // 也可查）— mp-tree-row-diag 挂 cursor 供 CSS
       var evs = poolEvents(name);
@@ -128,7 +152,9 @@
         + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
         + '<span class="mp-link mp-link-' + ls.cls
         + '" id="mp-tlink-b-' + esc(name) + '"></span>'
-        + '<span class="mp-tree-leaf">' + esc(leaf) + '</span>'
+        // leaf 是完整 HTML（mp-tree-cands / mp-tree-leaf）——原样插入，
+        // 候选名已在构建时 esc
+        + leaf
         + '<span class="mp-tree-state mp-tree-state-' + ls.cls
         + '" id="mp-tstate-' + esc(name) + '">'
         + esc(ls.label) + '</span>'
@@ -177,9 +203,12 @@
       }
       return 'local:' + sorted[0].name;
     }
+    // premium/small 同 fast/classifier 优先 active — L2a 把 VL 纳入目录后，
+    // 全量按上下文选会选中平时不激活、需 iff switch 的独占 VL 模型；
+    // active 优先让文本池默认建议落在「当前可用」的模型上
     if (roleName === 'fast') return pick(act.length ? act : llms, false);
-    if (roleName === 'premium') return pick(llms, true);
-    if (roleName === 'small') return pick(llms, false);
+    if (roleName === 'premium') return pick(act.length ? act : llms, true);
+    if (roleName === 'small') return pick(act.length ? act : llms, false);
     if (roleName === 'classifier') {
       return act.length ? 'local:' + act[0].name : pick(llms, false);
     }
@@ -749,6 +778,13 @@
         var rt = rtById[c.id];
         var dot = $('mp-dot-' + n + '-' + c.id);
         if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
+        // L3：树行候选灯同态 by-id 更新 + 挂掉降暗（候选结构进 sig，
+        // 灯态/降暗是轮询动态，不进 sig — 同卡片灯哲学）
+        var tdot = $('mp-tdot-' + n + '-' + c.id);
+        if (tdot) tdot.className = 'mp-dot ' + candDotClass(rt);
+        var tcand = $('mp-tcand-' + n + '-' + c.id);
+        if (tcand) tcand.className = 'mp-tree-cand'
+          + ((!rt || !rt.active) ? ' mp-tree-cand-dim' : '');
         var rtEl = $('mp-rt-' + n + '-' + c.id);
         if (rtEl) rtEl.textContent = runtimeBadgeText(rt);
         // C1：延迟数据不进签名（变化不重建）→ spark by-id 更新
