@@ -1,6 +1,6 @@
 # PR-23：API KEY 安全与渐进迁移
 
-日期：2026-10-29。状态：产品决策及实施计划已批准；PR-23a 后端已实现并通过一次独立评审（1 项 Important 已修复、8 项 Minor 留档，见 `specs/pr23-api-key-security/STATUS.md`），PR-23b 面板未实施。生产鉴权尚未激活。
+日期：2026-10-29。状态：产品决策及实施计划已批准；PR-23a 后端已实现并通过一次独立评审（1 项 Important 已修复、8 项 Minor 留档，见 `specs/pr23-api-key-security/STATUS.md`），PR-23b 面板未实施。生产已于 2026-10-30 初始化（7.6.3，off + 全权限 key）；off 宽限语义修正（7.6.4）实施中。
 
 本文件取代 `docs/API-KEY-SECURITY-PLAN-2026-10-29.md` 中与之冲突的建议。
 
@@ -31,7 +31,7 @@
 新增安全鉴权 facade，保持消费者依赖的 `enabled/check/key_name/reload` 接口，在 `proxy_manager.py` 构造时注入；`proxy/auth.py` 和转发核心保持不变。新功能初始化前验证所有消费者的接口兼容性。
 
 facade 在自身启用时使既有检查点始终执行，`check` 再按策略决定匿名是否放行：
-- off：匿名池/直连允许；携带无效凭证拒绝，合法新 KEY 仍校验 scope/有效期并记使用者。
+- off（迁移宽限，7.6.4 起）：匿名池/直连允许；未注册/过期凭证**放行并记 warning**（避免激活瞬间打挂带占位 key 的存量客户端，2026-10-30 事故）；吊销与 scope 边界在 off 下**始终生效**；合法新 KEY 仍校验 scope/有效期并记使用者。宽限按有效性（validity）判定：过期 key（含带 scope 的）视同匿名放行——off 下匿名本就全放行，权限不比 off 自身更宽；**吊销 key 不享受宽限**。
 - pools：匿名 `iff/<pool>` 拒绝，匿名直连允许。
 - all：全部推理端点匿名拒绝。
 - scope 按原始逻辑模型名校验，不能让池权限自动扩展到直连候选或其他池。

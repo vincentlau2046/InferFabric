@@ -119,6 +119,20 @@ class KeyStore:
             return None
         return row
 
+    def key_status(self, token):
+        """Validity only (no scope): 'valid' | 'unknown' | 'revoked' | 'expired'."""
+        if not isinstance(token, str) or len(token) > 4096:
+            return 'unknown'
+        with self._db() as db:
+            row = db.execute('SELECT * FROM api_keys WHERE digest=?', (self._digest(token),)).fetchone()
+        if row is None:
+            return 'unknown'
+        if row['revoked_at'] is not None:
+            return 'revoked'
+        if row['expires_at'] is not None and row['expires_at'] <= self._now():
+            return 'expired'
+        return 'valid'
+
     def check(self, token, model):
         row = self._entry(token)
         if row is None:

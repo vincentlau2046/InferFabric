@@ -72,6 +72,20 @@ def test_concurrent_connections_preserve_changes(store):
     assert not store.check(result[0][1], 'x')[0]
 
 
+def test_key_status_valid_unknown_revoked_expired(store, monkeypatch):
+    meta, token = store.create_key('a', None, None)
+    assert store.key_status(token) == 'valid'
+    assert store.key_status('sk-iff-never-issued') == 'unknown'
+    store.revoke_key(meta['id'])
+    assert store.key_status(token) == 'revoked'
+    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    _, exp = store.create_key('b', None, deadline)
+    assert store.key_status(exp) == 'valid'
+    monkeypatch.setattr(store, '_now', lambda: deadline.timestamp())
+    assert store.key_status(exp) == 'expired'
+    assert store.key_status('x' * 5000) == 'unknown'
+
+
 def test_policy_transaction_rollback(store):
     assert store.get_policy() == 'off'
     store.set_policy('pools')
