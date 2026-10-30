@@ -1371,6 +1371,15 @@
              index: cat.index, local: cat.local, cloud: cat.cloud };
   }
 
+  // 候选 id 生成：时间戳 + 随机后缀。候选 id 命名空间自 v7.7.1 起跨池全局
+  // （服务端全局唯一校验），纯 Date.now() 在同毫秒批量/程序化添加时可碰撞
+  // 跨池 → 追加随机段保唯一（非安全用途，Math.random 足够；万一仍碰撞由
+  // 服务端 load_pools_dict 全局唯一校验兜底拒绝）。
+  function mpMintCandidateId() {
+    return 'cand-' + Date.now().toString(36) + '-' +
+           Math.random().toString(36).slice(2, 8);
+  }
+
   // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
   function candFromCatalogValue(spec, id, catalog) {
     var entry = (catalog && catalog.index) ? catalog.index[spec] : null;
@@ -1791,7 +1800,7 @@
       return;
     }
     if (t.getAttribute('data-mp-add') && t.value) {
-      var id = 'cand-' + Date.now().toString(36);
+      var id = mpMintCandidateId();
       mpEditAddCandidate(candFromCatalogValue(t.value, id, _edit.catalog));
       return;
     }
