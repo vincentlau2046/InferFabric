@@ -13,7 +13,7 @@
 | 干净 worktree 复验 | ✅ | 提交树 440f31a：全量 1914 passed + 浏览器门禁 10/10（沙箱工作区绿 ≠ 提交树绿，故独立复验） |
 | cross-review | ✅ | fresh-context subagent（独立复跑 1796+118 单测 + 门禁 10/10）：无 Critical；I-1（云面板三态塌缩/点灭造约束）已修；I-2（多候选池多轮 agent 迁移守卫残留）记档交用户裁决；M-3/M-4 已修；M-1/M-2 裁决不修（见下） |
 | 版本 | ✅ | 7.8.0（minor，用户随方案 B 批准）；README 历史表已加行 |
-| 合并/部署 | ⏳ | ff-merge 生产 main + BatchMode push；**重启需用户单独授权**；重启后 dry-run 验证 `iff/premium` tools=true → chosen |
+| 合并/部署 | ✅ 2026-10-31 | ff-merge fa1e585→f9d28c5 + BatchMode push 完成（pre-push 钩子单测 1798 passed）；**生产重启仍需用户单独授权**；重启后 dry-run 验证 `iff/premium` tools=true → chosen |
 
 ## 评审核决记录（2026-10-31）
 
