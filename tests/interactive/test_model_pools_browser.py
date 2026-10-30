@@ -648,6 +648,10 @@ def test_08_capability_constraint_and_self_explaining_400(page, scratch_base):
     卡片 chips 落盘；带 tools 的真实请求 → 400 自解释消息（候选 id +
     missing=tools + declared 明细 + 解除指引），日志错误码仍是固定码
     no_compatible_target；编辑器解除约束 → 同请求 200（桩引擎直通）。
+
+    会话级依赖：premium 池由 test_05c 落盘（session 级 scratch 代理 +
+    文件内顺序执行）— 单独跑本用例会在下方前置 assert 失败，属本文件
+    既有模式（test_04 依赖 test_02 同理）。
     """
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)

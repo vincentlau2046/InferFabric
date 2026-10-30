@@ -498,23 +498,38 @@
   // 能力打标 chips（候选/已声明行内，点击切换 → tag 动作）。
   // 按钮在 <label class="cpm-item"> 内：交互后代上的点击 label 不转发给
   // 关联 checkbox（HTML label 激活规则），勾选态不受影响。
+  // 7.8.0 三态：true=确认（chip 亮）/ null=未声明（默认全能力，灰）/
+  // false=显式排除（YAML 手编的池候选约束，警示态 .x）— 点击 false
+  // chip 发 true 即解除约束；点击亮 chip 发 false = 解除打标回未声明
+  // （服务端不落 false，防「点灭造约束」单向陷阱，cross-review I-1）。
   var _CAP_LABELS = { supports_vision: '视觉', supports_tools: '工具' };
 
   function capChips(provider, mid, vision, tools) {
     return '<span class="cpm-cap-chips">' +
-      _capChip(provider, mid, 'supports_vision', !!vision) +
-      _capChip(provider, mid, 'supports_tools', !!tools) +
+      _capChip(provider, mid, 'supports_vision', vision) +
+      _capChip(provider, mid, 'supports_tools', tools) +
       '</span>';
   }
 
-  function _capChip(provider, mid, cap, on) {
+  function _capChip(provider, mid, cap, state) {
     var label = _CAP_LABELS[cap] || cap;
-    return '<button type="button" class="cpm-cap-chip' + (on ? ' on' : '') +
+    var on = state === true;
+    var excluded = state === false;
+    var cls = 'cpm-cap-chip' + (on ? ' on' : '') + (excluded ? ' x' : '');
+    var title;
+    if (on) {
+      title = '已确认「' + label + '」— 点击解除（回未声明）';
+    } else if (excluded) {
+      title = '显式排除（cloud_provider.yaml 声明）：该模型的池候选将拒绝「'
+        + label + '」请求 — 点击解除为确认';
+    } else {
+      title = '未声明（默认全能力）— 点击确认「' + label + '」';
+    }
+    return '<button type="button" class="' + cls +
       '" data-action="cpm-tag" data-provider="' + esc(provider) +
       '" data-model="' + esc(mid) + '" data-cap="' + cap +
       '" data-val="' + (on ? '1' : '0') + '" aria-pressed="' + (on ? 'true' : 'false') +
-      '" title="点击切换「' + label + '」能力标签（写入模型声明，池模态路由据此选路）">' +
-      label + '</button>';
+      '" title="' + title + '">' + label + '</button>';
   }
 
   // 协议可用徽标（面板行内用，OpenAI/Anthropic 双编码）
@@ -568,7 +583,8 @@
   window.doCpmAdd = async function (provider, inputEl) {
     var model = (inputEl ? inputEl.value : '').trim();
     if (!model) { UI.toast('请填写模型名', 'error'); return; }
-    // 添加时即声明能力（选择框）：只传勾选项 — 未勾 = 不写键（默认 False）
+    // 添加时即声明能力（选择框）：只传勾选项 — 未勾 = 不写键
+    // （未声明；7.8.0 起未声明 = 默认全能力，非约束）
     var wrap = inputEl && inputEl.closest ? inputEl.closest('.cpm-add') : null;
     var visEl = wrap ? wrap.querySelector('.cpm-cap-vision') : null;
     var tlsEl = wrap ? wrap.querySelector('.cpm-cap-tools') : null;
@@ -604,8 +620,9 @@
         UI.toast((r.data && r.data.error) || ('打标失败 · HTTP ' + r.status), 'error');
         return;
       }
-      UI.toast(model + '「' + (_CAP_LABELS[cap] || cap) + '」已' +
-               (nextVal ? '开启' : '关闭'), 'success');
+      UI.toast(model + '「' + (_CAP_LABELS[cap] || cap) + '」' +
+               (nextVal ? '已确认' : '已解除打标（回未声明 — 默认全能力）'),
+               'success');
       await cloudLoadProviders();
     } catch (e) {
       UI.toast('打标失败: ' + (e.message || e), 'error');

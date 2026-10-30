@@ -266,8 +266,10 @@ class TestCapabilityTagging:
         assert m.supports_vision is True
         assert m.supports_tools is True
 
-    def test_tag_off_persists_false(self, tmp_path, mock_port):
-        # 关闭标签：显式 False 落盘，重载后不复活
+    def test_tag_off_unsets_key(self, tmp_path, mock_port):
+        # 7.8.0（cross-review I-1）：关闭标签 = 解除打标（键移除回 None），
+        # 不持久化 false —— 显式 false 现为池候选活跃约束，面板点灭若落
+        # false 会一步造出约束且 UI 无回路。重载后同样不复活（键不存在）。
         cd = self._cd(tmp_path, mock_port)
         cd.update_model_spec("test-provider", "my-custom-glm",
                              {"supports_vision": True})
@@ -275,7 +277,7 @@ class TestCapabilityTagging:
                              {"supports_vision": False})
         cd.save_config()
         cd2 = CloudDiscovery(tmp_path / "cloud_provider.yaml")
-        assert cd2.cloud_models["my-custom-glm"].supports_vision is False
+        assert cd2.cloud_models["my-custom-glm"].supports_vision is None
 
     def test_add_manual_model_with_caps(self, tmp_path, mock_port):
         cd = self._cd(tmp_path, mock_port)

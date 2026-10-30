@@ -1349,7 +1349,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background: var(--surface-2);
-  color: var(--ink-3);
+  /* 未声明态灰字 — ink-3 双主题 <4.5:1（浏览器门禁实测 3.08），
+     升 ink-2 对齐面板可读性地基 */
+  color: var(--ink-2);
   cursor: pointer;
   transition: color .15s, border-color .15s, background .15s;
 }
@@ -1361,6 +1363,14 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
   background: color-mix(in srgb, var(--ok) 10%, var(--surface-2));
+}
+/* 7.8.0 三态：显式排除（YAML false = 池候选活跃约束）— 与「未声明」
+   的灰态必须可区分，且警告色示意这是约束不是装饰 */
+.cpm-cap-chip.x {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, var(--surface-2));
+  text-decoration: line-through;
 }
 .cpm-cap-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* 手填表单能力选择框（添加时即声明） */

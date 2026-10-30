@@ -2017,20 +2017,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "include_pattern": cfg.include_pattern,
                     "enabled_models": list(cfg.enabled_models),
                     # model_specs: [{id, manual, supports_vision, supports_tools}]
-                    # — manual=true 表示空 spec 手填模型；能力标签恒输出
-                    # （未声明 = False），前端 chips 直接读
+                    # — manual=true 表示空 spec 手填模型；能力标签三态透传
+                    # （未声明 = None/null，显式 false = 排除约束 — 7.8.0
+                    # cross-review I-1：bool() 塌缩会让前端无法区分两者）
                     "model_specs": [
                         {"id": mid, "manual": not bool(spec),
-                         "supports_vision": bool((spec or {}).get("supports_vision")),
-                         "supports_tools": bool((spec or {}).get("supports_tools"))}
+                         "supports_vision": (spec or {}).get("supports_vision"),
+                         "supports_tools": (spec or {}).get("supports_tools")}
                         for mid, spec in cfg.model_specs.items()
                     ],
                     "candidates": [c.model_id for c in pm.cloud.get_candidates(name)],
                     # 可路由模型的能力快照（短名 → caps）— 候选行 chips 状态源；
+                    # 三态透传（None=未声明/false=显式排除，7.8.0 I-1）；
                     # 未入注册表的候选不在 map（不给未路由候选渲染打标入口）
                     "routable_caps": {
-                        k: {"supports_vision": bool(m.supports_vision),
-                            "supports_tools": bool(m.supports_tools)}
+                        k: {"supports_vision": m.supports_vision,
+                            "supports_tools": m.supports_tools}
                         for k, m in all_models.items()
                         if "/" not in k and m.provider == name
                     },

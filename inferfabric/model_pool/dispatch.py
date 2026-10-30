@@ -79,7 +79,8 @@ def _has_vision_anthropic(data: dict) -> bool:
 
 
 def extract_requirements(protocol: str, data: dict) -> RequestRequirements:
-    """从请求体提取本次必要能力。未知能力不默认当作支持。"""
+    """从请求体提取本次必要能力。7.8.0：能力约束是候选侧显式声明
+    （空 = 无约束/全能力默认），此处只提取请求「要求」，不作支持判定。"""
     if protocol == "anthropic":
         vision = _has_vision_anthropic(data)
         tools = bool(data.get("tools"))

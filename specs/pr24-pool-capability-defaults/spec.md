@@ -51,6 +51,32 @@ deepseek harness 带 `tools` 请求调 `iff/premium`，4 个云候选全被选�
   真实请求 400（id + missing + declared + 指引 + 固定码）→ 解除约束 →
   同请求 200（桩引擎直通）。`_StubEngine` 补 `do_POST`（最小 OpenAI 200）。
 
+## Cross-review 修复与残留（2026-10-31，fresh-context 评审）
+
+**I-1 已修复：云面板三态塌缩 + 点灭造约束单向陷阱。** 评审实锤：admin GET
+`bool()` 把 None 压成 false（chips 无法区分未声明/显式排除），且 `tag` 动作
+持久化 false —— 用户在云面板把 chip 点亮再点灭，就给模型造出
+`supports_tools: false` 活跃约束（catalog 出排除词表 → 池候选拒 tools），
+且 UI 无任何回路回 None。修复：
+- `update_model_spec`：值 False = **解除打标**（键移除回 None），不落盘；
+  显式排除（false）的唯一入口 = 手编 cloud_provider.yaml（刻意摩擦 —
+  约束须是明确决定，与「面板 chip = 确认通道」的语义一致）。
+- admin GET `model_specs`/`routable_caps` 三态透传（None → JSON null）。
+- cloud.js chips 三态渲染：true=确认（.on）/ null=未声明（灰，title 注明
+  默认全能力）/ false=显式排除（.x 警示态 + title 说明约束后果）；点击
+  .x chip 发 true 即解除。浏览器门禁
+  `tests/interactive/test_cloud_caps_browser.py`（三态渲染 + 点击往返 +
+  YAML 落盘复核 + .x 双主题对比度）。
+
+**I-2 残留限制（已知，未在本 PR 修复 — 交用户裁决）：** spec §7「拒绝
+迁移」守卫（`compatible_count > 1` 且历史含 tool_calls/tool_use → 400
+"refusing to migrate"）在旧语义下对 tools 请求不可达（全被
+feature_unsupported 拦在前），反转后 iff/premium（4 兼容候选）的**多轮**
+agent 流量第 2 轮起仍 400。首轮 tools 请求（本 PR 修复目标）正常。彻底
+解决需会话亲和/单目标粘滞（新特性，非本 PR 范围）；workaround：多轮
+agent 会话用单候选池。守卫本身是刻意设计（防跨目标迁移 thinking 签名/
+tool 归属错乱），非回归。
+
 ## 门禁捞出的顺带修复（非本 PR 主题，同批合入）
 
 **本地池候选转发必败的潜在生产 bug**：`chat_handlers._forward_request`

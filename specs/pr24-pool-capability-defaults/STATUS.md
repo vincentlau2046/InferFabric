@@ -11,9 +11,28 @@
 | 全量回归 | ✅ | 1914 passed（unit+integration；基线 1903 + 新增 11） |
 | import 冒烟 | ✅ | `python3 -c "import inferfabric"` → 7.8.0 |
 | 干净 worktree 复验 | ✅ | 提交树 440f31a：全量 1914 passed + 浏览器门禁 10/10（沙箱工作区绿 ≠ 提交树绿，故独立复验） |
-| cross-review | ⏳ | fresh-context subagent 评审中 |
+| cross-review | ✅ | fresh-context subagent（独立复跑 1796+118 单测 + 门禁 10/10）：无 Critical；I-1（云面板三态塌缩/点灭造约束）已修；I-2（多候选池多轮 agent 迁移守卫残留）记档交用户裁决；M-3/M-4 已修；M-1/M-2 裁决不修（见下） |
 | 版本 | ✅ | 7.8.0（minor，用户随方案 B 批准）；README 历史表已加行 |
 | 合并/部署 | ⏳ | ff-merge 生产 main + BatchMode push；**重启需用户单独授权**；重启后 dry-run 验证 `iff/premium` tools=true → chosen |
+
+## 评审核决记录（2026-10-31）
+
+- **I-1 修复**（TDD）：`update_model_spec` 值 False=解除打标（键移除回
+  None，不落盘）；admin GET 三态透传；cloud.js chips 三态渲染（.x 警示态）
+  + 新浏览器门禁 test_cloud_caps_browser.py（2/2：三态渲染 + 点击往返 +
+  YAML 复核 + 双主题对比度）。旧契约 pin 翻面 5 处（tag-off/GET 系）。
+- **I-2 残留**（裁决：记档不修，交用户）：spec §7 拒迁移守卫在多兼容候选
+  池上拦多轮 agent 流量第 2 轮起（首轮正常）。守卫是刻意设计非回归；
+  彻底解决需会话亲和（新特性）。workaround：多轮 agent 会话用单候选池。
+- **裁决 M-1 不修**：detail 内 `missing=a,b` vs `declared=[a, b]` 格式
+  差异 — 纯展示、排序已钉、两个分节可读性足够；改格式要动 6+ 测试锚点，
+  收益不成比例。代价若错：用户读明细时多看一眼。
+- **裁决 M-2 不修**：400 消息中英混排（尾部中文面板路径）— 刻意设计：
+  提示句指向的是中文 dashboard，中文路径名是功能信息不是噪音。
+- **M-3/M-4 已修**：test_08 会话级依赖注明（docstring）；dispatch.py:82
+  过期 docstring「未知能力不默认当作支持」改为 7.8.0 语义。
+- **顺带（门禁捞出）**：云面板既存灰态 chip 对比度债（--ink-3 双主题
+  3.08:1）→ 升 --ink-2，新门禁钉住。
 
 ## 验证记录（截至 commit 2b9c7fa）
 

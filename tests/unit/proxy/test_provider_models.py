@@ -143,7 +143,13 @@ class TestProviderModelsTag:
         saved = yaml.safe_load(cfg.read_text())
         assert saved["providers"]["openai-x"]["models"]["glm-5"]["supports_vision"] is True
 
-    def test_tag_off_capability(self, tmp_path):
+    def test_tag_off_capability_unsets_not_constrains(self, tmp_path):
+        """7.8.0：面板 chip 关闭 = 解除打标（键移除），不得持久化 false。
+
+        显式 false 自 7.8.0 起构成池候选活跃约束（catalog 排除词表）——
+        若 tag off 写 false，用户在云面板点一次 chip 就能造出「池候选拒
+        tools 请求」且 UI 无回路（cross-review I-1）。
+        """
         pm, cd, cfg = _make_pm(tmp_path)
         cd.update_model_spec("openai-x", "glm-5", {"supports_vision": True})
         h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
@@ -151,9 +157,30 @@ class TestProviderModelsTag:
         h._handle_cloud_provider_models(pm)
         data, status = _last_sent(h)
         assert status == 200, data
-        assert cd.cloud_models["glm-5"].supports_vision is False
+        # 键移除 → 三态回 None（无约束），注册表/YAML 一致
+        assert "supports_vision" not in \
+            cd.providers["openai-x"].model_specs["glm-5"]
+        assert cd.cloud_models["glm-5"].supports_vision is None
         saved = yaml.safe_load(cfg.read_text())
-        assert saved["providers"]["openai-x"]["models"]["glm-5"]["supports_vision"] is False
+        assert "supports_vision" not in \
+            saved["providers"]["openai-x"]["models"]["glm-5"]
+
+    def test_tag_off_lifts_explicit_false_constraint(self, tmp_path):
+        """YAML 显式 false（约束）可被面板一次点击解除（tag true 覆盖，
+        再 tag off 回 unset — 双向可逆，无单向陷阱）。"""
+        pm, cd, cfg = _make_pm(tmp_path)
+        cd.add_manual_model("openai-x", "glm-5",
+                            caps={"supports_tools": False})
+        assert cd.cloud_models["glm-5"].supports_tools is False
+        h = _make_handler("POST", {"provider": "openai-x", "action": "tag",
+                                   "model": "glm-5", "supports_tools": False})
+        h._handle_cloud_provider_models(pm)
+        data, status = _last_sent(h)
+        assert status == 200, data
+        assert cd.cloud_models["glm-5"].supports_tools is None
+        saved = yaml.safe_load(cfg.read_text())
+        assert "supports_tools" not in \
+            saved["providers"]["openai-x"]["models"]["glm-5"]
 
     def test_add_with_caps(self, tmp_path):
         pm, cd, cfg = _make_pm(tmp_path)
@@ -211,10 +238,10 @@ class TestProviderModelsGET:
         p = next(x for x in data["providers"] if x["name"] == "openai-x")
         assert p["enabled_models"] == ["glm-5"]
         # 手填空 spec → manual=True；带元数据 spec → manual=False。
-        # supports_vision/supports_tools 恒输出（未声明 = False）— 前端
-        # chips 直接读，不用猜键是否存在
+        # supports_vision/supports_tools 恒输出（三态：未声明 = None，
+        # 7.8.0 cross-review I-1）— 前端 chips 直接读，不用猜键是否存在
         assert p["model_specs"] == [{"id": "my-custom-glm", "manual": True,
-                                     "supports_vision": False, "supports_tools": False}]
+                                     "supports_vision": None, "supports_tools": None}]
         assert set(p["candidates"]) == {"glm-5", "deepseek-v4-flash"}
         assert p["routable_count"] == 2
         # 顶层 models 列表 = 可路由集（短名去重）
@@ -234,7 +261,25 @@ class TestProviderModelsGET:
         p = next(x for x in data["providers"] if x["name"] == "openai-x")
         spec = next(s for s in p["model_specs"] if s["id"] == "my-vlm")
         assert spec["supports_vision"] is True
-        assert spec["supports_tools"] is False
+        # 7.8.0 三态透传：未声明 = None（JSON null），不得 bool() 塌缩成
+        # false — 前端须能区分「无约束」与「显式排除」（cross-review I-1）
+        assert spec["supports_tools"] is None
+
+    def test_get_distinguishes_explicit_false_from_unset(self, tmp_path):
+        """显式 false（YAML 约束）与未声明在 GET 中必须可区分。"""
+        pm, cd, cfg = _make_pm(tmp_path)
+        cd.add_manual_model("openai-x", "constrained-m",
+                            caps={"supports_tools": False})
+        cd.add_manual_model("openai-x", "untagged-m")
+        h = _make_handler("GET", {})
+        h.path = "/admin/cloud/providers"
+        h._handle_cloud_providers(pm)
+        data, status = _last_sent(h)
+        assert status == 200
+        p = next(x for x in data["providers"] if x["name"] == "openai-x")
+        specs = {s["id"]: s for s in p["model_specs"]}
+        assert specs["constrained-m"]["supports_tools"] is False
+        assert specs["untagged-m"]["supports_tools"] is None
 
     def test_get_exposes_routable_caps(self, tmp_path):
         # 候选行 chips 状态源：已入注册表（可路由）的候选带能力快照；
@@ -249,7 +294,8 @@ class TestProviderModelsGET:
         data, status = _last_sent(h)
         assert status == 200
         p = next(x for x in data["providers"] if x["name"] == "openai-x")
-        assert p["routable_caps"]["glm-5"] == {"supports_vision": False,
+        # 三态透传：未声明 = None（cross-review I-1）
+        assert p["routable_caps"]["glm-5"] == {"supports_vision": None,
                                                "supports_tools": True}
         assert "deepseek-v4-flash" not in p["routable_caps"]
 

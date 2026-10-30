@@ -424,15 +424,26 @@ class CloudDiscovery:
 
         云模型能力上游 /models 不提供（发现只取 id），model_specs 是唯一
         注入点。spec 不存在则创建 —— 打标即声明，语义与手填/配置声明一致。
-        只接受 _CAPABILITY_KEYS；显式 False 持久化（关闭标签不靠删键复活）。
+        只接受 _CAPABILITY_KEYS。
+
+        7.8.0（cross-review I-1）：值 False = **解除打标**（键移除，回三态
+        None/无约束），不持久化 false —— 显式 false 自 7.8.0 起是池候选
+        活跃约束（catalog 排除词表），面板 chip「关闭」若写 false 会一步
+        造出约束且 UI 无回路。显式排除（false）的唯一入口是手编
+        cloud_provider.yaml（刻意的摩擦，约束须是明确决定）。
         """
         with self._models_lock:
             cfg = self._providers.get(provider)
             if cfg is None:
                 raise KeyError(provider)
             spec = cfg.model_specs.setdefault(model_id, {})
-            spec.update({k: v for k, v in caps.items()
-                         if k in _CAPABILITY_KEYS})
+            for k, v in caps.items():
+                if k not in _CAPABILITY_KEYS:
+                    continue
+                if v is False:
+                    spec.pop(k, None)   # 解除打标 → None（无约束）
+                else:
+                    spec[k] = v
             self._rebuild_provider_registry(provider, cfg)
         return self._routable_count(provider)
 
