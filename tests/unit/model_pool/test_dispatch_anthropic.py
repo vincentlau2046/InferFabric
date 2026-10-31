@@ -42,7 +42,7 @@ def registry(tmp_path):
     reg = PoolRegistry(
         config_path=tmp_path / "model_pools.yaml",
         evidence_path=tmp_path / "evidence.json",
-        known_local={"qwen-small"},
+        known_local={"qwen-small", "qwen-vl"},   # qwen-vl：视觉候选测试用
         known_providers={"prov"},
         provider_base=lambda p: "https://base/v1",
     )
@@ -184,18 +184,17 @@ class TestPoolMessagesDispatch:
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
         assert len(anth_local) == 1
 
-    def test_anthropic_vision_blocked_only_by_explicit_constraint(self, registry):
-        # 7.8.0：空声明不再拦 vision — 显式声明 features 才构成约束
+    def test_anthropic_vision_no_vision_capable_candidate_400(self, registry):
+        # 7.9.0：池内候选模型本体均无视觉 → 带图请求 400（遗留 features 忽略）
         cfg = _raw_config_anthropic()
         for c in cfg["pools"]["fast"]["candidates"]:
-            c["features"] = ["tools", "stream"]
+            c["features"] = ["vision"]   # 遗留声明 — 读时忽略
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
-                    cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": SimpleNamespace(
-                        openai_base="https://base/v1",
-                        anthropic_base="https://base/v1")})
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"}],
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=None)})
         h = FakeMessagesHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [
@@ -206,16 +205,24 @@ class TestPoolMessagesDispatch:
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["error"]["type"] == "invalid_request_error"
-        assert "missing=vision" in body["error"]["message"]
+        assert "not vision-capable" in body["error"]["message"]
+        assert "no vision-capable candidate" in body["error"]["message"]
 
-    def test_anthropic_vision_passes_empty_declaration(self, registry, anth_local):
-        # 空声明 = 无约束（全能力默认）→ vision 请求照常路由
-        pm = FakePM(registry, active={"qwen-small"},
-                    local_models={"qwen-small": _local_model()},
-                    cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": SimpleNamespace(
-                        openai_base="https://base/v1",
-                        anthropic_base="https://base/v1")})
+    def test_anthropic_vision_routes_to_vision_capable(self, registry, anth_local):
+        # 带图请求落到 model_type=vl 的本地候选（anthropic 直通路径）
+        cfg = _raw_config_anthropic()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "vlloc", "priority": 2, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["anthropic"]})
+        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
+                    local_models={"qwen-small": _local_model(),
+                                  "qwen-vl": _local_model(name="qwen-vl",
+                                                          served="qwen-vl",
+                                                          port=8102)},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeMessagesHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [
@@ -224,6 +231,7 @@ class TestPoolMessagesDispatch:
 
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
         assert len(anth_local) == 1
+        assert anth_local[0]["model_obj"].served_name == "qwen-vl"
 
     def test_tools_requirement_checked(self, registry, anth_local):
         # 7.8.0：tools 是 agent 基础能力 — 空声明（默认）即可路由

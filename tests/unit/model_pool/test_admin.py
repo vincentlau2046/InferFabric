@@ -38,7 +38,7 @@ def registry(tmp_path):
     reg = PoolRegistry(
         config_path=tmp_path / "model_pools.yaml",
         evidence_path=tmp_path / "evidence.json",
-        known_local={"qwen-small"},
+        known_local={"qwen-small", "qwen-vl"},   # qwen-vl：视觉候选测试用
         known_providers={"prov"},
         provider_base=lambda p: "https://base/v1",
     )
@@ -209,30 +209,40 @@ class TestDryRun:
         assert body["chosen"] is None
         assert body["error"] == "no_compatible_target"
 
-    def test_dry_run_empty_declaration_passes_requirements(self, pm):
-        # 7.8.0：空声明 = 无约束 → 带 tools/stream/vision 需求也可选
+    def test_dry_run_vision_routes_to_vision_capable(self, registry):
+        # 7.9.0：带图 dry-run 只在 vision-capable 候选中选（模型本体声明）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "vlloc", "priority": 2, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
+                    local_models={"qwen-small": _local_model(),
+                                  "qwen-vl": _local_model(name="qwen-vl",
+                                                          served="qwen-vl",
+                                                          port=8102)},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}],
+                    cloud_models={"prov/cloud-m": object()},
+                    providers={"prov": object()})
         h = AdminHandler(body={"pool": "fast", "protocol": "openai",
-                               "tools": True, "stream": True, "vision": True})
+                               "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
-        assert body["chosen"] == "loc"
+        assert body["chosen"] == "vlloc"
 
     def test_dry_run_feature_unsupported_detail_passthrough(self, pm):
-        # 显式约束候选 → decisions 带 missing/declared 明细（自解释）
-        cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"] = [
-            {"id": "cld", "priority": 1, "kind": "cloud",
-             "provider": "prov", "model_id": "cloud-m",
-             "declared_protocols": ["openai"], "features": ["vision"]}]
-        pm.pool_registry.update(cfg, expected_revision=pm.pool_registry.snapshot().revision)
+        # 带图 dry-run 无 vision-capable 候选 → decisions 带视觉明细（自解释）
         h = AdminHandler(body={"pool": "fast", "protocol": "openai",
-                               "tools": True})
+                               "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
         assert body["chosen"] is None
         d = body["decisions"][0]
         assert d["reason"] == "feature_unsupported"
-        assert d["detail"] == "missing=tools; declared=[vision]"
+        assert d["detail"] == ("request requires vision; "
+                               "model is not vision-capable")
 
     def test_dry_run_unknown_pool_404(self, pm):
         h = AdminHandler(body={"pool": "nope", "protocol": "openai"})
@@ -370,7 +380,7 @@ class TestGetRuntimeState:
             _yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
         reg = PoolRegistry(config_path=tmp_path / "m.yaml",
                            evidence_path=tmp_path / "e.json",
-                           known_local={"qwen-small"}, known_providers={"prov"},
+                           known_local={"qwen-small", "qwen-vl"},   # qwen-vl：视觉候选测试用 known_providers={"prov"},
                            provider_base=lambda p: "https://base/v1")
         reg.load()
         h = AdminHandler()

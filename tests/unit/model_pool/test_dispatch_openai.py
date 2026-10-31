@@ -66,9 +66,12 @@ class FakeCloud:
 
 
 class FakeMgr:
-    def __init__(self, active=(), models=None):
+    def __init__(self, active=(), models=None, model_dicts=None):
         self.active_services = set(active)
         self._models = models or {}
+        # list_models 数据源（dict 列表，同真实 manager）— runtime_view
+        # 据此构建 local_vision（models.d model_type=vl）
+        self._model_dicts = list(model_dicts or [])
 
     def find_model_by_served_name(self, name):
         return self._models.get(name)
@@ -78,6 +81,9 @@ class FakeMgr:
             if m.name == name:
                 return m
         return None
+
+    def list_models(self):
+        return self._model_dicts
 
 
 class FakeLogger:
@@ -98,10 +104,11 @@ class FakeAnomalies:
 
 class FakePM:
     def __init__(self, registry, auth=None, active=(), local_models=None,
-                 cloud_models=None, providers=None):
+                 cloud_models=None, providers=None, model_dicts=None):
         self.pool_registry = registry
         self.auth = auth or FakeAuth()
-        self.mgr = FakeMgr(active=active, models=local_models or {})
+        self.mgr = FakeMgr(active=active, models=local_models or {},
+                           model_dicts=model_dicts)
         self.cloud = FakeCloud(models=cloud_models or {}, providers=providers or {})
         self.dual_gate = FakeGate()
         self.logger = FakeLogger()
@@ -172,7 +179,7 @@ def registry(tmp_path):
     reg = PoolRegistry(
         config_path=tmp_path / "model_pools.yaml",
         evidence_path=tmp_path / "evidence.json",
-        known_local={"qwen-small"},
+        known_local={"qwen-small", "qwen-vl"},   # qwen-vl：视觉候选测试用
         known_providers={"prov"},
         provider_base=lambda p: "https://base/v1",
     )
@@ -369,18 +376,18 @@ class TestPoolChatDispatch:
         assert body["status"] == "pool_disabled"
         assert any(k.lower() == "retry-after" for k in (hdrs or {}))
 
-    def test_vision_request_blocked_only_by_explicit_constraint(self, registry):
-        # 7.8.0：空声明不再拦 vision — 显式声明 features 才构成约束
+    def test_vision_request_no_vision_capable_candidate_400(self, registry):
+        # 7.9.0：池内候选模型本体均无视觉（本地 llm / 云未声明 supports_vision）
+        # → 带图请求 400；遗留 features 声明不构成任何路由行为
         cfg = _raw_config()
         for c in cfg["pools"]["fast"]["candidates"]:
-            c["features"] = ["tools", "stream", "structured"]
+            c["features"] = ["vision"]   # 遗留声明 — 读时忽略
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
-                    cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": SimpleNamespace(
-                        openai_base="https://base/v1",
-                        anthropic_base="https://base/v1")})
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"}],
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=None)})
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [
@@ -392,18 +399,26 @@ class TestPoolChatDispatch:
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["status"] == "no_compatible_target"
-        # 自解释：候选 id + 缺失/声明明细
+        # 自解释：候选 id + 视觉语义明细 + 模型侧修复指引
         assert "loc: feature_unsupported" in body["error"]
-        assert "missing=vision" in body["error"]
+        assert "not vision-capable" in body["error"]
+        assert "no vision-capable candidate" in body["error"]
 
-    def test_vision_request_passes_empty_declaration(self, registry, forwarded):
-        # 空声明 = 无约束（全能力默认）→ vision 请求照常路由
-        pm = FakePM(registry, active={"qwen-small"},
-                    local_models={"qwen-small": _local_model()},
-                    cloud_models={"prov/cloud-m": object()},
-                    providers={"prov": SimpleNamespace(
-                        openai_base="https://base/v1",
-                        anthropic_base="https://base/v1")})
+    def test_vision_request_routes_to_vision_capable_candidate(self, registry, forwarded):
+        # 带图请求越过 p1 文本候选，落到 p2 的 VL 本地模型（model_type=vl）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "vlloc", "priority": 2, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
+                    local_models={"qwen-small": _local_model(),
+                                  "qwen-vl": _local_model(name="qwen-vl",
+                                                          served="qwen-vl",
+                                                          port=8102)},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeHandler()
         data = {"model": "iff/fast", "messages": [
             {"role": "user", "content": [
@@ -413,27 +428,54 @@ class TestPoolChatDispatch:
 
         assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
         assert len(forwarded) == 1
+        assert forwarded[0]["port"] == 8102   # VL 候选，不是 p1 文本候选
+
+    def test_no_vision_request_pure_priority_vl_not_skipped(self, registry, forwarded):
+        # 用户裁决：VL 排最前就全接 — 纯文本请求不跳过 VL 候选
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].insert(0,
+            {"id": "vlloc", "priority": 0, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
+                    local_models={"qwen-small": _local_model(),
+                                  "qwen-vl": _local_model(name="qwen-vl",
+                                                          served="qwen-vl",
+                                                          port=8102)},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}])
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        assert len(forwarded) == 1
+        assert forwarded[0]["port"] == 8102   # p1 = VL，纯文本也由它服务
 
     def test_feature_unsupported_400_message_self_explaining(self, registry):
-        # 400 消息自解释：候选 id + missing/declared + 修复指引；日志 error 码不变
+        # 400 消息自解释：候选 id + 视觉明细 + 模型侧修复指引；日志 error 码不变
         cfg = _raw_config()
         cfg["pools"]["fast"]["candidates"] = [
             {"id": "cld", "priority": 1, "kind": "cloud",
              "provider": "prov", "model_id": "cloud-m",
-             "declared_protocols": ["openai"], "features": ["vision"]}]
+             "declared_protocols": ["openai"]}]
         registry.update(cfg, expected_revision=registry.snapshot().revision)
-        pm = FakePM(registry, cloud_models={"prov/cloud-m": object()})
+        pm = FakePM(registry, cloud_models={"prov/cloud-m": SimpleNamespace(
+            supports_vision=None)})
         h = FakeHandler()
-        data = {"model": "iff/fast", "messages": [],
-                "tools": [{"name": "t", "input_schema": {}}]}
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]}]}
 
         assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
         status, body, _ = h.sent[-1]
         assert status == 400
         msg = body["error"]
         assert "No eligible target for iff/fast" in msg
-        assert "cld: feature_unsupported [missing=tools; declared=[vision]]" in msg
-        assert "clear its features constraint" in msg
+        assert ("cld: feature_unsupported "
+                "[request requires vision; model is not vision-capable]") in msg
+        assert "no vision-capable candidate" in msg
+        assert "云面板" in msg
         assert pm.logger.entries[-1].error == "no_compatible_target"
 
     def test_tools_request_routed_but_normalized(self, registry, forwarded):

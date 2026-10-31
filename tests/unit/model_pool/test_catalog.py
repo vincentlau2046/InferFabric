@@ -63,7 +63,7 @@ class TestLocalCatalog:
         entry = cat["local"][0]
         # 契约精确到键名（前端与 Phase 2/3 扩展依赖这些字段）
         assert set(entry) == {"name", "active", "engine", "modality",
-                              "context_window", "protocols", "features"}
+                              "context_window", "protocols", "vision"}
         assert entry["name"] == "qwen-small"
         assert entry["active"] is True
         assert entry["engine"] == "vllm"
@@ -76,17 +76,16 @@ class TestLocalCatalog:
         cat = build_catalog(pm)
         assert [e["name"] for e in cat["local"]] == ["qwen-small", "Qwen38-27B-VL"]
 
-    def test_local_features_default_empty(self):
-        # 7.8.0 语义反转：本地 features 一律空（= 无约束/全能力默认）。
-        # modality 仍暴露供 UI 提示展示，但不再构成快照约束 —
-        # 视觉请求到文本模型直通上游裁定，池 failover 兜底。
+    def test_local_vision_flag_from_model_type(self):
+        # 7.9.0：能力归模型 — vision 判定源 = models.d model_type，
+        # 目录暴露 bool 供前端展示；modality 保留供 UI 提示。
         omni = {"name": "omni-x", "model_type": "vl", "type": "vllm",
                 "active": False, "modality": "multimodal", "context_window": 8192}
         pm = CatalogPM(model_dicts=[_llm("qwen-small"), _vl(), omni])
         by_name = {e["name"]: e for e in build_catalog(pm)["local"]}
-        assert by_name["qwen-small"]["features"] == []
-        assert by_name["Qwen38-27B-VL"]["features"] == []
-        assert by_name["omni-x"]["features"] == []
+        assert by_name["qwen-small"]["vision"] is False
+        assert by_name["Qwen38-27B-VL"]["vision"] is True
+        assert by_name["omni-x"]["vision"] is True
         # modality 保留（编辑器提示用）
         assert by_name["Qwen38-27B-VL"]["modality"] == "text-vision"
 
@@ -151,29 +150,27 @@ class TestCloudCatalog:
         pm = CatalogPM(cloud_models={
             "tathr-glm/glm-5": _make_cm()})
         entry = build_catalog(pm)["cloud"][0]
-        assert set(entry) == {"provider", "model_id", "protocols", "features",
+        assert set(entry) == {"provider", "model_id", "protocols", "vision",
                               "active", "context_window"}
         assert entry["protocols"] == ["openai", "anthropic"]  # 来自发现结果
-        assert entry["features"] == []
+        assert entry["vision"] is False   # 未声明 supports_vision ≠ 能看图
         assert entry["active"] is True   # 在 cloud_models = 已发现即可路由
 
-    def test_cloud_capability_tri_state(self):
-        # 7.8.0 三态推导：未设置/True → 无约束（[]）；显式 False → 排除该
-        # 词，features 写剩余词表（规范序 tools,stream,vision,structured）
+    def test_cloud_vision_requires_explicit_declaration(self):
+        # 7.9.0：vision 必须显式声明 — supports_vision=True → 能看图；
+        # None/False → 不能。supports_tools 与路由无关（不建模）。
         pm = CatalogPM(cloud_models={
-            "p/unset": _make_cm(model_id="unset", provider="p"),          # None/None
-            "p/true": _make_cm(model_id="true", provider="p",
-                               tools=True, vision=True),                   # True/True
-            "p/no-tools": _make_cm(model_id="no-tools", provider="p",
-                                   tools=False),                           # False/None
-            "p/none": _make_cm(model_id="none", provider="p",
-                               tools=False, vision=False),                 # False/False
+            "p/unset": _make_cm(model_id="unset", provider="p"),          # None
+            "p/true": _make_cm(model_id="true", provider="p", vision=True),
+            "p/false": _make_cm(model_id="false", provider="p", vision=False),
+            "p/tools-only": _make_cm(model_id="tools-only", provider="p",
+                                     tools=True),                         # tools 无关
         })
         by_id = {e["model_id"]: e for e in build_catalog(pm)["cloud"]}
-        assert by_id["unset"]["features"] == []
-        assert by_id["true"]["features"] == []
-        assert by_id["no-tools"]["features"] == ["stream", "vision", "structured"]
-        assert by_id["none"]["features"] == ["stream", "structured"]
+        assert by_id["unset"]["vision"] is False
+        assert by_id["true"]["vision"] is True
+        assert by_id["false"]["vision"] is False
+        assert by_id["tools-only"]["vision"] is False
 
     def test_cloud_anthropic_unavailable_openai_only(self):
         pm = CatalogPM(cloud_models={

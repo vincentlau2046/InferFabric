@@ -182,12 +182,10 @@ def handle_post_model_pools_dry_run(handler, pm):
         handler._send_json(
             {"error": f"Unknown pool: {pool_name}", "status": "unknown_pool"}, 404)
         return
+    # 7.9.0：vision 是唯一请求感知维度（tools/stream/structured 不建模）
     req = RequestRequirements(
         protocol=protocol,
-        stream=bool(data.get("stream", False)),
-        tools=bool(data.get("tools", False)),
         vision=bool(data.get("vision", False)),
-        structured=bool(data.get("structured", False)),
     )
     sel = select(ps, req, runtime_view(pm))
     body = _selection_view(sel)

@@ -79,23 +79,13 @@ def _has_vision_anthropic(data: dict) -> bool:
 
 
 def extract_requirements(protocol: str, data: dict) -> RequestRequirements:
-    """从请求体提取本次必要能力。7.8.0：能力约束是候选侧显式声明
-    （空 = 无约束/全能力默认），此处只提取请求「要求」，不作支持判定。"""
+    """从请求体提取本次必要能力。7.9.0：vision 是唯一请求感知维度 —
+    tools/stream/structured 不建模（池准入原则：无 tools 不进池 → 恒真）。"""
     if protocol == "anthropic":
         vision = _has_vision_anthropic(data)
-        tools = bool(data.get("tools"))
-        structured = False  # Anthropic 无独立结构化输出字段
     else:
         vision = _has_vision_openai(data)
-        tools = bool(data.get("tools"))
-        structured = bool(data.get("response_format") or data.get("json_schema"))
-    return RequestRequirements(
-        protocol=protocol,
-        stream=bool(data.get("stream", False)),
-        tools=tools,
-        vision=vision,
-        structured=structured,
-    )
+    return RequestRequirements(protocol=protocol, vision=vision)
 
 
 # ── 公共视图/日志辅助 ──
@@ -116,12 +106,37 @@ def runtime_view(pm) -> RuntimeView:
         if model_obj is not None:
             active.add(getattr(model_obj, "served_name", None) or name)
         active.add(name)
+    # 7.9.0：vision-capable 本地模型 served_name 集 — 能力归模型，
+    # 判定源 = models.d model_type=vl（mgr.list_models 同 catalog 数据源）；
+    # mgr 未提供入口时降级为空集（带图请求由 400 自解释兜底）
+    local_vision: set = set()
+    list_models = getattr(pm.mgr, "list_models", None)
+    if list_models is not None:
+        try:
+            for m in list_models() or []:
+                if not isinstance(m, dict) or m.get("model_type") != "vl":
+                    continue
+                name = m.get("name")
+                if not name:
+                    continue
+                served = name
+                if get_model is not None:
+                    try:
+                        model_obj = get_model(name)
+                        served = (getattr(model_obj, "served_name", None) or name) \
+                            if model_obj is not None else name
+                    except Exception:
+                        served = name
+                local_vision.add(served)
+        except Exception:
+            pass
     return RuntimeView(
         active_services=active,
         cloud_models=dict(getattr(pm.cloud, "cloud_models", None) or {}),
         # P2：冷却端点在选择期排除（reason=cooldown）
         cooling_fingerprints=(cooldowns.cooling_fingerprints()
                               if cooldowns is not None else frozenset()),
+        local_vision=frozenset(local_vision),
     )
 
 
@@ -222,9 +237,8 @@ def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, messa
 def _no_eligible_message(model: str, sel) -> str:
     """no eligible target 的自解释消息（OpenAI/Anthropic 共用）。
 
-    7.8.0：逐候选给出 id + 原因 + feature 明细；能力约束导致的拒绝
-    附修复指引 — 「feature_unsupported」读起来像模型不支持，实际是
-    候选显式声明了约束，得告诉用户去哪解除。
+    7.9.0：feature_unsupported = 池内无 vision-capable 候选 — 指引指向
+    模型侧声明入口（能力归模型），不指向池编辑器。
     """
     parts = []
     for d in sel.decisions:
@@ -237,9 +251,10 @@ def _no_eligible_message(model: str, sel) -> str:
     msg = f"No eligible target for {model} ({', '.join(parts) or 'no candidates'})"
     if any((not d.included) and d.reason == "feature_unsupported"
            for d in sel.decisions):
-        msg += (" — candidate capability is declared-constrained; if the model "
-                "supports this request, clear its features constraint in the "
-                "pool config (dashboard: 模型池 → 编辑 → 能力)")
+        msg += (" — no vision-capable candidate in this pool; declare the "
+                "model's vision capability (local: models.d model_type=vl; "
+                "cloud: 云面板 → 模型 → 视觉 chip) or add a vision-capable "
+                "candidate to the pool")
     return msg
 
 

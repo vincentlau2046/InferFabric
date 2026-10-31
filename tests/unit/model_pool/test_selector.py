@@ -43,26 +43,30 @@ def _pool_snap(cands, enabled=True, allowed=("cloud", "local"), accept_declared=
                         candidates=tuple(_resolved(c) for c in cands))
 
 
-def _runtime(active=None, cloud=None):
+def _runtime(active=None, cloud=None, local_vision=()):
     return RuntimeView(
         active_services=set(active or []),
-        cloud_models=dict(cloud or {}))
+        cloud_models=dict(cloud or {}),
+        local_vision=frozenset(local_vision))
 
 
-def _rt(*cands, active=None, cloud=None):
+def _rt(*cands, active=None, cloud=None, local_vision=()):
     """自动就绪 runtime：cloud 候选注入发现列表，local 候选注入 active。
-    显式 active/cloud 覆盖自动值（用于构造未就绪场景）。"""
+    显式 active/cloud 覆盖自动值（用于构造未就绪场景）。
+    local_vision 不自动填充 — 视觉能力必须显式声明（7.9.0 语义）。"""
     auto_cloud = {f"{c.provider}/{c.model_id}": object()
                   for c in cands if c.kind == "cloud"}
     auto_active = {c.model_name for c in cands if c.kind == "local"}
     return RuntimeView(
         active_services=(set(active) if active is not None else auto_active),
-        cloud_models={**auto_cloud, **(cloud or {})})
+        cloud_models={**auto_cloud, **(cloud or {})},
+        local_vision=frozenset(local_vision))
 
 
-def _req(protocol="openai", stream=False, tools=False, vision=False, structured=False):
-    return RequestRequirements(protocol=protocol, stream=stream, tools=tools,
-                               vision=vision, structured=structured)
+def _req(protocol="openai", vision=False):
+    # 7.9.0：tools/stream/structured 不再构成路由要求（能力归模型，
+    # 准入原则下恒真）；唯一请求感知维度 = vision
+    return RequestRequirements(protocol=protocol, vision=vision)
 
 
 class TestProtocolFilter:
@@ -131,69 +135,127 @@ class TestEvidenceRules:
         assert sel.decisions[0].reason == "no_evidence"
 
 
-class TestFeatures:
-    """7.8.0 语义反转：空声明 = 无约束（全能力默认），非空声明 = 严格约束。
-
-    agent 调用是基础场景，「没声明」不得构成拦截；仅显式声明的
-    features 才约束路由。
+class TestVisionFiltering:
+    """7.9.0：能力归模型，池归优先级。vision 是唯一请求感知维度 —
+    vision-capable 判定源 = 模型本体（本地 RuntimeView.local_vision ←
+    models.d model_type=vl；云 cloud_models[key].supports_vision=True）。
+    池候选 features 字段退役：读时容忍，不构成任何路由行为。
     """
 
-    def test_empty_declaration_passes_all_requirements(self):
-        cand = _cand("e1", 1, features=())
+    def test_vision_request_routes_to_vision_capable_local(self):
+        cand = _cand("l1", 1, kind="local", model_name="qwen-vl")
         snap = _pool_snap([cand])
-        for kw in ({"tools": True}, {"stream": True}, {"vision": True},
-                   {"structured": True},
-                   {"tools": True, "stream": True, "vision": True,
-                    "structured": True}):
-            sel = select(snap, _req(**kw), _rt(cand))
-            assert sel.chosen is not None, kw
-            assert sel.chosen.candidate.id == "e1", kw
+        sel = select(snap, _req(vision=True),
+                     _rt(cand, active={"qwen-vl"}, local_vision={"qwen-vl"}))
+        assert sel.chosen.candidate.id == "l1"
 
-    def test_declared_constraint_still_rejects_missing(self):
-        cands = [_cand("t1", 1, features=("vision",)),   # 显式约束：仅 vision
-                 _cand("t2", 2, features=("tools",))]
+    def test_vision_request_routes_to_cloud_supports_vision_true(self):
+        from types import SimpleNamespace
+        cand = _cand("c1", 1, kind="cloud", provider="prov", model_id="m1")
+        snap = _pool_snap([cand])
+        sel = select(snap, _req(vision=True),
+                     _rt(cand, cloud={"prov/m1": SimpleNamespace(
+                         supports_vision=True)}))
+        assert sel.chosen.candidate.id == "c1"
+
+    def test_vision_request_excludes_non_vision_by_priority_fallthrough(self):
+        # 文本候选 p1、视觉候选 p2：带图请求越过 p1 落到 p2
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
+                 _cand("l2", 2, kind="local", model_name="qwen-vl")]
         snap = _pool_snap(cands)
-        sel = select(snap, _req(tools=True), _rt(*cands))
-        assert sel.chosen.candidate.id == "t2"
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt", "qwen-vl"},
+                         local_vision={"qwen-vl"}))
+        assert sel.chosen.candidate.id == "l2"
         assert ({d.candidate_id: d.reason for d in sel.decisions}["t1"]
                 == "feature_unsupported")
 
-    def test_vision_request_excludes_non_vision(self):
-        snap = _pool_snap([_cand("v1", 1, features=("tools",))])
-        sel = select(snap, _req(vision=True), _runtime())
+    def test_no_vision_request_pure_priority_vl_at_p1_serves_all(self):
+        # 用户裁决：VL 排最前就全接 — 无图请求不跳过 VL
+        cands = [_cand("l1", 1, kind="local", model_name="qwen-vl"),
+                 _cand("t2", 2, kind="local", model_name="qwen-txt")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(),
+                     _rt(*cands, active={"qwen-vl", "qwen-txt"},
+                         local_vision={"qwen-vl"}))
+        assert sel.chosen.candidate.id == "l1"
+
+    def test_no_vision_request_vl_at_p2_not_chosen_but_eligible(self):
+        # VL 排 p2：无图请求按优先级走 p1；p2 只是没被选，不是被排除
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
+                 _cand("l2", 2, kind="local", model_name="qwen-vl")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(),
+                     _rt(*cands, active={"qwen-txt", "qwen-vl"},
+                         local_vision={"qwen-vl"}))
+        assert sel.chosen.candidate.id == "t1"
+        assert ({d.candidate_id: (d.reason, d.included) for d in sel.decisions}
+                ["l2"] == ("ok", True))
+        assert sel.compatible_count == 2
+
+    def test_vision_request_no_vision_capable_is_compatibility_error(self):
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt"}))
+        assert sel.chosen is None
+        assert sel.decisions[0].reason == "feature_unsupported"
+        assert sel.error == "no_compatible_target"
+
+    def test_vision_unsupported_detail_is_self_explaining(self):
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt"}))
+        d = sel.decisions[0]
+        assert d.reason == "feature_unsupported"
+        assert "vision" in d.detail and "not vision-capable" in d.detail
+
+    def test_cloud_supports_vision_unset_is_not_vision_capable(self):
+        # 未声明 supports_vision（None）≠ 能看图 — vision 必须显式声明
+        from types import SimpleNamespace
+        cand = _cand("c1", 1, kind="cloud", provider="prov", model_id="m1")
+        snap = _pool_snap([cand])
+        sel = select(snap, _req(vision=True),
+                     _rt(cand, cloud={"prov/m1": SimpleNamespace(
+                         supports_vision=None)}))
         assert sel.chosen is None
         assert sel.decisions[0].reason == "feature_unsupported"
 
-    def test_stream_and_structured_flags_checked(self):
-        cand = _cand("s1", 1, features=("stream",))
+    def test_undiscovered_cloud_candidate_not_statically_vision_excluded(self):
+        # 云模型未发现 → 视觉能力未知，不做静态视觉判定；
+        # 由就绪层报 cloud_model_missing（理由精确，不误导为能力问题）
+        cand = _cand("c1", 1, kind="cloud", provider="prov", model_id="m1")
         snap = _pool_snap([cand])
-        assert select(snap, _req(stream=True), _rt(cand)).chosen.candidate.id == "s1"
-        assert select(snap, _req(structured=True), _runtime()).decisions[0].reason == "feature_unsupported"
+        sel = select(snap, _req(vision=True), _runtime(cloud={}))
+        assert sel.decisions[0].reason == "cloud_model_missing"
 
-    def test_feature_unsupported_detail_reports_missing_and_declared(self):
-        snap = _pool_snap([_cand("v1", 1, features=("tools", "stream"))])
-        sel = select(snap, _req(vision=True, structured=True), _runtime())
-        d = sel.decisions[0]
-        assert d.reason == "feature_unsupported"
-        assert d.detail == "missing=structured,vision; declared=[stream, tools]"
+    def test_pool_candidate_features_field_is_ignored(self):
+        # 存量 YAML 的候选 features（如遗留 [vision]）读时容忍、
+        # 不构成任何路由行为：声明 [vision] 但模型本体无视觉 → 带图仍拒；
+        # 未声明但模型本体有视觉 → 带图照接
+        c1 = _cand("legacy", 1, kind="local", model_name="qwen-txt",
+                   features=("vision",))
+        snap = _pool_snap([c1])
+        sel = select(snap, _req(vision=True),
+                     _rt(c1, active={"qwen-txt"}, local_vision={"qwen-vl"}))
+        assert sel.chosen is None
+        c2 = _cand("plain", 1, kind="local", model_name="qwen-vl", features=())
+        snap2 = _pool_snap([c2])
+        sel2 = select(snap2, _req(vision=True),
+                      _rt(c2, active={"qwen-vl"}, local_vision={"qwen-vl"}))
+        assert sel2.chosen.candidate.id == "plain"
 
-    def test_empty_evidence_features_do_not_constrain(self):
-        # 证据 features 为空（探测未记录任何功能）同样视为无约束
-        cand = _cand("p1", 1, features=("vision",))   # 候选声明非空但证据为空
-        snap = _pool_snap([cand])
-        # _resolved 用 cand.features 填证据 — 手工构造空证据
-        from inferfabric.model_pool.registry import ResolvedCandidate
-        from inferfabric.model_pool.evidence import Evidence, EvidenceState
-        rc = ResolvedCandidate(
-            candidate=cand, endpoint_fingerprint=f"fp-{cand.id}",
-            evidence={"openai": Evidence(
-                state=EvidenceState.PROBED, protocol="openai",
-                features=(), fingerprint=f"fp-{cand.id}",
-                recorded_at="t", source="admin-probe")})
-        snap = PoolSnapshot(revision=1, pool=snap.pool, candidates=(rc,))
-        sel = select(snap, _req(tools=True), _rt(cand))
-        assert sel.chosen is not None
-        assert sel.chosen.candidate.id == "p1"
+    def test_vision_excluded_counts_as_no_ready_not(self):
+        # 视觉排除是静态兼容性问题（no_compatible_target），即使其他
+        # 候选因未就绪被排除 — 与 7.8.0 错误码映射一致
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
+                 _cand("l2", 2, kind="local", model_name="qwen-vl")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active=set(), local_vision={"qwen-vl"}))
+        # l2 视觉兼容但未就绪 → no_ready_target（不是 no_compatible）
+        assert sel.error == "no_ready_target"
 
 
 class TestLocationAndReadiness:

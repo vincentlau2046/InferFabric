@@ -181,9 +181,9 @@ class TestEvidenceFingerprint:
         assert "openai" not in ev    # 指纹不符 → 不参与选择
 
 
-# ── #4 证据功能覆盖：PROBED(text-only) 不得放行 tools 请求 ──
+# ── 7.9.0 证据/候选 features 退役：路由不再消费任何 features 声明 ──
 
-class TestEvidenceFeatureCoverage:
+class TestEvidenceFeaturesRetired:
     def _resolved(self, ev_features, cand_features=("tools",)):
         from inferfabric.model_pool.config import CandidateConfig
         from inferfabric.model_pool.registry import ResolvedCandidate
@@ -197,42 +197,34 @@ class TestEvidenceFeatureCoverage:
                 features=tuple(ev_features), fingerprint="fp",
                 recorded_at="", source="admin-probe")})
 
-    def test_probed_empty_evidence_features_do_not_constrain(self):
-        # 7.8.0 语义反转：证据 features 为空 = 无约束（全能力默认），
-        # 不得把「探测未记录功能」解释为「仅纯文本」。
+    def _snap(self, rc):
         from inferfabric.model_pool.config import PoolConfig
         from inferfabric.model_pool.registry import PoolSnapshot
-        rc = self._resolved(ev_features=())            # 探测未记录任何功能
-        ps = PoolSnapshot(revision=1, pool=PoolConfig(
+        return PoolSnapshot(revision=1, pool=PoolConfig(
             name="fast", enabled=True, allowed_locations=("cloud",),
             accept_declared=False), candidates=(rc,))
-        sel = select(ps, RequestRequirements(protocol="openai", tools=True),
-                     RuntimeView(cloud_models={"p/m": object()}))
-        assert sel.chosen is rc
 
-    def test_probed_evidence_features_constrain(self):
-        # 非空证据 features = 严格约束：未覆盖的需求仍被拒，且 detail 自解释
-        from inferfabric.model_pool.config import PoolConfig
-        from inferfabric.model_pool.registry import PoolSnapshot
-        rc = self._resolved(ev_features=("tools",))
-        ps = PoolSnapshot(revision=1, pool=PoolConfig(
-            name="fast", enabled=True, allowed_locations=("cloud",),
-            accept_declared=False), candidates=(rc,))
-        sel = select(ps, RequestRequirements(protocol="openai", vision=True),
-                     RuntimeView(cloud_models={"p/m": object()}))
+    def test_evidence_features_do_not_authorize_vision(self):
+        # 证据里记了 vision 也不背书路由 — vision-capable 唯一判定源
+        # 是模型本体（云 supports_vision）；未声明 → 带图请求仍拒
+        from types import SimpleNamespace
+        rc = self._resolved(ev_features=("vision",), cand_features=("vision",))
+        sel = select(self._snap(rc),
+                     RequestRequirements(protocol="openai", vision=True),
+                     RuntimeView(cloud_models={"p/m": SimpleNamespace(
+                         supports_vision=None)}))
         assert sel.chosen is None
         assert sel.decisions[0].reason == "feature_unsupported"
-        assert sel.decisions[0].detail == "missing=vision; declared=[tools]"
 
-    def test_probed_evidence_features_authorize(self):
-        from inferfabric.model_pool.config import PoolConfig
-        from inferfabric.model_pool.registry import PoolSnapshot
-        rc = self._resolved(ev_features=("tools",))
-        ps = PoolSnapshot(revision=1, pool=PoolConfig(
-            name="fast", enabled=True, allowed_locations=("cloud",),
-            accept_declared=False), candidates=(rc,))
-        sel = select(ps, RequestRequirements(protocol="openai", tools=True),
-                     RuntimeView(cloud_models={"p/m": object()}))
+    def test_evidence_features_do_not_constrain_vision(self):
+        # 证据/候选 features 为空也不拦 — 模型本体声明 supports_vision
+        # 即可服务带图请求
+        from types import SimpleNamespace
+        rc = self._resolved(ev_features=(), cand_features=())
+        sel = select(self._snap(rc),
+                     RequestRequirements(protocol="openai", vision=True),
+                     RuntimeView(cloud_models={"p/m": SimpleNamespace(
+                         supports_vision=True)}))
         assert sel.chosen is rc
 
 

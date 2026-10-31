@@ -1,21 +1,22 @@
-"""inferfabric/model_pool/catalog.py — 池候选目录（v7.1.2）。
+"""inferfabric/model_pool/catalog.py — 池候选目录（v7.9.0）。
 
 目录回答的域问题是「池候选可以引用什么」。此前前端自行刮 /models 与
 /admin/cloud/providers 逆向猜 schema，字段一变即静默断（云目录曾因此
 恒空）；现由后端一次性构建权威视图，前端只消费。
 
-语义：
+7.9.0 语义（能力归模型，池归优先级）：
   - local  = models.d 中 model_type 为 llm/vl 的模型（chat 池；TTS/ASR/
     embedding 不进 chat 池 — 选了也永远不可用）。条目名 = served_name
-    （池候选引用 served_name，dispatch 评审 #15）。features 一律空
-    （7.8.0：空 = 无约束/全能力默认），modality 保留供编辑器提示展示。
+    （池候选引用 served_name，dispatch 评审 #15）。vision = model_type
+    是否 vl（模型本体声明，跟模型走），modality 保留供编辑器提示展示。
   - cloud  = cloud_models（发现后可路由集合）— 与 runtime_view 同源，
     「目录里出现的 ⇔ dispatch 能路由到的」按构造一致。provider.candidates
-    里的非 routable 别名（如 glm-5-failover）按构造不进目录。能力标志
-    三态：未设置/True → features=[]（全能力默认）；显式 False → 排除该
-    词、features 写剩余词表（7.8.0）。
+    里的非 routable 别名（如 glm-5-failover）按构造不进目录。
+    vision = supports_vision is True（必须显式声明；None/False = 不能）。
   - protocols：云来自发现结果（openai/anthropic available），本地按引擎
     映射声明（declared 态 — 证据系统区分 declared/probed，语义不变）。
+  - 池候选 features 字段已退役（7.8.0 的候选级能力声明作废），目录不再
+    携带该键。
 
 可扩展性：本响应是运营视图唯一的「候选元数据总线」。Phase 2/3 只做
 加法 — 条目可追加 latency/degraded/evidence 等字段，前端选择键编码
@@ -26,9 +27,6 @@
 import logging
 
 log = logging.getLogger("inferfabric.model_pool.catalog")
-
-# 功能词表规范序（7.8.0 云候选约束快照用；与 config.VALID_FEATURES 同集）
-_FEATURE_ORDER = ("tools", "stream", "vision", "structured")
 
 # 本地引擎 → 声明协议。vllm/ninfer/sglang 有本地 anthropic 路径
 # （forward_anthropic_local 直通引擎原生 /v1/messages，不翻译）→ 双协议声明；
@@ -80,10 +78,8 @@ def _local_entries(pm) -> list[dict]:
             except Exception:
                 served = name
         engine = m.get("type") or ""
-        # 7.8.0 语义反转：本地 features 一律空（= 无约束/全能力默认）。
-        # modality 保留供编辑器提示展示，但不再构成快照约束 — 视觉请求
-        # 到文本模型直通上游裁定，池 failover 兜底。
-        features = []
+        # 7.9.0：能力归模型 — vision 判定源 = models.d model_type，
+        # 目录只做展示透传；modality 保留供编辑器提示展示。
         out.append({
             "name": served,
             "active": bool(m.get("active")),
@@ -91,7 +87,7 @@ def _local_entries(pm) -> list[dict]:
             "modality": m.get("modality"),
             "context_window": m.get("context_window"),
             "protocols": local_protocols_for_engine(engine),
-            "features": features,
+            "vision": m.get("model_type") == "vl",
         })
     return out
 
@@ -111,23 +107,13 @@ def _cloud_entries(pm) -> list[dict]:
         ) if ok]
         if not protocols:
             protocols = ["openai"]   # 至少声明 openai（无可用标志 = 老条目）
-        # 7.8.0 三态推导：未设置/True = 默认全能力（[]，不构成信息）；
-        # 显式 False = 约束该词 — features 写剩余词表（规范序），池候选
-        # 建库时快照，selector 据此做严格约束路由
-        excluded = set()
-        if getattr(cm, "supports_tools", None) is False:
-            excluded.add("tools")
-        if getattr(cm, "supports_vision", None) is False:
-            excluded.add("vision")
-        if excluded:
-            features = [f for f in _FEATURE_ORDER if f not in excluded]
-        else:
-            features = []
+        # 7.9.0：vision 必须显式声明 — supports_vision is True 才算
+        # vision-capable；supports_tools 与路由无关（tools 恒真不建模）
         out.append({
             "provider": provider,
             "model_id": model_id,
             "protocols": protocols,
-            "features": features,
+            "vision": getattr(cm, "supports_vision", None) is True,
             "active": True,   # 在 cloud_models = 已发现即可路由
             "context_window": (getattr(cm, "context_window", None)
                                or getattr(cm, "contextWindow", None)),
