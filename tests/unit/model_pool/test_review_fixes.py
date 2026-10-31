@@ -447,6 +447,24 @@ class TestLocalTargetIdentity:
         view = dispatch.runtime_view(pm)
         assert "muse-glimmer" in view.active_services
 
+    def test_runtime_view_local_vision_includes_internal_name(self):
+        # local_vision 与 active_services 同策略双收 name+served_name：
+        # 手写 YAML 可用内部 name 引用候选（find_model_by_served_name
+        # name 兜底），若只收 served_name，VL 候选带图请求被误判
+        # feature_unsupported 且指引指向已声明的 models.d（死胡同，
+        # cross-review M-2）
+        model = _local_model(name="muse-glimmer-vl", served="muse-glimmer")
+        mgr = SimpleNamespace(
+            active_services={"muse-glimmer-vl"},
+            list_models=lambda: [{"name": "muse-glimmer-vl",
+                                  "model_type": "vl"}])
+        mgr.get_model = lambda n: model if n == "muse-glimmer-vl" else None
+        pm = SimpleNamespace(mgr=mgr, cloud=SimpleNamespace(cloud_models={}),
+                             pool_cooldowns=None)
+        view = dispatch.runtime_view(pm)
+        assert view.local_vision == frozenset({"muse-glimmer",
+                                               "muse-glimmer-vl"})
+
     def test_race_guard_returns_result_not_attributeerror(self):
         # select 后模型停止：ResolvedCandidate 无 model_name 属性 → 必须优雅返回
         from inferfabric.model_pool.config import CandidateConfig

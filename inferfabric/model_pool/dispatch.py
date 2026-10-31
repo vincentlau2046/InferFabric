@@ -132,6 +132,12 @@ def runtime_view(pm) -> RuntimeView:
                     except Exception:
                         served = name
                 local_vision.add(served)
+                # 双收 name+served_name（同 active_services 策略）：手写
+                # YAML 可用内部 name 引用候选 — 只收 served 会让带图请求
+                # 把该 VL 候选误判 feature_unsupported，且指引指向已声明
+                # 过的 models.d（死胡同，cross-review M-2）
+                if served != name:
+                    local_vision.add(name)
         except Exception:
             local_vision = None
     return RuntimeView(
@@ -254,8 +260,12 @@ def _no_eligible_message(model: str, sel) -> str:
             s += f" [{d.detail}]"
         parts.append(s)
     msg = f"No eligible target for {model} ({', '.join(parts) or 'no candidates'})"
-    if any((not d.included) and d.reason == "feature_unsupported"
-           for d in sel.decisions):
+    # 声明指引后缀只在「兼容性 400」时追加：no_ready_target（503）时池内
+    # 有 vision-capable 候选只是未就绪，说「池内无视觉候选」是事实错误的
+    # 死胡同（cross-review M-3）
+    if sel.error == "no_compatible_target" and any(
+            (not d.included) and d.reason == "feature_unsupported"
+            for d in sel.decisions):
         msg += (" — no vision-capable candidate in this pool; declare the "
                 "model's vision capability (local: models.d model_type=vl; "
                 "cloud: 云面板 → 模型 → 视觉 chip) or add a vision-capable "

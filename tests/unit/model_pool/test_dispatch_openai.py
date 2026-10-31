@@ -519,6 +519,37 @@ class TestPoolChatDispatch:
         assert "云面板" in msg
         assert pm.logger.entries[-1].error == "no_compatible_target"
 
+    def test_no_ready_target_message_has_no_vision_suffix(self, registry):
+        # cross-review M-3：池内有 vision-capable 候选但未就绪 → 503
+        # no_ready_target，消息不得追加「池内无视觉候选」声明指引后缀
+        # （事实错误死胡同 — VL 候选就在决策表里）。文本候选的
+        # feature_unsupported 仍须逐候选列出。
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "vlloc", "priority": 2, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        # VL 未激活（active 只含 qwen-small）→ vlloc local_not_ready
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}])
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        status, body, _ = h.sent[-1]
+        assert status == 503
+        assert body["status"] == "no_ready_target"
+        msg = body["error"]
+        assert "vlloc: local_not_ready" in msg, msg
+        assert "feature_unsupported" in msg, msg
+        assert "no vision-capable candidate in this pool" not in msg, msg
+
     def test_tools_request_routed_but_normalized(self, registry, forwarded):
         # 7.8.0：tools 是 agent 基础能力 — 空声明（默认）即可路由
         pm = FakePM(registry, active={"qwen-small"},

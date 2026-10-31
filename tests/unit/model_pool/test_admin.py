@@ -380,7 +380,8 @@ class TestGetRuntimeState:
             _yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
         reg = PoolRegistry(config_path=tmp_path / "m.yaml",
                            evidence_path=tmp_path / "e.json",
-                           known_local={"qwen-small", "qwen-vl"},   # qwen-vl：视觉候选测试用 known_providers={"prov"},
+                           known_local={"qwen-small", "qwen-vl"},
+                           known_providers={"prov"},
                            provider_base=lambda p: "https://base/v1")
         reg.load()
         h = AdminHandler()
