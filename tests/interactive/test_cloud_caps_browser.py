@@ -1,17 +1,19 @@
-"""tests/interactive/test_cloud_caps_browser.py — 云面板能力 chip 三态浏览器门禁
+"""tests/interactive/test_cloud_caps_browser.py — 云面板视觉 chip 浏览器门禁
 
-7.8.0 cross-review I-1 的真实浏览器钉子：云面板能力 chips 与池候选约束
-共享 supports_* 字段，而 7.8.0 起显式 false = 活跃约束（catalog 排除
-词表）。必须钉住：
+7.9.0「能力归模型 / 池归优先级」的真实浏览器钉子：云模型的视觉声明
+入口 = 云面板能力 chip（supports_vision），这是 catalog vision=true 与
+带图请求可路由的唯一云侧来源。必须钉住：
 
-1. 三态渲染可区分：true=确认（.on）/ null=未声明（灰，title 注明默认
-   全能力）/ false=显式排除（.x 警示态，title 说明约束后果）。
-2. 点灭不造约束：点击亮 chip → 服务端解除打标（键移除回 None），YAML
-   不落 false —— 「点一下就造出池候选拒 tools 且无回路」的单向陷阱
-   必须不存在。
-3. YAML 显式 false（约束）可被一次点击解除（→ true）。
-4. .x 警示态双主题对比度 ≥ 4.5:1（新 UI 态进扫描面，防「面板可用但
-   不可读」翻车）。
+1. 单 chip 两态渲染：每模型行只有「视觉」一个能力 chip（supports_tools
+   chip 已退役，面板无入口）；点亮 = 已声明（.on，title 注明进池自动带
+   视觉）；未声明 = 灰。7.8.0 遗留的显式 false 与 null 同态渲染
+   （.x 排除态随约束语义退役）。
+2. 点灭不落 false：点击亮 chip → 服务端解除声明（键移除回 None），
+   YAML 不落 false —— 「点一下就造出约束且无回路」的单向陷阱必须
+   不存在（7.8.0 cross-review I-1 语义沿承）。
+3. 遗留 false / 未声明均可一次点击声明（→ true）。
+4. 添加模型表单只有「视觉」声明复选框（无 tools 声明入口）。
+5. 两态 chip 双主题对比度 ≥ 4.5:1（防「面板可用但不可读」）。
 
 fixture 复用 test_model_pools_browser 的 scratch 仓库构建（符号链接
 inferfabric/_deps + 独立 models.d + HOME 覆盖空数据目录）；云 provider
@@ -46,10 +48,11 @@ _mpb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mpb)
 
 PROVIDER = "iff-caps"
-# 三模型对应三态：untagged（无键）/ confirmed（true）/ excluded（false 约束）
-UNTAGGED, CONFIRMED, EXCLUDED = "untagged-m", "confirmed-m", "excluded-m"
+# 三模型对应三种 YAML 态：untagged（无键）/ declared（true 声明）/
+# legacy-false（7.8.0 遗留显式 false — 渲染须与未声明同态）
+UNTAGGED, DECLARED, LEGACY_FALSE = "untagged-m", "declared-m", "legacy-false-m"
 
-# .x/.on/灰 三态 chip 的对比度扫描（色值取 computed style，元素透明度并入）
+# .on/灰 两态 chip 的对比度扫描（色值取 computed style，元素透明度并入）
 _CHIP_CONTRAST_JS = """
 el => {
   const parse = (s) => {
@@ -94,7 +97,7 @@ el => {
 """
 
 
-def _chip(model, cap="supports_tools"):
+def _chip(model, cap="supports_vision"):
     return (f'button[data-action="cpm-tag"][data-provider="{PROVIDER}"]'
             f'[data-model="{model}"][data-cap="{cap}"]')
 
@@ -143,10 +146,10 @@ def caps_base(tmp_path_factory):
         '    api_key: "iff-caps-gate-fake-key"\n'
         "    models:\n"
         f"      {UNTAGGED}:\n        model_id: {UNTAGGED}\n"
-        f"      {CONFIRMED}:\n        model_id: {CONFIRMED}\n"
-        "        supports_tools: true\n"
-        f"      {EXCLUDED}:\n        model_id: {EXCLUDED}\n"
-        "        supports_tools: false\n",
+        f"      {DECLARED}:\n        model_id: {DECLARED}\n"
+        "        supports_vision: true\n"
+        f"      {LEGACY_FALSE}:\n        model_id: {LEGACY_FALSE}\n"
+        "        supports_vision: false\n",
         encoding="utf-8")
     port = _mpb._free_port()
     base = f"http://127.0.0.1:{port}"
@@ -199,23 +202,44 @@ def _open_cpm_panel(page, base):
     page.click('button[data-tab="tab-cloud"]')
     page.wait_for_selector(f'[data-action="provider-models"][data-provider="{PROVIDER}"]')
     page.click(f'[data-action="provider-models"][data-provider="{PROVIDER}"]')
-    page.wait_for_selector(_chip(EXCLUDED))
+    page.wait_for_selector(_chip(LEGACY_FALSE))
 
 
-# ── 1. 三态渲染 + 点击往返（点灭不落 false / 约束可解除）+ 对比度 ────
+# ── 1. 单 chip 两态渲染 + 点击往返（点灭不落 false）+ 添加表单 + 对比度 ──
 
-def test_01_tri_state_render_click_roundtrip_and_contrast(page, caps_base):
+def test_01_vision_chip_two_state_roundtrip_and_contrast(page, caps_base):
     base, home = caps_base
     _open_cpm_panel(page, base)
-    # 三态渲染：untagged 灰（title 注明默认全能力）/ confirmed .on /
-    # excluded .x（title 说明约束后果）
-    assert _chip_class(page, UNTAGGED) == "cpm-cap-chip", _chip_class(page, UNTAGGED)
-    assert "默认全能力" in _chip_title(page, UNTAGGED), _chip_title(page, UNTAGGED)
-    assert _chip_class(page, CONFIRMED) == "cpm-cap-chip on"
-    assert _chip_class(page, EXCLUDED) == "cpm-cap-chip x"
-    assert "显式排除" in _chip_title(page, EXCLUDED) \
-        and "拒绝" in _chip_title(page, EXCLUDED), _chip_title(page, EXCLUDED)
-    # .x 警示态 + .on + 灰 三态 chip 双主题对比度 ≥ 4.5:1
+    # 单 chip 契约：全面板无 supports_tools chip（退役无入口）；每模型
+    # 行恰一个 chip
+    n_tools = page.eval_on_selector_all(
+        'button[data-cap="supports_tools"]', "els => els.length")
+    assert n_tools == 0, "supports_tools chip 已退役，面板不得再有入口"
+    for m in (UNTAGGED, DECLARED, LEGACY_FALSE):
+        n = page.eval_on_selector_all(
+            f'button[data-action="cpm-tag"][data-model="{m}"]', "els => els.length")
+        assert n == 1, f"{m}: 期望恰一个能力 chip，实得 {n}"
+    # 两态渲染：declared 点亮（.on，title 注明进池自动带视觉）；untagged
+    # 灰（title 指路声明）；legacy-false 与未声明同态（.x 随 7.8.0 约束
+    # 语义退役）
+    assert _chip_class(page, DECLARED) == "cpm-cap-chip on", \
+        _chip_class(page, DECLARED)
+    assert "已声明" in _chip_title(page, DECLARED) \
+        and "进池候选自动带视觉" in _chip_title(page, DECLARED), \
+        _chip_title(page, DECLARED)
+    assert _chip_class(page, UNTAGGED) == "cpm-cap-chip", \
+        _chip_class(page, UNTAGGED)
+    assert "未声明视觉" in _chip_title(page, UNTAGGED), \
+        _chip_title(page, UNTAGGED)
+    assert _chip_class(page, LEGACY_FALSE) == "cpm-cap-chip", \
+        f"遗留 false 必须与未声明同态渲染: {_chip_class(page, LEGACY_FALSE)}"
+    # 添加模型表单：只有「视觉」声明复选框（无 tools 声明入口）
+    assert page.eval_on_selector_all(
+        ".cpm-cap-vision", "els => els.length") >= 1, "添加表单缺视觉复选框"
+    assert page.eval_on_selector_all(
+        ".cpm-cap-tools", "els => els.length") == 0, \
+        "添加表单不得再有 tools 声明入口"
+    # .on + 灰 两态 chip 双主题对比度 ≥ 4.5:1
     for theme in ("dark", "light"):
         if theme == "light":
             page.eval_on_selector(
@@ -225,27 +249,33 @@ def test_01_tri_state_render_click_roundtrip_and_contrast(page, caps_base):
                 "html", "el => el.removeAttribute('data-theme')")
         page.wait_for_timeout(150)
         results = page.eval_on_selector("#tab-cloud", _CHIP_CONTRAST_JS)
-        assert len(results) >= 6, f"{theme}: 三态 chip 未全进扫描面: {results}"
+        assert len(results) >= 3, f"{theme}: 三模型 chip 未全进扫描面: {results}"
+        assert any(r["cls"] == "cpm-cap-chip on" for r in results), \
+            f"{theme}: 点亮态未进对比度扫描面: {results}"
         offenders = [r for r in results if r["ratio"] < 4.5]
         assert not offenders, (
             f"{theme}: chip 对比度 <4.5:1: "
             f"{json.dumps(offenders, ensure_ascii=False)}")
-    # 点击 excluded chip → true（约束解除 → 确认态）+ YAML 落 true
-    page.click(_chip(EXCLUDED))
-    _wait_class(page, EXCLUDED, "cpm-cap-chip on")
+    # 未声明 → 点击声明（→ true）+ YAML 落 true
+    page.click(_chip(UNTAGGED))
+    _wait_class(page, UNTAGGED, "cpm-cap-chip on")
     models = _read_caps_yaml(home)["providers"][PROVIDER]["models"]
-    assert models[EXCLUDED]["supports_tools"] is True, models[EXCLUDED]
-    # 点击亮 chip → 解除打标（键移除回 None）— 不得落 false（I-1 单向陷阱）
-    page.click(_chip(EXCLUDED))
-    _wait_class(page, EXCLUDED, "cpm-cap-chip")
+    assert models[UNTAGGED]["supports_vision"] is True, models[UNTAGGED]
+    # 遗留 false → 点击同样一次到位（→ true）
+    page.click(_chip(LEGACY_FALSE))
+    _wait_class(page, LEGACY_FALSE, "cpm-cap-chip on")
     models = _read_caps_yaml(home)["providers"][PROVIDER]["models"]
-    assert "supports_tools" not in models[EXCLUDED], models[EXCLUDED]
-    assert "supports_tools" not in models[UNTAGGED], models[UNTAGGED]
-    # confirmed 同样点灭 = 解除（回灰），键移除
-    page.click(_chip(CONFIRMED))
-    _wait_class(page, CONFIRMED, "cpm-cap-chip")
+    assert models[LEGACY_FALSE]["supports_vision"] is True, models[LEGACY_FALSE]
+    # 点击亮 chip → 解除声明（键移除回 None）— 不得落 false（单向陷阱）
+    page.click(_chip(DECLARED))
+    _wait_class(page, DECLARED, "cpm-cap-chip")
     models = _read_caps_yaml(home)["providers"][PROVIDER]["models"]
-    assert "supports_tools" not in models[CONFIRMED], models[CONFIRMED]
+    assert "supports_vision" not in models[DECLARED], models[DECLARED]
+    # 刚声明的同样可解除（往返回路闭合）
+    page.click(_chip(UNTAGGED))
+    _wait_class(page, UNTAGGED, "cpm-cap-chip")
+    models = _read_caps_yaml(home)["providers"][PROVIDER]["models"]
+    assert "supports_vision" not in models[UNTAGGED], models[UNTAGGED]
 
 
 # ── 2. console 零 error + 零未捕获异常 ─────────────────────────────

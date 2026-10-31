@@ -58,8 +58,13 @@ except Exception as _e:  # noqa: BLE001
 
 REPO_ROOT = Path(__file__).resolve().parents[2]   # sandbox 仓库根
 TXT_YAML = REPO_ROOT / "models.d" / "Qwen38-27B-TXT.yaml"
-TXT_MODEL = "Qwen38-27B-TXT"                       # scratch 内唯一「在跑」的本地模型（桩引擎，GPU 状态无关）
+TXT_MODEL = "Qwen38-27B-TXT"                       # scratch 内「在跑」的本地纯文本模型（桩引擎，GPU 状态无关）
 SWAP_MODEL = "SwapTarget-TXT"                      # 负路径靶（scratch 注入，未在跑）
+# 7.9.0 视觉路由靶：model_type=vl 的本地模型（同桩端口 → ready），
+# 带图请求的唯一可路由本地候选（能力归模型 — models.d 是声明源）。
+# 名字刻意不含 'Qwen38-27B-TXT' 整串 — 派生用链式 replace，新名是
+# 原名超集时会连环命中 served_name/model_id 行造出 '-VL-VL' 双后缀
+VL_MODEL = "Qwen38-27B-STUB-VL"
 CLOUD_PROVIDER = "iff-gate"                        # 假云 provider（静态注册零出网）
 CLOUD_SWAP = f"cloud:{CLOUD_PROVIDER}/swap-target"  # 换模靶（dry-run 纯内存）
 # 终审 I3：401 云靶 — 指向测试内 127.0.0.1 常回 401 的服务器，为
@@ -89,12 +94,13 @@ def _free_port(prefer=8998):
 
 def _build_scratch_repo(base: Path, txt_port: int = 8007) -> Path:
     """scratch 仓库：inferfabric/_deps 符号链接（BASE_DIR=scratch，代码即当前
-    树）+ 独立 models.d（TXT + 换模靶 SwapTarget — 目录第二选项）。
+    树）+ 独立 models.d（TXT + 换模靶 SwapTarget + 视觉靶 VL — 目录本地选项）。
 
     txt_port：TXT yaml 的端口 — 门禁 hermetic 化后指向 fixture 桩引擎的随机
     端口（本地 ready 探测落桩，与生产 TXT 引擎 8007 活死无关）。顺序纪律：
-    SwapTarget 必须先从**原文**（8007）派生，再改写 TXT 端口 — 反过来则
-    swap 的 'port: 8007' 替换目标消失，两模型共桩端口。"""
+    SwapTarget/VL 必须先从**原文**（8007）派生，再改写 TXT 端口 — 反过来
+    则派生的 'port: 8007' 替换目标消失；VL 与 TXT 共桩端口（都在跑，
+    转发都落桩），SwapTarget 用独立死端口（负路径靶）。"""
     repo = base / "scratch-repo"
     repo.mkdir()
     os.symlink(REPO_ROOT / "inferfabric", repo / "inferfabric")
@@ -112,6 +118,16 @@ def _build_scratch_repo(base: Path, txt_port: int = 8007) -> Path:
                      "container_name: iff-ninfer-swaptarget")
             .replace("port: 8007", "port: 18907"))
     (md / f"{SWAP_MODEL}.yaml").write_text(swap, encoding="utf-8")
+    # 7.9.0 视觉靶：model_type=vl + 桩端口（在跑）— 带图请求路由用
+    vl = (txt
+          .replace("name: Qwen38-27B-TXT", f"name: {VL_MODEL}")
+          .replace("served_name: Qwen38-27B-TXT", f"served_name: {VL_MODEL}")
+          .replace("model_id: Qwen38-27B-TXT", f"model_id: {VL_MODEL}")
+          .replace("container_name: iff-ninfer-qwen38",
+                   "container_name: iff-ninfer-stubvl")
+          .replace("model_type: llm", "model_type: vl")
+          .replace("port: 8007", f"port: {txt_port}"))
+    (md / f"{VL_MODEL}.yaml").write_text(vl, encoding="utf-8")
     (md / "Qwen38-27B-TXT.yaml").write_text(
         txt.replace("port: 8007", f"port: {txt_port}"), encoding="utf-8")
     return repo
@@ -641,13 +657,19 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
 
 # ── 8. 能力约束编辑 → 自解释 400 → 解除约束直通 200（7.8.0 语义反转）──
 
-def test_08_capability_constraint_and_self_explaining_400(page, scratch_base):
-    """7.8.0 真实浏览器钉子（空声明 = 全能力 / 显式声明 = 约束）：
+def test_08_vision_routing_and_self_explaining_400(page, scratch_base):
+    """7.9.0 真实浏览器钉子（能力归模型 / 池归优先级）：
 
-    编辑器取消勾选 tools（草稿 = stream/vision/structured）→ 预览+应用 →
-    卡片 chips 落盘；带 tools 的真实请求 → 400 自解释消息（候选 id +
-    missing=tools + declared 明细 + 解除指引），日志错误码仍是固定码
-    no_compatible_target；编辑器解除约束 → 同请求 200（桩引擎直通）。
+    vision 是唯一请求感知维度，判定源 = 模型本体（本地 models.d
+    model_type=vl），池候选无能力字段。三段契约：
+      ① 纯文本请求 → 纯优先级路由：TXT 单候选池直通 200（桩引擎）；
+      ② 带图请求 → 只在 vision-capable 候选中路由：TXT-only premium 池
+         → 400 自解释（候选 id + feature_unsupported + 固定码
+         no_compatible_target + 模型侧声明指引，不指向池编辑器）；
+      ③ fast 池行内换 VL 候选（model_type=vl，同桩端口在跑）→ 同一带图
+         请求 200；卡片渲染「视觉」chip（数据源 runtime endpoint，
+         5s 轮询异步 → 轮询等）；纯文本请求也 200 — 无「跳过 VL」
+         规则（VL 排最前就全接，用户裁决 2026-10-31）。
 
     会话级依赖：premium 池由 test_05c 落盘（session 级 scratch 代理 +
     文件内顺序执行）— 单独跑本用例会在下方前置 assert 失败，属本文件
@@ -655,104 +677,63 @@ def test_08_capability_constraint_and_self_explaining_400(page, scratch_base):
     """
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)
-    # 前置（test_05c 落盘）：premium = 本地 TXT 单候选，空声明（全能力）
+    # 前置（test_05c 落盘）：premium = 本地 TXT 单候选（7.9.0 池候选
+    # 无能力字段 — 能力已归模型，此处只锚目标）
     raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
     cands = raw["pools"]["premium"]["candidates"]
-    assert cands and cands[0]["model_name"] == TXT_MODEL \
-        and cands[0].get("features", []) == [], cands
-    # 开编辑器 → 编辑能力 → 取消 tools → 保存（写 work-copy + 预览失效）
-    page.click('#mp-card-premium [data-mp-edit="premium"]')
-    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
-    # 空声明的默认态：全能力徽章（非 chips）+ 编辑能力按钮
-    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
-    assert "全能力" in cell, cell
-    page.click('#mpModal [data-mp-act="feat-edit"][data-mp-cand="premium-1"]')
-    page.wait_for_selector('#mpModal input[data-mp-feat="tools"]')
-    page.uncheck('#mpModal input[data-mp-feat="tools"]')
-    page.click('#mpModal [data-mp-act="feat-save"][data-mp-cand="premium-1"]')
-    # 保存后回默认态：chips = stream/vision/structured（tools 缺席）+ 解除按钮
-    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
-    assert "全能力" not in cell and "解除约束" in cell, cell
-    for f in ("stream", "vision", "structured"):
-        assert f in cell, cell
-    assert "tools" not in cell, cell
-    # 预览（空需求 dry-run：约束不拦无要求请求）→ 应用 → 编辑器收尾
-    page.click('#mpModal [data-mp-act="preview"]')
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if page.eval_on_selector_all(
-                "#mpModal [data-mp-act='apply']",
-                "els => els.length && !els[0].disabled"):
-            break
-        time.sleep(0.2)
-    else:
-        pytest.fail("约束后空需求预演未点亮应用钮")
-    page.click("#mpModal [data-mp-act='apply']")
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if not page.eval_on_selector_all("#mpModal [data-mp-editor]",
-                                         "els => els.length"):
-            break
-        time.sleep(0.2)
-    else:
-        pytest.fail("应用后编辑器未收尾")
-    # 卡片能力态落盘：chips（stream 等）出现，全能力徽章消失（重渲染异步 → 轮询）
-    deadline = time.monotonic() + 15
-    card = ""
-    while time.monotonic() < deadline:
-        card = page.eval_on_selector("#mp-card-premium", "e => e.innerText")
-        if "全能力" not in card and "stream" in card:
-            break
-        time.sleep(0.2)
-    else:
-        pytest.fail(f"卡片能力 chips 未落盘: {card!r}")
-    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
-    assert raw["pools"]["premium"]["candidates"][0]["features"] == \
-        ["stream", "vision", "structured"], raw["pools"]["premium"]
-    # 带 tools 的真实请求 → 400 自解释（id + 明细 + 指引；码为固定码）
-    code, body = _post_chat(scratch_base, "iff/premium", extra={
-        "tools": [{"type": "function", "function": {
-            "name": "ping", "parameters": {"type": "object", "properties": {}}}}]})
+    assert cands and cands[0]["model_name"] == TXT_MODEL, cands
+    # ① 纯文本请求 → 纯优先级（TXT 单候选）→ 桩引擎直通 200
+    code, body = _post_chat(scratch_base, "iff/premium")
+    assert code == 200, (code, body)
+    assert body["choices"][0]["message"]["content"] == "pong", body
+    # ② 带图请求 → TXT 非 vision-capable（model_type=llm）→ 400 自解释
+    img = {"type": "image_url",
+           "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    vision_msgs = [{"role": "user", "content": [
+        {"type": "text", "text": "看图"}, img]}]
+    code, body = _post_chat(scratch_base, "iff/premium",
+                            extra={"messages": vision_msgs})
     assert code == 400, (code, body)
     assert body["status"] == "no_compatible_target", body
     err = body["error"]
     assert "premium-1: feature_unsupported" in err, err
-    assert "missing=tools" in err, err
-    assert "declared=[stream, structured, vision]" in err, err   # 后端排序稳定
-    assert "clear its features constraint" in err, err
-    # 解除约束（编辑器 feat-clear）→ 预览+应用 → 同请求直通 200
-    page.click('#mp-card-premium [data-mp-edit="premium"]')
-    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
-    page.click('#mpModal [data-mp-cand="premium-1"][data-mp-act="feat-clear"]')
-    cell = page.eval_on_selector("#mpModal td.mp-edit-feat", "e => e.innerText")
-    assert "全能力" in cell and "解除约束" not in cell, cell
-    page.click('#mpModal [data-mp-act="preview"]')
-    deadline = time.monotonic() + 15
+    assert "request requires vision; model is not vision-capable" in err, err
+    assert "no vision-capable candidate in this pool" in err, err
+    assert "models.d model_type=vl" in err, err
+    # ③ fast 池行内「替换为…」换 VL 候选（在跑，ninfer 双协议声明）→
+    # apply（已配置卡的行内替换选择器 — 同 test_04 换模模式）
+    page.locator('select[data-mp-inline-replace="fast|fast-1"]') \
+        .select_option(value=f"local:{VL_MODEL}")
+    _apply_inline_diff(page)
+    _poll(page, "#mp-card-fast", "e => e.className", "if-card mp-pool",
+          msg="fast 卡未转已配置")
+    # 卡片「视觉」chip 落盘（runtime 5s 轮询 → 重渲染异步 → 轮询等）
+    deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        if page.eval_on_selector_all(
-                "#mpModal [data-mp-act='apply']",
-                "els => els.length && !els[0].disabled"):
+        if page.eval_on_selector_all('#mp-card-fast .mp-feat-vision',
+                                     "els => els.length"):
             break
-        time.sleep(0.2)
+        time.sleep(0.3)
     else:
-        pytest.fail("解除约束后预演未点亮应用钮")
-    page.click("#mpModal [data-mp-act='apply']")
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        if not page.eval_on_selector_all("#mpModal [data-mp-editor]",
-                                         "els => els.length"):
-            break
-        time.sleep(0.2)
-    else:
-        pytest.fail("解除约束应用后编辑器未收尾")
-    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
-    assert raw["pools"]["premium"]["candidates"][0]["features"] == [], \
-        raw["pools"]["premium"]
-    code, body = _post_chat(scratch_base, "iff/premium", extra={
-        "tools": [{"type": "function", "function": {
-            "name": "ping", "parameters": {"type": "object", "properties": {}}}}]})
+        pytest.fail("VL 候选卡片未渲染「视觉」chip（runtime vision 数据源断）")
+    # runtime 数据源复核：fast 候选 vision=True，premium 候选 vision=False
+    rt = _get_json(scratch_base, "/admin/model-pools/runtime")["pools"]
+    fc = rt["fast"]["candidates"][0]
+    assert fc["target"] == VL_MODEL and fc["vision"] is True, fc
+    pc = rt["premium"]["candidates"][0]
+    assert pc["target"] == TXT_MODEL and pc["vision"] is False, pc
+    # premium 卡无视觉 chip（负向：非 VL 模型不点亮）
+    n = page.eval_on_selector_all('#mp-card-premium .mp-feat-vision',
+                                  "els => els.length")
+    assert n == 0, "TXT（非 VL）候选不应有视觉 chip"
+    # 同一带图请求 → fast（VL 候选）200
+    code, body = _post_chat(scratch_base, "iff/fast",
+                            extra={"messages": vision_msgs})
     assert code == 200, (code, body)
     assert body["choices"][0]["message"]["content"] == "pong", body
+    # 纯文本请求 → fast 也 200（无跳过 VL 规则 — VL 排最前就全接）
+    code, body = _post_chat(scratch_base, "iff/fast")
+    assert code == 200, (code, body)
 
 
 # ── 6. 双主题对比度：面板全文本控件 computed contrast ≥ 4.5:1 ───────
