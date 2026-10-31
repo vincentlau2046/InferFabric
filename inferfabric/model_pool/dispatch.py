@@ -107,12 +107,16 @@ def runtime_view(pm) -> RuntimeView:
             active.add(getattr(model_obj, "served_name", None) or name)
         active.add(name)
     # 7.9.0：vision-capable 本地模型 served_name 集 — 能力归模型，
-    # 判定源 = models.d model_type=vl（mgr.list_models 同 catalog 数据源）；
-    # mgr 未提供入口时降级为空集（带图请求由 400 自解释兜底）
-    local_vision: set = set()
+    # 判定源 = models.d model_type=vl（mgr.list_models 同 catalog 数据源）。
+    # 元数据源不可用（mgr 无入口 / 列举异常）→ None = 全部未知，选择器
+    # 不做静态视觉判定 — 降级为空集会把所有本地候选判成「确认无视觉」，
+    # allow_cross_location 下带图请求被元数据故障改道到云（fail-open，
+    # 安全评审）。列表读得出来但无 vl 模型 → 空集（确认无视觉，正常 400）
+    local_vision: set | None = None
     list_models = getattr(pm.mgr, "list_models", None)
     if list_models is not None:
         try:
+            local_vision = set()
             for m in list_models() or []:
                 if not isinstance(m, dict) or m.get("model_type") != "vl":
                     continue
@@ -129,14 +133,15 @@ def runtime_view(pm) -> RuntimeView:
                         served = name
                 local_vision.add(served)
         except Exception:
-            pass
+            local_vision = None
     return RuntimeView(
         active_services=active,
         cloud_models=dict(getattr(pm.cloud, "cloud_models", None) or {}),
         # P2：冷却端点在选择期排除（reason=cooldown）
         cooling_fingerprints=(cooldowns.cooling_fingerprints()
                               if cooldowns is not None else frozenset()),
-        local_vision=frozenset(local_vision),
+        local_vision=(frozenset(local_vision)
+                      if local_vision is not None else None),
     )
 
 

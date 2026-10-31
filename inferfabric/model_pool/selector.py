@@ -46,8 +46,10 @@ class RuntimeView:
     cloud_models: dict = field(default_factory=dict)   # "provider/model_id" → CloudModel
     cooling_fingerprints: frozenset = frozenset()      # P2 冷却端点指纹
     # vision-capable 本地模型的 served_name 集合（models.d model_type=vl，
-    # dispatch.runtime_view 从 mgr 构建 — 选择期零 IO）
-    local_vision: frozenset = frozenset()
+    # dispatch.runtime_view 从 mgr 构建 — 选择期零 IO）。None = 元数据源
+    # 不可用（mgr 无入口/列举异常）→ 全部本地候选视觉能力未知，不得据此
+    # 排除（安全评审：元数据故障改道带图请求到云 = fail-open 路由）
+    local_vision: frozenset | None = frozenset()
 
 
 @dataclass(frozen=True)
@@ -89,9 +91,12 @@ def _evidence_ok(resolved: ResolvedCandidate, protocol: str,
 def _vision_capable(resolved: ResolvedCandidate,
                     runtime: RuntimeView) -> bool | None:
     """候选模型是否 vision-capable。True/False = 已知；None = 未知
-    （云模型未发现 — 不做静态视觉判定，交给就绪层报精确理由）。"""
+    （云模型未发现，或本地能力元数据源不可用 — 不做静态视觉判定，
+    交给就绪层报精确理由）。"""
     cand = resolved.candidate
     if cand.kind == "local":
+        if runtime.local_vision is None:
+            return None
         return cand.model_name in runtime.local_vision
     cm = runtime.cloud_models.get(f"{cand.provider}/{cand.model_id}")
     if cm is None:

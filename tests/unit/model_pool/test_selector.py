@@ -43,11 +43,16 @@ def _pool_snap(cands, enabled=True, allowed=("cloud", "local"), accept_declared=
                         candidates=tuple(_resolved(c) for c in cands))
 
 
+def _lv(local_vision):
+    """local_vision=None 透传（元数据不可用三态）；其余归一 frozenset。"""
+    return None if local_vision is None else frozenset(local_vision)
+
+
 def _runtime(active=None, cloud=None, local_vision=()):
     return RuntimeView(
         active_services=set(active or []),
         cloud_models=dict(cloud or {}),
-        local_vision=frozenset(local_vision))
+        local_vision=_lv(local_vision))
 
 
 def _rt(*cands, active=None, cloud=None, local_vision=()):
@@ -60,7 +65,7 @@ def _rt(*cands, active=None, cloud=None, local_vision=()):
     return RuntimeView(
         active_services=(set(active) if active is not None else auto_active),
         cloud_models={**auto_cloud, **(cloud or {})},
-        local_vision=frozenset(local_vision))
+        local_vision=_lv(local_vision))
 
 
 def _req(protocol="openai", vision=False):
@@ -229,6 +234,19 @@ class TestVisionFiltering:
         snap = _pool_snap([cand])
         sel = select(snap, _req(vision=True), _runtime(cloud={}))
         assert sel.decisions[0].reason == "cloud_model_missing"
+
+    def test_local_vision_metadata_unavailable_not_statically_excluded(self):
+        # 安全评审（fail-open 路由）：local_vision=None = 元数据源不可用，
+        # ≠ 「确认无本地模型能看图」。未知 → 不做静态视觉判定（同云未发现
+        # 语义），按优先级路由 — 否则 allow_cross_location 下带图请求会被
+        # 元数据故障改道到云
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt"}, local_vision=None))
+        assert sel.chosen.candidate.id == "t1"
+        assert ({d.candidate_id: (d.reason, d.included) for d in sel.decisions}
+                ["t1"] == ("ok", True))
 
     def test_pool_candidate_features_field_is_ignored(self):
         # 存量 YAML 的候选 features（如遗留 [vision]）读时容忍、

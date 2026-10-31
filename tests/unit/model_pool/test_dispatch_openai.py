@@ -404,6 +404,47 @@ class TestPoolChatDispatch:
         assert "not vision-capable" in body["error"]
         assert "no vision-capable candidate" in body["error"]
 
+    def test_vision_metadata_failure_does_not_reroute_to_cloud(
+            self, registry, forwarded, monkeypatch):
+        # 安全评审（fail-open 路由）：mgr.list_models 异常不得把全部本地
+        # 候选判成「确认无视觉」→ allow_cross_location 下带图请求被元数据
+        # 故障改道到云（图像出网）。元数据不可用 = 未知（同云未发现语义）
+        # → 静态视觉判定跳过，按优先级走本地 p1
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        cloud_calls = []
+
+        def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
+                       original_model=None, suppress_client_errors=False, timeout=None):
+            cloud_calls.append(data["model"])
+            return SimpleNamespace(status=200, usage={}, ttft_ms=None,
+                                   duration_ms=1.0, error=None)
+
+        monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=True)},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1")})
+
+        def boom():
+            raise RuntimeError("models.d unreadable")
+        monkeypatch.setattr(pm.mgr, "list_models", boom)
+
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        assert len(forwarded) == 1
+        assert forwarded[0]["port"] == 8101   # 本地 p1，未被元数据故障排除
+        assert cloud_calls == []              # 不得改道云
+
     def test_vision_request_routes_to_vision_capable_candidate(self, registry, forwarded):
         # 带图请求越过 p1 文本候选，落到 p2 的 VL 本地模型（model_type=vl）
         cfg = _raw_config()
