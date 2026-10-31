@@ -492,7 +492,7 @@ class TestOpsRender:
 #     probe（半开探测，快脉冲）> cool（冷却/隔离，暗态+环形倒计时）
 #     > flow（last_attempt.ok 且 age_s<30 —— 真实数据交换，呼吸流动）
 #     > ok（routable 空闲静默）> off（未启动/未发现，unroutable）
-# - 协议徽章（declared_protocols ‖ evidence 键）+ 能力点（features）
+# - 协议徽章（declared_protocols ‖ evidence 键）+ 视觉小标（catalog vision）
 # - 运行态语义文本令牌沿用（服务中/已发现/冷却 …）— TestOpsRender 是契约
 
 
@@ -546,11 +546,12 @@ class TestP1CandidateCards:
         assert "mp-proto-badge" in html
         assert "openai" in html
 
-    def test_feature_dots_rendered(self, run_panel):
-        # loc features ["tools"] → tools 能力点（v7.1.2 目录语义在前端可见）
+    def test_feature_chips_retired(self, run_panel):
+        # 7.9.0：候选 features 退役 — 卡片不再渲染约束 chips/全能力徽章
+        # （能力归模型；视觉小标走 catalog，见 TestVisionBadge）
         out = run_panel(_ops_routes())
-        assert "mp-feat" in out["html"]
-        assert "tools" in out["html"]
+        assert "mp-feat-all" not in out["html"]
+        assert '<span class="mp-feat">' not in out["html"]
 
     def test_ring_countdown_on_cooling(self, run_panel):
         out = run_panel(_ops_routes())
@@ -603,17 +604,17 @@ _CATALOG_BODY = {
     "local": [
         {"name": "qwen3-4b", "active": True, "engine": "vllm",
          "modality": "text", "context_window": 32768,
-         "protocols": ["openai", "anthropic"]},
+         "protocols": ["openai", "anthropic"], "vision": False},
         {"name": "NI-Qwen38-27B", "active": False, "engine": "ninfer",
          "modality": "text", "context_window": 262144,
-         "protocols": ["openai"]},
+         "protocols": ["openai"], "vision": False},
     ],
     "cloud": [
         {"provider": "tathr-glm", "model_id": "glm-5",
-         "protocols": ["openai", "anthropic"], "features": [],
+         "protocols": ["openai", "anthropic"], "vision": True,
          "active": True, "context_window": None},
         {"provider": "Qianfan-Token", "model_id": "deepseek-v4.1-flash",
-         "protocols": ["openai", "anthropic"], "features": ["tools"],
+         "protocols": ["openai", "anthropic"], "vision": False,
          "active": True, "context_window": None},
     ],
 }
@@ -622,7 +623,7 @@ _CATALOG_LOCAL_ONLY_CLOUD = {
     "local": [],
     "cloud": [
         {"provider": "tathr-glm", "model_id": "glm-5",
-         "protocols": ["openai", "anthropic"], "features": [],
+         "protocols": ["openai", "anthropic"], "vision": True,
          "active": True, "context_window": None},
     ],
 }
@@ -2197,20 +2198,20 @@ class TestPersistentCards:
             "local": [
                 {"name": "qwen-turbo", "active": True,
                  "context_window": 32000, "protocols": ["openai"],
-                 "features": []},
+                 "vision": False},
                 # 活跃大模型：premium（最大活跃）应选它而非下方不活跃的 VL
                 {"name": "qwen-max", "active": True,
                  "context_window": 128000, "protocols": ["openai"],
-                 "features": []},
+                 "vision": False},
                 # 独占 VL：平时不激活、需 iff switch；上下文最大。
                 # premium 若仍按全量上下文选会落到它 — L2a 后回归的根因。
                 # 目录里可见（可选），但非文本池默认建议
                 {"name": "qwen-vl", "active": False,
                  "context_window": 204800, "protocols": ["openai"],
-                 "features": ["vision"]},
+                 "vision": True},
             ],
             "cloud": [{"provider": "prov", "model_id": "cloud-m",
-                       "protocols": ["openai"], "features": []}],
+                       "protocols": ["openai"], "vision": False}],
             "localValues": ["local:qwen-turbo", "local:qwen-max",
                             "local:qwen-vl"],
             "cloudValues": ["cloud:prov/cloud-m"],
@@ -2313,9 +2314,9 @@ class TestPersistentCards:
         return routes
 
     def test_unconfigured_select_starts_create_session(self, run_panel):
-        # 选模型 → 骨架+首候选会话（id=<pool>-1、priority=1、协议/能力来自
-        # 目录），走同一 A2 预览→应用链：diff 条「（未配置）→ 新目标」+
-        # 验证 POST + 预演×2 携带建池 work
+        # 选模型 → 骨架+首候选会话（id=<pool>-1、priority=1、协议来自
+        # 目录；7.9.0 候选不再携带 features — 能力归模型），走同一 A2
+        # 预览→应用链：diff 条「（未配置）→ 新目标」+ 验证 POST + 预演×2
         zero = {"revision": 0, "pools": {}, "configured": False,
                 "load_error": None, "raw": None}
         routes = self._create_routes(pools_body=zero)
@@ -2334,7 +2335,7 @@ class TestPersistentCards:
         assert sk["candidates"][0] == {"id": "fast-1", "kind": "local",
                                        "model_name": "qwen-turbo",
                                        "declared_protocols": ["openai"],
-                                       "features": [], "priority": 1}
+                                       "priority": 1}
         drys = [c for c in out["calls"]
                 if c["url"] == "/admin/model-pools/dry-run"]
         assert len(drys) == 2
@@ -2658,73 +2659,40 @@ class TestTreeInteractions:
         assert "mp-tree-tl-fast" not in out["htmlFinal"], "再点收起"
 
 
-# ── 7.8.0 能力默认语义：空声明 = 全能力徽章；编辑器能力约束控件 ──
+# ── 7.9.0 能力归模型：编辑器能力列删除；候选卡视觉小标（catalog）──
 
-class TestCapabilityDefaults:
-    def test_card_renders_full_capability_badge_for_empty_features(self, run_panel):
-        # loc=显式 tools 约束 → chips；cld=空声明 → 全能力徽章（7.8.0：
-        # 空声明不得被读作「仅纯文本」— 卡片必须显式标出全能力默认）
+class TestCapabilityRetired:
+    """7.8.0 池候选能力约束机制整体退役：池 = 纯路由表（模型引用 + 优先级），
+    能力归模型（本地 models.d model_type=vl / 云 supports_vision=true）。
+    声明入口在模型侧（云面板视觉 chip / models.d），不在池编辑器。"""
+
+    def test_card_no_capability_chips_or_full_badge(self, run_panel):
+        # features 字段退役：卡片不渲染约束 chips，也不渲染「全能力」徽章
         out = run_panel(_ops_routes())
-        assert '<span class="mp-feat">tools</span>' in out["html"]
-        assert "全能力" in out["html"]
-        assert "mp-feat-all" in out["html"]
+        assert "全能力" not in out["html"]
+        assert "mp-feat-all" not in out["html"]
+        assert '<span class="mp-feat">tools</span>' not in out["html"]
 
-    def test_tree_constrained_candidate_title(self, run_panel):
-        # 树叶节点：约束候选带 title 列出声明集（轻量，不改 DOM 结构）
+    def test_tree_candidate_no_capability_title(self, run_panel):
+        # 树叶节点不再携带能力约束 title
         out = run_panel(_ops_routes())
-        assert 'title="能力约束：tools"' in out["html"]
+        assert "能力约束" not in out["html"]
 
-
-class TestCapabilityEditor:
-    def test_editor_renders_capability_cell(self, run_panel):
+    def test_editor_capability_column_deleted(self, run_panel):
         actions = [{"fn": "doMpEdit", "args": ["fast"]}]
         out = run_panel(_editor_routes(), actions=actions)
         m = out["modalHtml"]
-        assert "<th>能力</th>" in m                       # 候选表新增能力列
-        assert "全能力" in m                               # dang 空声明
-        assert 'data-mp-act="feat-edit"' in m             # 编辑能力入口
-        assert 'data-mp-act="feat-clear"' in m            # loc 有约束 → 解除按钮
-        assert 'data-mp-cand="loc" data-mp-act="feat-clear"' in m
+        assert "<th>能力</th>" not in m            # 能力列已删
+        assert "mp-edit-feat" not in m
+        assert "编辑能力" not in m                  # 入口按钮已删
+        assert "解除约束" not in m
+        assert 'data-mp-feat=' not in m            # 复选框已删
 
-    def test_editor_feat_edit_open_renders_checkboxes(self, run_panel):
+    def test_editor_legacy_features_passthrough(self, run_panel):
+        # 零手工迁移：遗留 features（raw 里 loc=["tools"]）读时容忍，
+        # 编辑器不增不改，应用时原样透传（清理由后端读时忽略兜底）
         actions = [
             {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpFeatEditOpen", "args": ["loc"]},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        m = out["modalHtml"]
-        # 4 词表复选框（checked=允许）；loc 约束 ["tools"] → tools 勾、其余空
-        for w in ("tools", "stream", "vision", "structured"):
-            assert 'data-mp-feat="%s"' % w in m, w
-        assert m.count('checked') >= 1
-        assert 'data-mp-act="feat-save"' in m
-        assert 'data-mp-act="feat-cancel"' in m
-
-    def test_editor_feat_save_updates_work_and_posts(self, run_panel):
-        # dang（空=全勾）→ 取消 tools → 保存 → features=[stream,vision,structured]
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpFeatEditOpen", "args": ["dang"]},
-            {"fn": "mpFeatDraftToggle", "args": ["dang", "tools", False]},
-            {"fn": "mpFeatSave", "args": ["dang"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        dang = next(c for c in body["pools"]["fast"]["candidates"]
-                    if c["id"] == "dang")
-        assert dang["features"] == ["stream", "vision", "structured"]
-
-    def test_editor_feat_save_all_checked_normalizes_to_empty(self, run_panel):
-        # loc（["tools"]）→ 补勾其余 3 项 → 全勾保存 → 规范式 features=[]
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpFeatEditOpen", "args": ["loc"]},
-            {"fn": "mpFeatDraftToggle", "args": ["loc", "stream", True]},
-            {"fn": "mpFeatDraftToggle", "args": ["loc", "vision", True]},
-            {"fn": "mpFeatDraftToggle", "args": ["loc", "structured", True]},
-            {"fn": "mpFeatSave", "args": ["loc"]},
             {"fn": "mpEditPreview", "args": []},
             {"fn": "mpEditApply", "args": []},
         ]
@@ -2732,48 +2700,54 @@ class TestCapabilityEditor:
         body = _last_update_post(out)[-1]["body"]
         loc = next(c for c in body["pools"]["fast"]["candidates"]
                    if c["id"] == "loc")
-        assert loc["features"] == []
+        assert loc["features"] == ["tools"]
 
-    def test_editor_feat_save_empty_draft_rejected(self, run_panel):
-        # 空声明 = 全能力，无法表达「完全不支持」→ 全不勾保存被拒并提示
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpFeatEditOpen", "args": ["loc"]},
-            {"fn": "mpFeatDraftToggle", "args": ["loc", "tools", False]},
-            {"fn": "mpFeatSave", "args": ["loc"]},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        assert any("至少保留一项" in t["message"] for t in out["toasts"])
-        # work copy 未被改：仍为 ["tools"]
-        body = _last_update_post(out) if any(
-            c["method"] == "POST" and c["url"] == "/admin/model-pools"
-            for c in out["calls"]) else []
-        assert body == []   # 拒绝 → 未发任何更新
 
-    def test_editor_feat_clear_removes_constraint(self, run_panel):
-        # 解除约束按钮：loc ["tools"] → features=[]（全能力）
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpFeatClear", "args": ["loc"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        loc = next(c for c in body["pools"]["fast"]["candidates"]
-                   if c["id"] == "loc")
-        assert loc["features"] == []
+class TestVisionBadge:
+    """候选卡「视觉」小标 = 只读展示，数据源 runtime 端点每候选
+    vision bool（本地 model_type=vl / 云 supports_vision=true —
+    判定源同 selector，随轮询自动更新，不依赖目录预热）。"""
 
-    def test_editor_feat_change_invalidates_preview(self, run_panel):
-        # 预览通过后再改能力 → 应用必须被阻（validated 失效重烘）
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpFeatClear", "args": ["loc"]},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        posts = [c for c in out["calls"]
-                 if c["method"] == "POST" and c["url"] == "/admin/model-pools"]
-        assert posts == []   # 未重新预览 → 不得 POST
-        assert any("预览" in t["message"] for t in out["toasts"])
+    @staticmethod
+    def _runtime_routes(vision_local=False, vision_cloud=False):
+        rt = json.loads(json.dumps(_RUNTIME_BODY))
+        rt["pools"]["fast"]["candidates"][0]["vision"] = vision_local
+        rt["pools"]["fast"]["candidates"][1]["vision"] = vision_cloud
+        return _ops_routes(runtime_body=rt)
+
+    def test_card_shows_vision_badge_for_declared_candidate(self, run_panel):
+        # 云候选声明视觉 → 卡片出「视觉」小标（首渲染即有）
+        out = run_panel(self._runtime_routes(vision_cloud=True))
+        assert "mp-feat-vision" in out["html"]
+        assert "视觉" in out["html"]
+        # 未声明的本地候选（vision=False）不带小标
+        assert 'data-mp-cand-card="loc"' in out["html"]
+
+    def test_card_no_vision_badge_without_declaration(self, run_panel):
+        # 双候选均未声明 → 无小标
+        out = run_panel(self._runtime_routes())
+        assert "mp-feat-vision" not in out["html"]
+
+    def test_runtime_without_vision_field_renders_no_badge(self, run_panel):
+        # 旧后端 runtime 无 vision 字段 → 无小标，面板照常（向后兼容）
+        out = run_panel(_ops_routes())
+        assert "mp-feat-vision" not in out["html"]
+        assert 'data-mp-cand-card="loc"' in out["html"]
+
+    def test_vision_change_rebuilds_cards(self, run_panel):
+        # 结构签名含 vision：声明变更（轮询拉到新 runtime）必须重建
+        # 卡片出新小标，不得停在 applyDynamic 定点更新路径
+        routes = self._runtime_routes()
+        routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
+            json.loads(json.dumps(_RUNTIME_BODY)),
+            self._runtime_body_with(vision_cloud=True),
+        ]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert "mp-feat-vision" in out["htmlFinal"]
+
+    @staticmethod
+    def _runtime_body_with(vision_cloud=False):
+        rt = json.loads(json.dumps(_RUNTIME_BODY))
+        rt["pools"]["fast"]["candidates"][1]["vision"] = vision_cloud
+        return rt

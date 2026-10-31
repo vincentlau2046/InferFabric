@@ -267,8 +267,17 @@ def handle_get_model_pools_runtime(handler, pm):
             c = rc.candidate
             if c.kind == "local":
                 active = c.model_name in runtime.active_services
+                # 7.9.0 视觉小标数据源（候选卡只读展示）：判定源同
+                # selector — models.d model_type=vl；元数据不可用
+                # （local_vision=None）→ False（纯展示，不影响路由）
+                vision = (runtime.local_vision is not None
+                          and c.model_name in runtime.local_vision)
             else:
-                active = f"{c.provider}/{c.model_id}" in runtime.cloud_models
+                key = f"{c.provider}/{c.model_id}"
+                active = key in runtime.cloud_models
+                cm = runtime.cloud_models.get(key)
+                vision = cm is not None and getattr(cm, "supports_vision",
+                                                    None) is True
             cooling = entries.get(rc.endpoint_fingerprint)
             last = lasts.get(rc.endpoint_fingerprint)
             cands.append({
@@ -278,6 +287,7 @@ def handle_get_model_pools_runtime(handler, pm):
                           else f"{c.provider}/{c.model_id}",
                 "fingerprint": rc.endpoint_fingerprint,
                 "active": active,
+                "vision": vision,
                 "cooling": ({"remaining_s": cooling["remaining_s"],
                              "reason": cooling["reason"],
                              "probing": cooling["probing"]}

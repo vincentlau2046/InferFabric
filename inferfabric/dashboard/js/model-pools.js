@@ -129,12 +129,8 @@
                   : ((c.provider || '') + '/' + (c.model_id || '')));
             var rt = rtById[c.id];
             var off = !rt || !rt.active;
-            // 7.8.0：约束候选 title 列出声明集（轻量提示，不改树叶结构）
-            var ftTitle = (c.features && c.features.length)
-              ? ' title="能力约束：' + esc(c.features.join('、')) + '"' : '';
             return '<span class="mp-tree-cand' + (off ? ' mp-tree-cand-dim' : '')
-              + '" id="mp-tcand-' + esc(name) + '-' + esc(c.id) + '"'
-              + ftTitle + '>'
+              + '" id="mp-tcand-' + esc(name) + '-' + esc(c.id) + '">'
               + '<span class="mp-dot ' + candDotClass(rt)
               + '" id="mp-tdot-' + esc(name) + '-' + esc(c.id) + '"></span>'
               + esc(tgt) + '</span>';
@@ -501,20 +497,17 @@
     }).join('');
   }
 
-  // 7.8.0 功能词表（与后端 config.VALID_FEATURES 同集）
-  var FEATURE_WORDS = ['tools', 'stream', 'vision', 'structured'];
-
-  // 7.8.0：空声明 = 无约束（全能力默认）→ 全能力徽章；非空 = 显式约束
-  // chips。空声明不得渲染成「什么都不支持」— tools 是 agent 调用基础。
-  function featChips(features) {
-    if (!features || !features.length) {
-      return '<span class="mp-feat mp-feat-all"'
-        + ' title="空声明 = 无约束：默认放行 tools/stream/vision/structured（7.8.0）">'
-        + '全能力</span>';
-    }
-    return features.map(function (f) {
-      return '<span class="mp-feat">' + esc(f) + '</span>';
-    }).join('');
+  // 7.9.0：能力归模型，池侧不再有能力约束（候选 features 退役，编辑器
+  // 能力列已删）。候选卡「视觉」小标 = 只读展示，数据源 runtime 端点
+  // 每候选 vision bool（本地 models.d model_type=vl / 云 supports_vision
+  // =true — 同 selector 判定源，随轮询自动更新，无目录缓存一致性问题）；
+  // 声明入口在模型侧（models.d / 云面板视觉 chip），不在池编辑器
+  function visionBadge(rt) {
+    return (rt && rt.vision)
+      ? '<span class="mp-feat mp-feat-vision"'
+        + ' title="模型声明视觉能力（能看图）— 带图请求可路由到该候选">'
+        + '视觉</span>'
+      : '';
   }
 
   function candCard(pool, c, rt) {
@@ -534,7 +527,7 @@
           return '<span class="mp-proto-badge" title="'
             + (ev[p] ? esc(ev[p]) : '') + '">' + esc(p) + '</span>';
         }).join('')
-      + featChips(c.features)
+      + visionBadge(rt)
       + '</span>'
       + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
       + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>'
@@ -728,7 +721,7 @@
                   : ((c.provider || '') + '/' + (c.model_id || '')));
             return [c.id, c.kind || '', c.priority || 0, tgt,
                     (c.declared_protocols || []).join(','),
-                    (c.features || []).join(','),
+                    (rt && rt.vision) ? 'v' : '',
                     (rt && rt.cooling) ? 'cool' : 'live'].join('~');
           }).join(',')
         + ':' + ['openai', 'anthropic'].map(function (proto) {
@@ -1399,12 +1392,13 @@
   }
 
   // 目录项 → 候选对象（'local:qwen-small' / 'cloud:prov/model-id'）
+  // 7.9.0：能力归模型 — 候选不再携带 features（池 = 纯路由表：
+  // 模型引用 + 优先级）；vision 由模型本体声明，不经池候选
   function candFromCatalogValue(spec, id, catalog) {
     var entry = (catalog && catalog.index) ? catalog.index[spec] : null;
-    // 协议/能力来自目录（云=发现结果，本地=引擎映射）；目录缺失时保守
+    // 协议来自目录（云=发现结果，本地=引擎映射）；目录缺失时保守
     // 只声明 openai（declared 态，证据系统可探实）
     var protocols = (entry && entry.protocols) || ['openai'];
-    var features = (entry && entry.features) || [];
     var i = spec.indexOf(':');
     var kind = spec.slice(0, i);
     var target = spec.slice(i + 1);
@@ -1412,42 +1406,14 @@
       var j = target.indexOf('/');
       return { id: id, kind: 'cloud', provider: target.slice(0, j),
                model_id: target.slice(j + 1),
-               declared_protocols: protocols, features: features };
+               declared_protocols: protocols };
     }
     return { id: id, kind: 'local', model_name: target,
-             declared_protocols: protocols, features: features };
+             declared_protocols: protocols };
   }
 
   // 编辑器渲染：#mpModal（候选链操作 + 池参数 + 预览/应用/回滚）
-  // 7.8.0 能力单元格：空声明 = 全能力徽章（默认放行）；非空 = 约束 chips。
-  // 编辑态展开 4 词表复选框（checked=允许）；全勾保存 → 规范式 []（全能力）；
-  // 全不勾被拒 — 空声明语义是「全能力」，无法表达「完全不支持」。
-  function featCellHtml(c) {
-    var feats = c.features || [];
-    if (_edit && _edit.featEditCid === c.id) {
-      var draft = _edit.featDraft || [];
-      return '<span class="mp-feat-opts">'
-        + FEATURE_WORDS.map(function (f) {
-            return '<label class="mp-feat-opt"><input type="checkbox" data-mp-feat="'
-              + esc(f) + '"' + (draft.indexOf(f) >= 0 ? ' checked' : '')
-              + '>' + esc(f) + '</label>';
-          }).join('')
-        + '</span>'
-        + '<button type="button" data-mp-act="feat-save" data-mp-cand="'
-        + esc(c.id) + '">保存</button>'
-        + '<button type="button" data-mp-act="feat-cancel" data-mp-cand="'
-        + esc(c.id) + '">取消</button>'
-        + '<span class="mp-hint">勾选 = 允许；全勾 = 全能力（存空声明）</span>';
-    }
-    var acts = '<button type="button" data-mp-act="feat-edit" data-mp-cand="'
-      + esc(c.id) + '">编辑能力</button>';
-    if (feats.length) {
-      acts += '<button type="button" data-mp-cand="' + esc(c.id)
-        + '" data-mp-act="feat-clear">解除约束</button>';
-    }
-    return featChips(feats) + acts;
-  }
-
+  // 7.9.0：能力列已删 — 池 = 纯路由表（模型引用 + 优先级），能力归模型
   function renderEditor() {
     var modal = $('mpModal');
     if (!modal || !_edit) return;
@@ -1481,7 +1447,7 @@
     };
     html += '<div class="cp-table-wrap"><table class="if-table">'
       + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th>'
-      + '<th>运行态</th><th>能力</th><th>操作</th></tr></thead><tbody>';
+      + '<th>运行态</th><th>操作</th></tr></thead><tbody>';
     cands.forEach(function (c, idx) {
       var target = c.kind === 'local' ? c.model_name
         : (c.provider + '/' + c.model_id);
@@ -1491,7 +1457,6 @@
         + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
         + '<td class="mono">' + esc(target) + '</td>'
         + '<td class="mono">' + esc(runtimeBadgeText(rtById[c.id])) + '</td>'
-        + '<td class="mp-edit-feat">' + featCellHtml(c) + '</td>'
         + '<td class="mp-edit-ops">'
         + '<select data-mp-replace="' + esc(c.id) + '">'
         + '<option value="">替换为…</option>' + opts(sel) + '</select>'
@@ -1585,7 +1550,6 @@
     // D4 一键换模语义：直接替换候选，继承原优先级（不做优先级重排）
     c.priority = cands[i].priority;
     cands[i] = c;
-    _featReset();          // 7.8.0：被替换候选的能力草稿作废
     mpEditInvalidated();   // 任何变更使上次预览失效
     renderEditor();
   }
@@ -1607,7 +1571,6 @@
     var i = cands.findIndex(function (c) { return c.id === candidateId; });
     if (i >= 0) {
       cands.splice(i, 1);
-      _featReset();          // 7.8.0：被删候选的能力草稿作废
       mpEditInvalidated();
     }
     renderEditor();
@@ -1631,71 +1594,6 @@
     _edit.work.pools[_edit.pool][key] = value;
     mpEditInvalidated();   // 池参数也是编辑：失效必须重烘按钮态
     renderEditor();        // （防预览通过后改池参数，应用钮仍亮着旧状态）
-  }
-
-  // 7.8.0 能力约束编辑：草稿存 _edit.featDraft，保存才写 work。
-  // 复选框 change 只更草稿不重绘（重绘会打断连续勾选）；候选被替换/
-  // 删除时草稿随之作废（_featReset）。
-  function _featReset() {
-    _edit.featEditCid = null;
-    _edit.featDraft = null;
-  }
-
-  function mpFeatEditOpen(cid) {
-    if (!_edit) return;
-    var c = _edit.work.pools[_edit.pool].candidates.find(function (x) {
-      return x.id === cid;
-    });
-    if (!c) return;
-    _edit.featEditCid = cid;
-    _edit.featDraft = (c.features && c.features.length)
-      ? c.features.slice() : FEATURE_WORDS.slice();   // 空声明 = 全允许
-    renderEditor();
-  }
-
-  function mpFeatEditCancel(cid) {
-    if (!_edit) return;
-    _featReset();
-    renderEditor();
-  }
-
-  function mpFeatDraftToggle(cid, feature, checked) {
-    if (!_edit || _edit.featEditCid !== cid) return;
-    var draft = _edit.featDraft || [];
-    var i = draft.indexOf(feature);
-    if (checked && i < 0) draft.push(feature);
-    if (!checked && i >= 0) draft.splice(i, 1);
-    _edit.featDraft = draft;
-  }
-
-  function mpFeatSave(cid) {
-    if (!_edit || _edit.featEditCid !== cid) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var c = cands.find(function (x) { return x.id === cid; });
-    if (!c) return;
-    var draft = (_edit.featDraft || []).filter(function (f) {
-      return FEATURE_WORDS.indexOf(f) >= 0;
-    });
-    if (!draft.length) {
-      UI.toast('至少保留一项能力 — 空声明表示全能力（默认放行），无法表达「完全不支持」',
-               'error');
-      return;
-    }
-    c.features = draft.length === FEATURE_WORDS.length ? [] : draft.slice();
-    _featReset();
-    mpEditInvalidated();
-    renderEditor();
-  }
-
-  function mpFeatClear(cid) {
-    if (!_edit) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var c = cands.find(function (x) { return x.id === cid; });
-    if (!c) return;
-    c.features = [];   // 解除约束 = 全能力（默认放行，7.8.0）
-    _featReset();
-    mpEditInvalidated();
-    renderEditor();
   }
 
   // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
@@ -1919,12 +1817,6 @@
       mpEditAddCandidate(candFromCatalogValue(t.value, id, _edit.catalog));
       return;
     }
-    var fw = t.getAttribute('data-mp-feat');
-    if (fw) {
-      // 7.8.0：能力复选框只更草稿，不重绘（保存才写 work）
-      mpFeatDraftToggle(_edit && _edit.featEditCid, fw, !!t.checked);
-      return;
-    }
     var param = t.getAttribute('data-mp-param');
     if (param) {
       var v = t.type === 'checkbox' ? !!t.checked : t.value;
@@ -1948,10 +1840,6 @@
     else if (act === 'del' && cand) mpEditRemove(cand);
     else if (act === 'up' && cand) mpEditMove(cand, 'up');
     else if (act === 'down' && cand) mpEditMove(cand, 'down');
-    else if (act === 'feat-edit' && cand) mpFeatEditOpen(cand);
-    else if (act === 'feat-clear' && cand) mpFeatClear(cand);
-    else if (act === 'feat-save' && cand) mpFeatSave(cand);
-    else if (act === 'feat-cancel' && cand) mpFeatEditCancel(cand);
   }
 
   var modal = $('mpModal');
@@ -2180,11 +2068,6 @@
   window.mpEditAddCandidate = mpEditAddCandidate;
   window.mpEditPreview = mpEditPreview;
   window.mpEditApply = mpEditApply;
-  window.mpFeatEditOpen = mpFeatEditOpen;
-  window.mpFeatEditCancel = mpFeatEditCancel;
-  window.mpFeatDraftToggle = mpFeatDraftToggle;
-  window.mpFeatSave = mpFeatSave;
-  window.mpFeatClear = mpFeatClear;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();

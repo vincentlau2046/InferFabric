@@ -430,7 +430,7 @@
         // provider 传原始名 — _capChip 内只 esc 一次（nameAttr 已 esc，
         // 再传会双转义，含 HTML 特殊字符的厂商名打标后变 AT&amp;T → 404）
         var capBtns = rcaps[mid] ? capChips(p.name, mid,
-          rcaps[mid].supports_vision, rcaps[mid].supports_tools) : '';
+          rcaps[mid].supports_vision) : '';
         return '<label class="cpm-item" data-action="cpm-toggle" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '">' +
           '<input type="checkbox" class="cpm-check" ' + (checked ? 'checked' : '') + ' aria-label="' + esc(mid) + '">' +
           '<span class="cpm-id mono">' + esc(mid) + '</span>' +
@@ -452,7 +452,7 @@
           '<span class="cpm-check-ph" aria-hidden="true"></span>' +
           '<span class="cpm-id mono">' + esc(s.id) + '</span>' +
           '<span class="cpm-src">' + label + '</span>' +
-          capChips(p.name, s.id, s.supports_vision, s.supports_tools) +
+          capChips(p.name, s.id, s.supports_vision) +
           '<span class="cpm-ops">' +
             '<button type="button" class="btn btn-danger btn-xs" data-action="cpm-remove" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">移除</button>' +
           '</span>' +
@@ -483,10 +483,8 @@
             '<div class="cpm-add">' +
               '<input type="text" class="if-field-input mono cpm-add-input" placeholder="模型名，如 my-glm" ' +
                 'autocomplete="off" spellcheck="false" data-action="cpm-add" data-provider="' + nameAttr + '" aria-label="添加模型名">' +
-              '<label class="cpm-cap" title="声明该模型支持图像输入 — 池模态路由据此为视觉请求选路">' +
+              '<label class="cpm-cap" title="声明该模型支持图像输入 — 7.9.0 视觉声明通道：点亮即带图请求可路由（可在模型管理中随时改）">' +
                 '<input type="checkbox" class="cpm-cap-vision">视觉</label>' +
-              '<label class="cpm-cap" title="声明该模型支持工具调用（function calling）">' +
-                '<input type="checkbox" class="cpm-cap-tools">工具</label>' +
               '<button type="button" class="btn btn-pri btn-sm" data-action="cpm-add" data-provider="' + nameAttr + '">添加</button>' +
             '</div>' +
           '</section>' +
@@ -498,33 +496,26 @@
   // 能力打标 chips（候选/已声明行内，点击切换 → tag 动作）。
   // 按钮在 <label class="cpm-item"> 内：交互后代上的点击 label 不转发给
   // 关联 checkbox（HTML label 激活规则），勾选态不受影响。
-  // 7.8.0 三态：true=确认（chip 亮）/ null=未声明（默认全能力，灰）/
-  // false=显式排除（YAML 手编的池候选约束，警示态 .x）— 点击 false
-  // chip 发 true 即解除约束；点击亮 chip 发 false = 解除打标回未声明
-  // （服务端不落 false，防「点灭造约束」单向陷阱，cross-review I-1）。
-  var _CAP_LABELS = { supports_vision: '视觉', supports_tools: '工具' };
+  // 7.9.0：唯一能力 chip = 视觉声明（supports_tools chip 退役 — 字段保留
+  // 格式兼容，不再有面板入口/路由语义）。点亮 = 声明该云模型能看图 →
+  // 进池候选自动带视觉（catalog vision=true，带图请求可路由）；
+  // 点灭 = 解除回未声明（该模型不接带图请求）。false（7.8.0 遗留显式
+  // 排除）与 null 同态渲染 — .x 排除态随约束语义一起退役。
+  var _CAP_LABELS = { supports_vision: '视觉' };
 
-  function capChips(provider, mid, vision, tools) {
+  function capChips(provider, mid, vision) {
     return '<span class="cpm-cap-chips">' +
       _capChip(provider, mid, 'supports_vision', vision) +
-      _capChip(provider, mid, 'supports_tools', tools) +
       '</span>';
   }
 
   function _capChip(provider, mid, cap, state) {
     var label = _CAP_LABELS[cap] || cap;
-    var on = state === true;
-    var excluded = state === false;
-    var cls = 'cpm-cap-chip' + (on ? ' on' : '') + (excluded ? ' x' : '');
-    var title;
-    if (on) {
-      title = '已确认「' + label + '」— 点击解除（回未声明）';
-    } else if (excluded) {
-      title = '显式排除（cloud_provider.yaml 声明）：该模型的池候选将拒绝「'
-        + label + '」请求 — 点击解除为确认';
-    } else {
-      title = '未声明（默认全能力）— 点击确认「' + label + '」';
-    }
+    var on = state === true;   // false（遗留）与 null 同态 = 未声明
+    var cls = 'cpm-cap-chip' + (on ? ' on' : '');
+    var title = on
+      ? '已声明「' + label + '」— 该模型能看图，进池候选自动带视觉；点击解除（回未声明）'
+      : '未声明视觉 — 该模型不接带图请求；点击声明「' + label + '」';
     return '<button type="button" class="' + cls +
       '" data-action="cpm-tag" data-provider="' + esc(provider) +
       '" data-model="' + esc(mid) + '" data-cap="' + cap +
@@ -584,26 +575,21 @@
     var model = (inputEl ? inputEl.value : '').trim();
     if (!model) { UI.toast('请填写模型名', 'error'); return; }
     // 添加时即声明能力（选择框）：只传勾选项 — 未勾 = 不写键
-    // （未声明；7.8.0 起未声明 = 默认全能力，非约束）
+    // （未声明视觉 = 不接带图请求；7.9.0 唯一声明的能力是视觉）
     var wrap = inputEl && inputEl.closest ? inputEl.closest('.cpm-add') : null;
     var visEl = wrap ? wrap.querySelector('.cpm-cap-vision') : null;
-    var tlsEl = wrap ? wrap.querySelector('.cpm-cap-tools') : null;
     var caps = {};
     if (visEl && visEl.checked) caps.supports_vision = true;
-    if (tlsEl && tlsEl.checked) caps.supports_tools = true;
     try {
       var r = await callProviderModels(provider, 'add', model, caps);
       if (!r.ok || !r.data || r.data.error) {
         UI.toast((r.data && r.data.error) || ('添加失败 · HTTP ' + r.status), 'error');
         return;
       }
-      var capTxt = '';
-      if (caps.supports_vision) capTxt += ' · 视觉';
-      if (caps.supports_tools) capTxt += ' · 工具';
+      var capTxt = caps.supports_vision ? ' · 视觉' : '';
       UI.toast(model + ' 已添加（恒可路由' + capTxt + '）', 'success');
       if (inputEl) inputEl.value = '';
       if (visEl) visEl.checked = false;
-      if (tlsEl) tlsEl.checked = false;
       await cloudLoadProviders();
     } catch (e) {
       UI.toast('添加失败: ' + (e.message || e), 'error');
@@ -621,7 +607,8 @@
         return;
       }
       UI.toast(model + '「' + (_CAP_LABELS[cap] || cap) + '」' +
-               (nextVal ? '已确认' : '已解除打标（回未声明 — 默认全能力）'),
+               (nextVal ? '已声明 — 带图请求可路由到该模型'
+                        : '已解除声明（回未声明 — 不再接带图请求）'),
                'success');
       await cloudLoadProviders();
     } catch (e) {

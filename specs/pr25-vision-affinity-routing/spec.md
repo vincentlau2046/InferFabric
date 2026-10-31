@@ -51,8 +51,8 @@
 | `model_pool/config.py` | 候选 `features` 字段**读时容忍忽略**（存量 YAML 含 `[vision]` 可加载，不构成任何路由行为）；编辑器写路径不再产生该键 |
 | `registry.py` | Evidence 仍存 `features`（存储格式兼容），选择器不再消费 |
 | `cloud_discovery.py` | `supports_tools` 保留字段但退出路由/面板；`supports_vision` 语义 = 唯一能力声明通道 |
-| `admin.py` | dry-run detail 透传不变 |
-| `dashboard/js/model-pools.js` | 编辑器能力列整体删除（回归「模型+优先级」）；候选卡以 catalog `vision` 渲染小「视觉」标 |
+| `admin.py` | dry-run detail 透传不变；runtime 端点每候选增 `vision: bool`（执行裁决：小标数据源由 catalog 改为 runtime 端点 — 同 selector 判定源、面板已轮询的既有端点，避免把目录拉进渲染路径破坏 A2 惰性预热裁决 + 引入缓存一致性问题；catalog `vision` 仍保留供编辑器/向导） |
+| `dashboard/js/model-pools.js` | 编辑器能力列整体删除（回归「模型+优先级」）；候选卡渲染小「视觉」标（数据源 = runtime 端点每候选 `vision`，首渲染即有、随轮询自动更新；structSig 纳入 vision 保证声明变更重建卡片） |
 | `dashboard/js/cloud.js` | `supports_tools` chip 退役；`supports_vision` chip = 视觉声明（点亮=能看图 → 进池自动带视觉；点灭=解除回未声明）；`.x` 排除态退役 |
 | `style.css` | 清理 7.8.0 能力控件专属样式（.mp-feat-* / .cpm-cap-chip.x） |
 

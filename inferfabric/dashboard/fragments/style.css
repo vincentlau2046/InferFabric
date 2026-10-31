@@ -1364,14 +1364,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
   background: color-mix(in srgb, var(--ok) 10%, var(--surface-2));
 }
-/* 7.8.0 三态：显式排除（YAML false = 池候选活跃约束）— 与「未声明」
-   的灰态必须可区分，且警告色示意这是约束不是装饰 */
-.cpm-cap-chip.x {
-  color: var(--warn);
-  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
-  background: color-mix(in srgb, var(--warn) 10%, var(--surface-2));
-  text-decoration: line-through;
-}
 .cpm-cap-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* 手填表单能力选择框（添加时即声明） */
 .cpm-cap {
@@ -1572,12 +1564,10 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: var(--radius-pill); padding: 1px 8px;
 }
-/* 7.8.0 全能力徽章：空声明 = 无约束默认态 — 与约束 chips 视觉区分（绿色系） */
-.mp-feat-all { color: #30d158;
+/* 7.9.0 视觉小标：模型声明 vision（本地 model_type=vl / 云 supports_vision）
+   — 绿色系与协议徽标区分，只读展示（声明入口在模型侧） */
+.mp-feat-vision { color: #30d158;
   border-color: color-mix(in srgb, #30d158 35%, transparent); }
-.mp-feat-opts { display: inline-flex; flex-wrap: wrap; gap: var(--sp-1); }
-.mp-feat-opt { font-size: 11px; color: var(--ink-2); display: inline-flex;
-  align-items: center; gap: 2px; }
 .mp-cand-rt { font-size: var(--fs-table); color: var(--ink-2);
   display: flex; align-items: center; gap: var(--sp-1); }
 /* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */

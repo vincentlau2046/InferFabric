@@ -524,6 +524,43 @@ class TestRuntimeEndpoint:
         assert by_id["loc"]["active"] is False
         assert by_id["cld"]["active"] is False
 
+    def test_runtime_endpoint_vision_flag(self, registry):
+        # 7.9.0：每候选 vision bool — 候选卡「视觉」小标数据源，
+        # 判定源同 selector（本地 models.d model_type=vl / 云
+        # supports_vision=True）；未声明 / 未发现 / 元数据不可用 → False
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["candidates"].append(
+            {"id": "vlloc", "priority": 2, "kind": "local",
+             "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
+                    local_models={"qwen-small": _local_model(),
+                                  "qwen-vl": _local_model(name="qwen-vl",
+                                                          served="qwen-vl",
+                                                          port=8102)},
+                    model_dicts=[{"name": "qwen-small", "model_type": "llm"},
+                                 {"name": "qwen-vl", "model_type": "vl"}],
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=True)},
+                    providers={"prov": object()})
+        h = AdminHandler()
+        mp_admin.handle_get_model_pools_runtime(h, pm)
+        _, body = h.sent[-1]
+        by_id = {c["id"]: c for c in body["pools"]["fast"]["candidates"]}
+        assert by_id["loc"]["vision"] is False    # 本地 llm
+        assert by_id["vlloc"]["vision"] is True   # 本地 model_type=vl
+        assert by_id["cld"]["vision"] is True     # 云 supports_vision=True
+
+        # 云未发现 → False（无声明可读）
+        pm2 = FakePM(registry, active=set(), local_models={}, cloud_models={},
+                     providers={"prov": object()})
+        h2 = AdminHandler()
+        mp_admin.handle_get_model_pools_runtime(h2, pm2)
+        _, body2 = h2.sent[-1]
+        by_id2 = {c["id"]: c for c in body2["pools"]["fast"]["candidates"]}
+        assert by_id2["cld"]["vision"] is False
+
     def test_runtime_endpoint_empty_registry(self, tmp_path):
         reg = PoolRegistry(config_path=tmp_path / "absent.yaml",
                            evidence_path=tmp_path / "e.json")
