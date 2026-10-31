@@ -13,7 +13,7 @@
 | JS 语法门 | ✅ | `node --check` model-pools.js + cloud.js |
 | cross-review | ✅ | fresh-context subagent（独立复跑全量 1923 passed；评审范围 f44e96a..22a04e3）：**无 Critical/Important**。三项 Minor 全修（M-1 测试卫生 / M-2 local_vision 双收 name+served_name / M-3 声明指引后缀只挂 no_compatible_target），各 RED→GREEN；设计决策核实记录见下 |
 | 版本 | ✅ commit 22a04e3 | 7.9.0（minor，用户随方案批准）；README 历史表已加行 |
-| 合并/部署 | ⏳ | ff-merge + BatchMode push 待执行；**生产重启需用户单独授权**（与未部署的 7.8.0 一次重启合并上线）；重启后一次性运维：云面板为 3 个云视觉模型点亮 supports_vision（cand-1a18c915094s/p、cand-mvs52l4h）+ dry-run `{"pool":"premium","vision":true}` 验证 |
+| 合并/部署 | ✅ 2026-10-31 | ff-merge f44e96a→2c98d52 + BatchMode push 完成（pre-push 钩子全量绿 + import 冒烟 v7.9.0 OK）；**生产重启仍需用户单独授权**（与未部署的 7.8.0 一次重启合并上线）；重启后一次性运维：云面板为 3 个云视觉模型点亮 supports_vision（cand-1a18c915094s/p、cand-mvs52l4h）+ dry-run `{"pool":"premium","vision":true}` 验证 |
 
 ## 执行裁决记录
 
