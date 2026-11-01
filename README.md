@@ -382,7 +382,7 @@ Dashboard 推理页模型卡有 **⚙ 场景** 按钮：三阶段模态框（选
 
 - **默认惰性**：不创建 `model_pools.yaml` 时全部新代码路径零激活（`iff/` 前缀检查 + 空快照直通），`/v1/models` 与直连行为与旧版完全一致
 - **协议兼容过滤**：候选按声明协议（`declared_protocols`）+ 探测证据（PROBED）筛选；网关不解析会话负载（历史块是否被目标模型接受由模型/provider 自身处理）
-- **VL 软优先**：带图请求把 vision-capable 候选（本地 `model_type: vl` / 云 `supports_vision: true`）排到尝试链前面，其余候选仍按优先级参与 — 没配置 VL / 无可用 VL 时纯优先级正常调用
+- **VL 软优先**：带图请求把 vision-capable 候选（本地 `model_type: vl` / 云 `supports_vision: true`）排到尝试链前面，其余候选仍按优先级参与 — 没配置 VL / 无可用 VL 时纯优先级正常调用。注：池内唯一 VL 候选在云侧时（`allowed_locations` 含 cloud），带图请求的 home 位置随偏好移到云 — 图像会合法出网到该 VL 候选
 - **本地候选只用已启动端口**——池调度**绝不自动启动本地模型**
 - **跨本地/云回退默认关闭**：逐池显式 `allowed_locations: [local, cloud]` 才开启
 - **物理目标容量门**：同一物理目标跨池/跨直连共享 DualGateLimiter 并发预算（`acquire_target`），不重复计费

@@ -11,8 +11,8 @@
 | 浏览器门禁 | ✅ 10 passed | 真实 chromium + scratch 代理整文件 10/10；test_08 重写为直通 200 契约（TXT-only 池带图 → 200；VL 换模后带图/纯文本均 200 + 视觉 chip） |
 | import 冒烟 | ✅ | `python3 -c "import inferfabric"` → 7.10.0 |
 | 语义裁决 | ✅ | 云已声明 VL + 本地元数据故障（未知）→ 软优先合法落云（偏好而非 fail-open 改道，判定源 = 云模型本体声明）；原 metadata-failure 测试拆两例钉住 |
-| cross-review | 待 | fresh-context subagent 全 diff 评审 |
-| committed-tree 复验 | 待 | 干净 worktree 全量 + import 冒烟 |
+| cross-review | ✅ ship | fresh-context subagent 全 diff 评审：0 Critical / 0 Important / 2 Minor（selector 两处注释失实）+ 1 README 表述建议 + 3 Info（云侧 VL home 移位语义记录 / VL 冷却时带图落 TXT 由上游 400 终止 = 新契约推论 / 测试记账口径）— Minor+建议已顺手修（提交 2）；七项逐查全过（守卫零残留 / 排序语义确定 / detail 消费面完整 / 错误码语义不变 / PR-14 冻结面零改动 / 翻面断言为换钉非弱化 / 边界无缺陷），评审本机复跑全量 1958 + 浏览器 10/10 |
+| committed-tree 复验 | ✅ | 干净 worktree 全量 1958 passed + import 冒烟 7.10.0（提交 1 后复验；提交 2 仅注释/README，随后复跑 model_pool + import） |
 | 版本 | ✅ 7.10.0 | minor（用户裁决即批准）；README 历史行 + 正文契约更新（「未声明能力不投递」→「VL 软优先」；示例 features 行退役） |
 | 合并/部署 | 待 | ff-merge + BatchMode push；**生产重启需用户单独授权** |
 

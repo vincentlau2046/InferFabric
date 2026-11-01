@@ -37,7 +37,8 @@ from inferfabric.model_pool.registry import PoolSnapshot, ResolvedCandidate
 @dataclass(frozen=True)
 class RequestRequirements:
     protocol: str          # "openai" | "anthropic"
-    vision: bool = False   # 请求携带图片（7.9.0：唯一请求感知维度）
+    vision: bool = False   # 请求携带图片（7.10.0：排序偏好维度 — 软优先
+                           # vision-capable 候选，非排除条件）
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,8 @@ class Selection:
     decisions: tuple[CandidateDecision, ...] = ()
     chosen: ResolvedCandidate | None = None
     error: str | None = None
-    # P2：全部入选候选（按 priority,id 升序），供回退循环按序尝试
+    # P2：全部入选候选（按软优先序 (not vision_pref, priority, id) 升序，
+    # 带图请求 vision-capable 候选排前），供回退循环按序尝试
     ordered: tuple[ResolvedCandidate, ...] = ()
     # 静态兼容（含跨位置过滤后的 home 位置约束）的候选数 — 与当前就绪状态
     # 无关（7.10.0 起仅观测用，路由决策不再依赖它）
