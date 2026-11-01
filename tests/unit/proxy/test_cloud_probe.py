@@ -316,3 +316,47 @@ class TestOpenApiSpecDrift:
         desc = spec["paths"]["/admin/cloud/test"]["post"]["description"]
         assert "http" in desc and "https" in desc      # 新策略允许 plain http
         assert "unregistered" in desc.lower() or "not registered" in desc.lower()
+
+
+class TestCloudReloadHandlerFloor:
+    """7.9.1 P0 守卫事故恢复路径：POST /admin/cloud/reload 在发现失败时
+    仍报告 floor 模型（白名单模型不因抓取失败从 reload 响应/注册表消失）。
+    """
+
+    def test_cloud_reload_reports_floor_after_fetch_failure(self, tmp_path, monkeypatch):
+        import yaml as _yaml
+        cd = CloudDiscovery(config_path=None)
+        cd._secrets_mgr = SecretsManager(path=tmp_path / "secrets.env")
+        cd._inject_secrets_env = lambda: None
+        # _handle_cloud_reload 内部 reload(IFF_DATA_DIR / ...) — 指向 tmp 隔离
+        monkeypatch.setattr("inferfabric.proxy_manager.IFF_DATA_DIR", tmp_path)
+        cfg_path = tmp_path / "cloud_provider.yaml"
+        cfg_path.write_text(_yaml.dump({
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    "openai_base": "http://127.0.0.1:1/v1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                }
+            }
+        }))
+        cd._config_path = cfg_path
+        # 事故条件：抓取失败（None）≠ 上游 0 模型
+        monkeypatch.setattr(cd, "_discover_provider", lambda cfg: None)
+        pm = SimpleNamespace(cloud=cd, _cloud_discovered=False)
+
+        h = ProxyHandler.__new__(ProxyHandler)
+        h._sent = []
+        h._send_json = lambda data, status=200, extra_headers=None: h._sent.append((data, status))
+        try:
+            h._handle_cloud_reload(pm)
+            data, status = h._sent[-1]
+            assert status == 200
+            assert data["status"] == "reloaded"
+            # 白名单 floor 模型仍在（现状修复前：抓取失败 → 0 模型）
+            assert data["cloud_models"] == 1, data
+            assert "glm-5" in cd.cloud_models
+            assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+        finally:
+            cd.stop_polling()
