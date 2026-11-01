@@ -763,3 +763,121 @@ class TestCloudReloadReconciliation:
             assert cd._poll_thread is t1
         finally:
             cd.stop_polling()
+
+
+class TestShortNameCollisionContract:
+    """7.9.1 跨 provider 短名碰撞契约（与发现路径 :334-336 行为对齐）。
+
+    契约：配置序首 provider 赢短键（first-wins，发现/spec/白名单三路径一致）；
+    碰撞时本 provider 的前缀键 <provider>/<mid> 仍注册（发现路径既有行为 —
+    前缀键无条件写）。注意 resolve_route 短名查找优先（:546）：前缀键不是
+    消歧通道 — 短名本身跨 provider 有歧义时按短键 owner 路由（既有语义，
+    本 PR 不改 resolve_route/转发核心路径）。
+    """
+
+    def test_short_name_collision_first_provider_wins(self, tmp_path, monkeypatch):
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b'{"data": [{"id": "glm-5"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "https://a.example.com/v1",
+                    "enabled_models": ["glm-5"],
+                },
+                "prov-b": {
+                    "api_key": "sk-b",
+                    "openai_base": "http://127.0.0.1:1",  # dead — 白名单 bare 兜底
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                },
+            }
+        })
+        cd = CloudDiscovery(p)
+        reg = cd.discover_all()
+        # 短键归配置序首 provider（发现条目）
+        assert reg["glm-5"].provider == "prov-a"
+        assert reg["glm-5"].discovered_at > 0
+        # 双前缀键俱在（B 经白名单 floor 前缀键注册 — 对齐发现路径碰撞契约）
+        assert "prov-a/glm-5" in reg
+        assert "prov-b/glm-5" in reg
+        assert reg["prov-b/glm-5"].provider == "prov-b"
+        # 路由按短键 owner（既有短名优先语义）
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+
+    def test_spec_does_not_override_discovered_short_key(self, tmp_path, monkeypatch):
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b'{"data": [{"id": "glm-5"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "https://a.example.com/v1",
+                    "enabled_models": ["glm-5"],
+                },
+                "prov-b": {
+                    "api_key": "sk-b",
+                    "openai_base": "https://b.example.com/v1",
+                    "discovery": {"enabled": False},
+                    "models": {"glm-5": {"model_id": "glm-5"}},
+                },
+            }
+        })
+        cd = CloudDiscovery(p)
+        reg = cd.discover_all()
+        # spec 不覆盖发现短键（spec 路径 :695 first-wins 既有行为）
+        assert reg["glm-5"].provider == "prov-a"
+        # spec 路径碰撞时整条跳过（含前缀键）— 既有 skip 行为，本 PR 不动 spec 路径
+        assert "prov-b/glm-5" not in reg
+
+    def test_whitelist_bare_does_not_override_spec_short_key(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "https://a.example.com/v1",
+                    "discovery": {"enabled": False},
+                    "models": {"glm-5": {"model_id": "glm-5"}},
+                },
+                "prov-b": {
+                    "api_key": "sk-b",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                },
+            }
+        })
+        cd = CloudDiscovery(p)
+        reg = cd.cloud_models
+        # 短键归 spec provider（构造顺序：spec 先注册）
+        assert reg["glm-5"].provider == "prov-a"
+        # 白名单 bare 不覆盖短键，但前缀键注册（对齐发现路径碰撞契约）
+        assert "prov-b/glm-5" in reg
+        assert reg["prov-b/glm-5"].provider == "prov-b"

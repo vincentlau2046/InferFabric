@@ -807,22 +807,34 @@ class CloudDiscovery:
                 continue
             for mid in cfg.enabled_models:
                 if mid in merged:
-                    continue  # 已注册（发现/spec 先到），first-wins
-                m = None
-                source = "bare"
-                if old:
-                    for v in old.values():
-                        if v.provider == name and v.model_id == mid:
-                            m = v
-                            source = "old"
-                            break
-                if m is None:
-                    m = self._bare_whitelist_model(mid, name, cfg)
-                m = self._merge_model_spec(m, cfg, spec_key=mid)
+                    # 短键已被占用（发现/spec/配置序更早的 provider — first-wins）。
+                    # 本 provider 自己的发现条目已带前缀键 → 完全跳过；否则
+                    # （跨 provider 短名碰撞）仅注册前缀键 — 对齐发现路径
+                    # (:334-336 前缀键无条件写) 的碰撞契约。
+                    own = merged.get(f"{name}/{mid}")
+                    if own is not None and own.provider == name:
+                        continue
+                    m = self._whitelist_entry(mid, name, cfg, old)
+                    merged[f"{name}/{mid}"] = m
+                    continue
+                m = self._whitelist_entry(mid, name, cfg, old)
                 merged[mid] = m
                 merged[f"{name}/{mid}"] = m
                 log.debug("Registered whitelisted model: %s/%s (source: %s)",
-                          name, mid, source)
+                          name, mid, "old" if m.discovered_at else "bare")
+
+    def _whitelist_entry(self, mid: str, name: str, cfg: ProviderConfig,
+                         old: dict[str, CloudModel] | None) -> CloudModel:
+        """白名单条目构建：旧注册表条目（保元数据）→ 裸 CloudModel + spec 合并。"""
+        m = None
+        if old:
+            for v in old.values():
+                if v.provider == name and v.model_id == mid:
+                    m = v
+                    break
+        if m is None:
+            m = self._bare_whitelist_model(mid, name, cfg)
+        return self._merge_model_spec(m, cfg, spec_key=mid)
 
     def _load_config(self, config_path: Path):
         # v4.7.0: Inject secrets.env before expanding ${VAR}
