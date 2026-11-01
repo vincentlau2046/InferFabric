@@ -783,8 +783,15 @@ class CloudDiscovery:
                  sum(len(p.model_specs) for p in self._providers.values()))
         self._config_corrupt = False  # 成功加载后重置 corrupt 标志
 
-    def _discover_provider(self, cfg: ProviderConfig) -> list[CloudModel]:
-        """对单个 provider 执行 GET /models。"""
+    def _discover_provider(self, cfg: ProviderConfig) -> "list[CloudModel] | None":
+        """对单个 provider 执行 GET /models。
+
+        返回契约（7.9.1 floor 前置）：
+          - None  = 抓取失败（HTTP 错误/网络异常/超时/解析失败）——调用方据此
+                    保留该 provider 的 floor（specs ∪ 白名单），不视为「0 模型」。
+          - list  = 抓取成功（可为空 = 上游确实无模型）。
+          - 无 openai_base → []（永久配置状态，非瞬时失败，不刷告警）。
+        """
         if not cfg.openai_base:
             return []
 
@@ -802,10 +809,10 @@ class CloudDiscovery:
                 body = _json.loads(resp.read().decode('utf-8')) or {}
         except urllib.error.HTTPError as e:
             log.warning("Provider %s returned HTTP %d", cfg.name, e.code)
-            return []
+            return None
         except Exception as e:
             log.warning("Provider %s request failed: %s", cfg.name, e)
-            return []
+            return None
 
         raw_models = body.get("data") or []
         pattern = re.compile(cfg.include_pattern) if cfg.include_pattern else None

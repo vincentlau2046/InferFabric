@@ -383,3 +383,89 @@ class TestSpecAliasAndDiscoveryUA:
         models = cd._discover_provider(cfg)
         assert [m.model_id for m in models] == ["kimi/k3"]
         assert captured["ua"] == cdm._CLOUD_UA
+
+
+class TestDiscoverProviderFailureContract:
+    """7.9.1 floor 前置契约：_discover_provider 三态化。
+
+    抓取失败（网络/HTTP/解析异常）→ None（与「上游确实无模型 []」严格区分，
+    调用方 discover_all 据 None 走「保留 floor」而非「0 模型」路径）。
+    无 openai_base → []（永久配置状态，非瞬时失败，不刷告警）。
+    """
+
+    def _cfg(self, **overrides):
+        base = dict(
+            name="prov",
+            api_key="k",
+            openai_base="https://api.example.com/v1",
+        )
+        base.update(overrides)
+        return ProviderConfig(**base)
+
+    def test_discover_provider_none_on_timeout(self, tmp_path, monkeypatch):
+        import urllib.error
+        from inferfabric import cloud_discovery as cdm
+
+        def _fake_urlopen(req, timeout=None):
+            raise urllib.error.URLError("timed out")
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        assert cd._discover_provider(self._cfg()) is None
+
+    def test_discover_provider_none_on_http_error(self, tmp_path, monkeypatch):
+        import urllib.error
+        from inferfabric import cloud_discovery as cdm
+
+        def _fake_urlopen(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 500, "Internal Server Error", None, None)
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        assert cd._discover_provider(self._cfg()) is None
+
+    def test_discover_provider_none_on_malformed_json(self, tmp_path, monkeypatch):
+        import urllib.error
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b"not-json{"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        # 无法解析 ≠ 上游 0 模型 — 同样视为抓取失败
+        assert cd._discover_provider(self._cfg()) is None
+
+    def test_discover_provider_empty_list_on_success_empty(self, tmp_path, monkeypatch):
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b'{"data": []}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        result = cd._discover_provider(self._cfg())
+        assert result == []  # 成功空 = 上游真相，与 None（失败）可区分
+
+    def test_discover_provider_no_openai_base_returns_empty_list(self, tmp_path):
+        cd = CloudDiscovery(tmp_path / "none.yaml")
+        cfg = self._cfg(openai_base="")
+        # 永久配置状态（未配置 openai base）→ 空 list，不触发失败告警
+        assert cd._discover_provider(cfg) == []
