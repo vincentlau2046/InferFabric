@@ -506,8 +506,14 @@ class CloudDiscovery:
             self._candidates.pop(provider, None)
 
     def _rebuild_provider_registry(self, provider: str, cfg: ProviderConfig):
-        """按 (候选∩白名单) ∪ model_specs 重建单个 provider 的可路由注册表条目。"""
-        # 1. 清掉本 provider 的旧条目（短名 + provider/ 前缀双键）
+        """按 floor = (候选∩白名单) ∪ 白名单 ∪ model_specs 重建 provider 的注册表条目。
+
+        7.9.1：_candidates 不持久化 — 重启后（或首次成功发现前）为空，白名单
+        模型不再依赖候选快照，按 旧条目（保元数据）→ 裸 CloudModel 兜底。
+        """
+        # 1. 留档旧条目（floor 兜底复用元数据），再清掉本 provider 的条目
+        #    （短名 + provider/ 前缀双键）
+        old = dict(self._cloud_models)
         self._cloud_models = {
             k: v for k, v in self._cloud_models.items()
             if v.provider != provider
@@ -522,6 +528,9 @@ class CloudDiscovery:
         # 3. model_specs（含手填空 spec）恒注册 —— _register_spec_only_models 对
         #    已注册短名幂等跳过，直接重跑全量即可
         self._register_spec_only_models(self._cloud_models)
+        # 4. 7.9.1 白名单 floor：候选快照未覆盖的白名单模型兜底。
+        #    （其他 provider 的条目未被清除，short-key first-wins 跳过不受影响）
+        self._register_whitelist_models(self._cloud_models, old=old)
 
     def _routable_count(self, provider: str) -> int:
         """该 provider 可路由模型数（短名 key 计数，避免双键重复）。"""

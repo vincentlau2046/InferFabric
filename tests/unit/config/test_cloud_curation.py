@@ -428,3 +428,64 @@ class TestStartupFloor:
         assert dual.openai_available is True and dual.anthropic_available is True
         only = cd.cloud_models["k3"]
         assert only.openai_available is True and only.anthropic_available is False
+
+
+class TestRebuildFloor:
+    """7.9.1：策展重建在候选快照为空（进程重启后）时保留白名单 floor。
+
+    缺陷：_rebuild_provider_registry 依赖不持久化的 _candidates — 重启后
+    enable/disable/add/remove/tag 任一策展动作先清空 provider 条目再按
+    「候选∩白名单」重建 = ∅ → 白名单模型被静默丢弃。
+    """
+
+    def _write_cfg(self, tmp_path, enabled_models):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    "openai_base": "http://127.0.0.1:1",  # dead — 候选恒空
+                    "timeout": 1,
+                    "enabled_models": enabled_models,
+                }
+            }
+        })
+        return CloudDiscovery(p)
+
+    def test_rebuild_with_empty_candidates_keeps_whitelist(self, tmp_path):
+        cd = self._write_cfg(tmp_path, ["glm-5"])
+        # 重启后状态：启动 floor 已注册白名单，但候选快照为空
+        assert cd._candidates.get("tathr-glm", []) == []
+        assert "glm-5" in cd.cloud_models
+
+        # 任何策展动作（手填另一模型）触发 rebuild — 白名单模型不得被丢弃
+        cd.add_manual_model("tathr-glm", "other-model")
+        assert "glm-5" in cd.cloud_models
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+        assert "other-model" in cd.cloud_models  # 新手填模型也在
+
+    def test_disable_model_with_empty_candidates_keeps_other_whitelist(self, tmp_path):
+        cd = self._write_cfg(tmp_path, ["glm-5", "foo"])
+        cd.disable_model("tathr-glm", "foo")
+        # foo 被显式取消勾选 → 走；glm-5 保留
+        assert "foo" not in cd.cloud_models
+        assert "glm-5" in cd.cloud_models
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+
+    def test_enable_model_prefers_candidates_metadata(self, tmp_path, mock_port):
+        """候选快照有值时（正常运行态）行为不变：enable 用候选元数据。"""
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "test-provider": {
+                    "api_key": "sk-test",
+                    "openai_base": f"http://127.0.0.1:{mock_port}",
+                    "enabled_models": [],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        cd.discover_all()  # 候选快照就绪
+        assert cd.get_candidates("test-provider")
+        cd.enable_model("test-provider", "glm-5")
+        assert cd.cloud_models["glm-5"].discovered_at > 0  # 来自候选，非裸重建
