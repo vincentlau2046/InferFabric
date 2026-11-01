@@ -314,9 +314,9 @@ class TestHomeLocation:
         assert [c.candidate.id for c in sel.ordered] == ["loc"]
 
 
-# ── #3 不可迁移历史：静态兼容数（而非当前就绪数）决定守卫 ──
+# ── compatible_count：静态兼容数（与就绪数无关，7.10.0 起仅观测用）──
 
-class TestHistoryGuard:
+class TestCompatibleCount:
     def test_compatible_count_counts_static_compatibility(self):
         snap = _snap_with(dict(enabled=True, allowed_locations=("local", "cloud"),
                                accept_declared=True, allow_cross_location=True), [
@@ -334,21 +334,11 @@ class TestHistoryGuard:
         sel = select(snap, _REQ, RuntimeView(active_services={"m"}))
         assert sel.compatible_count == 1
 
-    def test_redacted_thinking_is_non_migratable(self):
-        data = {"messages": [{"role": "user", "content": [
-            {"type": "redacted_thinking", "data": "opaque"}]}]}
-        assert dispatch._has_non_migratable_history("anthropic", data) is True
 
-    def test_unsigned_thinking_is_migratable(self):
-        data = {"messages": [{"role": "user", "content": [
-            {"type": "thinking", "thinking": "hi"}]}]}
-        assert dispatch._has_non_migratable_history("anthropic", data) is False
+# ── 7.10.0：历史守卫已删 — 工具历史在多候选池（含冷却备用）照样转发 ──
 
-
-# ── #3 守卫用静态兼容数：冷却中的备用也是潜在迁移目标 ──
-
-class TestHistoryGuardUsesCompatibleCount:
-    def test_cooling_backup_still_triggers_guard(self, tmp_path, monkeypatch):
+class TestHistoryPassthroughWithCooldown:
+    def test_tool_history_routes_with_cooling_backup(self, tmp_path, monkeypatch):
         import json as _json
         cfg = _raw_config()
         cfg["pools"]["fast"]["allow_cross_location"] = True
@@ -358,8 +348,7 @@ class TestHistoryGuardUsesCompatibleCount:
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
-        # 云备用在冷却 → ordered 只剩本地，但静态兼容数仍为 2：
-        # 备用随时可能恢复，工具历史仍不得进入该池（终审 #3）
+        # 云备用在冷却 → ordered 只剩本地 p1；工具历史不再被拒绝
         fp = reg.snapshot().pools["fast"].candidates[1].endpoint_fingerprint
         pm.pool_cooldowns = CooldownStore()
         pm.pool_cooldowns.add(fp)
@@ -370,9 +359,7 @@ class TestHistoryGuardUsesCompatibleCount:
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, _json.loads(_json.dumps(data)),
                                          "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        assert body["status"] == "no_compatible_target"
+        assert h.sent == []                    # 正常转发，无错误信封
 
 
 # ── #15/#16 dispatch 层日志（见 test_final_fixes_dispatch.py 分部）──

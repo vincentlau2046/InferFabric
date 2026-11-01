@@ -198,7 +198,7 @@ class TestDryRun:
         assert body["chosen"] == "loc"
         assert body["error"] is None
         assert body["decisions"][0] == {"id": "loc", "included": True,
-                                        "reason": "ok", "detail": ""}
+                                        "reason": "ok"}
 
     def test_dry_run_anthropic_explains_exclusion(self, pm):
         h = AdminHandler(body={"pool": "fast", "protocol": "anthropic"})
@@ -232,17 +232,15 @@ class TestDryRun:
         _, body = h.sent[-1]
         assert body["chosen"] == "vlloc"
 
-    def test_dry_run_feature_unsupported_detail_passthrough(self, pm):
-        # 带图 dry-run 无 vision-capable 候选 → decisions 带视觉明细（自解释）
+    def test_dry_run_vision_without_vision_capable_routes_by_priority(self, pm):
+        # 7.10.0：带图 dry-run 无 vision-capable 候选 → 纯优先级正常选中
         h = AdminHandler(body={"pool": "fast", "protocol": "openai",
                                "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
-        assert body["chosen"] is None
-        d = body["decisions"][0]
-        assert d["reason"] == "feature_unsupported"
-        assert d["detail"] == ("request requires vision; "
-                               "model is not vision-capable")
+        assert body["chosen"] == "loc"
+        assert body["error"] is None
+        assert body["decisions"][0]["reason"] == "ok"
 
     def test_dry_run_unknown_pool_404(self, pm):
         h = AdminHandler(body={"pool": "nope", "protocol": "openai"})

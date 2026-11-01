@@ -204,17 +204,18 @@ class TestEvidenceFeaturesRetired:
             name="fast", enabled=True, allowed_locations=("cloud",),
             accept_declared=False), candidates=(rc,))
 
-    def test_evidence_features_do_not_authorize_vision(self):
-        # 证据里记了 vision 也不背书路由 — vision-capable 唯一判定源
-        # 是模型本体（云 supports_vision）；未声明 → 带图请求仍拒
+    def test_evidence_features_do_not_grant_vision_preference(self):
+        # 证据里记了 vision 也不背书偏好 — vision-capable 唯一判定源
+        # 是模型本体（云 supports_vision）；未声明（None）= 未知 =
+        # 无偏好 → 按优先级正常调用
         from types import SimpleNamespace
         rc = self._resolved(ev_features=("vision",), cand_features=("vision",))
         sel = select(self._snap(rc),
                      RequestRequirements(protocol="openai", vision=True),
                      RuntimeView(cloud_models={"p/m": SimpleNamespace(
                          supports_vision=None)}))
-        assert sel.chosen is None
-        assert sel.decisions[0].reason == "feature_unsupported"
+        assert sel.chosen is rc
+        assert sel.decisions[0].reason == "ok"
 
     def test_evidence_features_do_not_constrain_vision(self):
         # 证据/候选 features 为空也不拦 — 模型本体声明 supports_vision
@@ -230,17 +231,20 @@ class TestEvidenceFeaturesRetired:
 
 # ── #5 不可迁移历史：无原目标归属 → 多候选池拒绝（spec §7）──
 
-class TestNonMigratableHistory:
+class TestHistoryPassthrough:
+    """7.10.0：用户裁决 — 网关不解析会话历史，多候选池照样转发。
+    历史块是否被目标模型接受是模型/provider 的事，不是池的事。"""
+
     def _registry(self, tmp_path, cfg=None):
         reg = _make_registry(tmp_path)
         reg.update(cfg or _raw_config(), expected_revision=0)
         return reg
 
-    def test_openai_tool_history_rejected_in_multi_candidate_pool(self, tmp_path,
-                                                                  monkeypatch):
+    def test_openai_tool_history_routes_in_multi_candidate_pool(self, tmp_path,
+                                                                monkeypatch):
         cfg = _raw_config()
-        # 开启跨位置回退 → ordered 含两个真实目标（F6 默认关闭时只有一个，
-        # 单目标无从迁移，工具历史可安全转发）
+        # 开启跨位置回退 → ordered 含两个真实目标（多候选场景，
+        # 7.9.x 曾在此时拒绝工具历史 — 7.10.0 删除该守卫）
         cfg["pools"]["fast"]["allow_cross_location"] = True
         reg = self._registry(tmp_path, cfg)
         pm = FakePM(reg, active={"qwen-small"},
@@ -248,7 +252,7 @@ class TestNonMigratableHistory:
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
         monkeypatch.setattr(dispatch, "_forward_request",
-                            lambda *a, **kw: True)   # 无守卫 → 会被转发
+                            lambda *a, **kw: True)
         data = {"model": "iff/fast", "messages": [
             {"role": "assistant", "tool_calls": [{"id": "t1", "type": "function",
              "function": {"name": "f", "arguments": "{}"}}]},
@@ -257,13 +261,12 @@ class TestNonMigratableHistory:
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, json.loads(json.dumps(data)),
                                          "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        assert body["status"] == "no_compatible_target"
+        assert h.sent == []                    # 正常转发，无错误信封
 
-    def test_anthropic_thinking_signature_rejected_in_multi_candidate_pool(
+    def test_anthropic_thinking_signature_routes_in_multi_candidate_pool(
             self, tmp_path, monkeypatch):
-        # 双候选均声明 anthropic（否则 400 来自协议过滤而非 §7 守卫）
+        # 双候选均声明 anthropic（协议过滤不排除）— thinking 签名 +
+        # tool_use/tool_result 历史照样转发，由目标模型自行校验
         cfg = {"schema_version": 1, "pools": {"fast": {
             "enabled": True, "allowed_locations": ["local", "cloud"],
             "accept_declared": True, "allow_cross_location": True,
@@ -279,17 +282,20 @@ class TestNonMigratableHistory:
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
         monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local",
-                            lambda *a, **kw: 200)   # 无守卫 → 会被转发
+                            lambda *a, **kw: SimpleNamespace(
+                                committed=True, status=200, error=None))
         data = {"model": "iff/fast", "max_tokens": 10, "messages": [
             {"role": "assistant", "content": [
                 {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
-                {"type": "text", "text": "answer"}]},
-            {"role": "user", "content": "hi"}]}
+                {"type": "text", "text": "answer"},
+                {"type": "tool_use", "id": "tu1", "name": "t",
+                 "input": {"a": 1}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "ok"},
+                {"type": "text", "text": "hi"}]}]}
         h = FakeHandler()
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        assert body["error"]["type"] == "invalid_request_error"
+        assert h.sent == []                    # 正常转发，无错误信封
 
     def test_tool_history_allowed_in_single_candidate_pool(self, tmp_path,
                                                            monkeypatch):

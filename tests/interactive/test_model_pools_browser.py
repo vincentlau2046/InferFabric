@@ -655,17 +655,16 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
         ' .mp-tl-dot.mp-tl-cooldown', state="attached")
 
 
-# ── 8. 能力约束编辑 → 自解释 400 → 解除约束直通 200（7.8.0 语义反转）──
+# ── 8. VL 软优先路由（7.10.0：vision 排序偏好，非排除维度）──────────
 
-def test_08_vision_routing_and_self_explaining_400(page, scratch_base):
-    """7.9.0 真实浏览器钉子（能力归模型 / 池归优先级）：
+def test_08_vision_soft_preference_and_passthrough(page, scratch_base):
+    """7.10.0 真实浏览器钉子（用户裁决 2026-11-02）：
 
-    vision 是唯一请求感知维度，判定源 = 模型本体（本地 models.d
-    model_type=vl），池候选无能力字段。三段契约：
+    网关不解析会话负载；vision 只是**排序偏好**：
       ① 纯文本请求 → 纯优先级路由：TXT 单候选池直通 200（桩引擎）；
-      ② 带图请求 → 只在 vision-capable 候选中路由：TXT-only premium 池
-         → 400 自解释（候选 id + feature_unsupported + 固定码
-         no_compatible_target + 模型侧声明指引，不指向池编辑器）；
+      ② 带图请求 → TXT-only premium 池（无配置 VL / 无可用 VL）→
+         **纯优先级正常调用 200**（不再 400；是否真支持由模型/
+         provider 自身处理）；
       ③ fast 池行内换 VL 候选（model_type=vl，同桩端口在跑）→ 同一带图
          请求 200；卡片渲染「视觉」chip（数据源 runtime endpoint，
          5s 轮询异步 → 轮询等）；纯文本请求也 200 — 无「跳过 VL」
@@ -686,20 +685,16 @@ def test_08_vision_routing_and_self_explaining_400(page, scratch_base):
     code, body = _post_chat(scratch_base, "iff/premium")
     assert code == 200, (code, body)
     assert body["choices"][0]["message"]["content"] == "pong", body
-    # ② 带图请求 → TXT 非 vision-capable（model_type=llm）→ 400 自解释
+    # ② 带图请求 → 无可用 VL：纯优先级正常调用（7.10.0 — 不排除、
+    # 不报错，照常转发 TXT p1）
     img = {"type": "image_url",
            "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
     vision_msgs = [{"role": "user", "content": [
         {"type": "text", "text": "看图"}, img]}]
     code, body = _post_chat(scratch_base, "iff/premium",
                             extra={"messages": vision_msgs})
-    assert code == 400, (code, body)
-    assert body["status"] == "no_compatible_target", body
-    err = body["error"]
-    assert "premium-1: feature_unsupported" in err, err
-    assert "request requires vision; model is not vision-capable" in err, err
-    assert "no vision-capable candidate in this pool" in err, err
-    assert "models.d model_type=vl" in err, err
+    assert code == 200, (code, body)
+    assert body["choices"][0]["message"]["content"] == "pong", body
     # ③ fast 池行内「替换为…」换 VL 候选（在跑，ninfer 双协议声明）→
     # apply（已配置卡的行内替换选择器 — 同 test_04 换模模式）
     page.locator('select[data-mp-inline-replace="fast|fast-1"]') \

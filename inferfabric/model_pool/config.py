@@ -81,7 +81,7 @@ class CandidateConfig:
     model_id: str = ""                          # cloud: 上游模型 ID
     declared_protocols: tuple[str, ...] = ()    # 管理员声明的协议
     # 7.8.0 语义反转：空 = 无约束（全能力默认，tools 是 agent 调用基础）；
-    # 非空 = 严格限定（required ⊆ features，超出即 feature_unsupported）
+    # 7.10.0：features 全域退役 — 读时容忍，不构成任何路由行为
     features: tuple[str, ...] = ()
 
 

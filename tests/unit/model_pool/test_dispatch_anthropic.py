@@ -184,8 +184,10 @@ class TestPoolMessagesDispatch:
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
         assert len(anth_local) == 1
 
-    def test_anthropic_vision_no_vision_capable_candidate_400(self, registry):
-        # 7.9.0：池内候选模型本体均无视觉 → 带图请求 400（遗留 features 忽略）
+    def test_anthropic_vision_no_vision_capable_routes_by_priority(
+            self, registry, anth_local):
+        # 7.10.0：池内候选模型本体均无视觉 → 带图请求按优先级正常
+        # 调用本地 p1（是否支持由模型/provider 自身处理；遗留 features 忽略）
         cfg = _raw_config_anthropic()
         for c in cfg["pools"]["fast"]["candidates"]:
             c["features"] = ["vision"]   # 遗留声明 — 读时忽略
@@ -202,11 +204,8 @@ class TestPoolMessagesDispatch:
             ]}]}
 
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        assert body["error"]["type"] == "invalid_request_error"
-        assert "not vision-capable" in body["error"]["message"]
-        assert "no vision-capable candidate" in body["error"]["message"]
+        assert len(anth_local) == 1              # 正常转发本地 p1
+        assert h.sent == []                      # 无错误信封
 
     def test_anthropic_vision_routes_to_vision_capable(self, registry, anth_local):
         # 带图请求落到 model_type=vl 的本地候选（anthropic 直通路径）

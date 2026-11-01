@@ -3,18 +3,18 @@
 确定性内核：无随机、无时间依赖、不打网络。每次调用返回完整决策表，
 dry-run / status 与真实选择共用同一函数（零副差别名）。
 
-7.9.0 语义：能力归模型，池归优先级（LiteLLM Router / OpenRouter 模式）。
-vision 是唯一请求感知维度 — vision-capable 判定源是模型本体（本地
+7.10.0 语义：能力归模型，池归优先级（LiteLLM Router / OpenRouter 模式）。
+vision 是唯一请求感知维度，且只是**排序偏好**而非排除维度：带图请求把
+vision-capable 候选排到前面（软优先），其余候选仍按优先级参与同一尝试链 —
+没配置 VL / 无可用 VL 时纯优先级正常调用。历史负载是否被目标模型接受由
+模型/provider 自身处理，网关不解析。vision-capable 判定源是模型本体（本地
 models.d model_type=vl → RuntimeView.local_vision；云 supports_vision
-=True），池候选 features 字段退役（读时容忍，不参与路由）。tools/
-stream/structured 不建模（准入原则下恒真）。无「跳过 VL」规则：无图
-请求纯优先级，VL 排最前就全接。
+=True；None=未知=无偏好），池候选 features 字段退役（读时容忍，不参与
+路由）。tools/stream/structured 不建模（准入原则下恒真）。
 
 排除原因（CandidateDecision.reason）：
   location_not_allowed  候选位置不在池 allowed_locations
   no_evidence           协议证据不足（UNKNOWN/FAILED/STALE，或 DECLARED 而池未接受）
-  feature_unsupported   带图请求但候选模型非 vision-capable（模型本体未
-                        声明视觉；detail 给出自解释说明）
   local_not_ready       本地候选未激活（ready_only：只选已启动端口，绝不自动启动）
   cloud_model_missing   云模型未在发现列表中
   cooldown              端点冷却中（P2 注入，见 pool_forward.CooldownStore）
@@ -23,8 +23,8 @@ stream/structured 不建模（准入原则下恒真）。无「跳过 VL」规�
 
 错误（Selection.error）：
   pool_disabled          池未启用
-  no_ready_target        有协议/视觉兼容候选但全部未就绪
-  no_compatible_target   无协议/视觉兼容候选
+  no_ready_target        有协议兼容候选但全部未就绪
+  no_compatible_target   无协议兼容候选
   unknown_pool           池不存在（dispatch 层产生，本函数不返回）
 """
 
@@ -57,9 +57,6 @@ class CandidateDecision:
     candidate_id: str
     included: bool
     reason: str
-    # feature_unsupported 的自解释明细（7.9.0：视觉语义）
-    # 其余原因为空串
-    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,8 +68,7 @@ class Selection:
     # P2：全部入选候选（按 priority,id 升序），供回退循环按序尝试
     ordered: tuple[ResolvedCandidate, ...] = ()
     # 静态兼容（含跨位置过滤后的 home 位置约束）的候选数 — 与当前就绪状态
-    # 无关。不可迁移历史守卫用它判断「请求是否可能在多目标间迁移」，
-    # 不得用 len(ordered)（就绪数会随冷却/宕机波动，终审 #3）
+    # 无关（7.10.0 起仅观测用，路由决策不再依赖它）
     compatible_count: int = 0
 
 
@@ -105,25 +101,20 @@ def _vision_capable(resolved: ResolvedCandidate,
 
 
 def _static_reason(resolved: ResolvedCandidate, pool, req: RequestRequirements,
-                   runtime: RuntimeView) -> tuple[str | None, str]:
-    """静态兼容检查（位置/协议证据/视觉能力）。(None, "") = 兼容。
+                   runtime: RuntimeView) -> str | None:
+    """静态兼容检查（位置/协议证据）。None = 兼容。
 
-    与就绪/冷却无关 — 这层结果决定 home 位置与 compatible_count，
-    必须先于任何运行时状态过滤计算（终审 #2/#3）。
-    返回 (reason, detail)：detail 仅 feature_unsupported 非空（自解释）。
+    与就绪/冷却/视觉无关 — 视觉只是排序偏好（select 内的排序键），
+    这层结果决定 home 位置与 compatible_count，必须先于任何运行时
+    状态过滤计算（终审 #2/#3）。
     """
     cand = resolved.candidate
     location = "local" if cand.kind == "local" else "cloud"
     if location not in pool.allowed_locations:
-        return "location_not_allowed", ""
+        return "location_not_allowed"
     if not _evidence_ok(resolved, req.protocol, pool.accept_declared):
-        return "no_evidence", ""
-    # 7.9.0：带图请求只在 vision-capable 候选中路由。能力判定源 =
-    # 模型本体（local_vision / supports_vision），与池候选声明无关。
-    if req.vision and _vision_capable(resolved, runtime) is False:
-        return ("feature_unsupported",
-                "request requires vision; model is not vision-capable")
-    return None, ""
+        return "no_evidence"
+    return None
 
 
 def select(pool_snap: PoolSnapshot, req: RequestRequirements,
@@ -138,9 +129,15 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
     had_protocol_compatible = False
     compatible_count = 0
 
-    # 确定性：按 (priority, id) 升序，不信任调用方传入顺序
-    ordered = sorted(pool_snap.candidates,
-                     key=lambda r: (r.candidate.priority, r.candidate.id))
+    # 确定性排序，不信任调用方传入顺序。7.10.0：带图请求把
+    # vision-capable 候选（判定源 = 模型本体，None=未知=无偏好）软优先
+    # 排到前面，其余候选仍按优先级参与同一尝试链 — 没配置 VL /
+    # 无可用 VL 时纯优先级正常调用
+    ordered = sorted(
+        pool_snap.candidates,
+        key=lambda r: (not (req.vision
+                            and _vision_capable(r, runtime) is True),
+                       r.candidate.priority, r.candidate.id))
     static_reasons = {r.candidate.id: _static_reason(r, pool, req, runtime)
                       for r in ordered}
 
@@ -150,14 +147,14 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
     home_loc = None
     if not pool.allow_cross_location:
         for resolved in ordered:
-            if static_reasons[resolved.candidate.id][0] is None:
+            if static_reasons[resolved.candidate.id] is None:
                 home_loc = "local" if resolved.candidate.kind == "local" else "cloud"
                 break
 
     for resolved in ordered:
         cand = resolved.candidate
         loc = "local" if cand.kind == "local" else "cloud"
-        sreason, sdetail = static_reasons[cand.id]
+        sreason = static_reasons[cand.id]
         if sreason is not None:
             reason = sreason
         elif home_loc is not None and loc != home_loc:
@@ -173,17 +170,16 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
             else:
                 reason = "ok"
 
-        # 「协议兼容但未就绪」才有 no_ready_target；功能不匹配属兼容性问题
-        # （no_compatible_target），不算未就绪。cross_location_disabled 的
-        # 候选协议/功能均兼容，只是位置被策略关掉 — 计入未就绪类
+        # 「协议兼容但未就绪」才有 no_ready_target。
+        # cross_location_disabled 的候选协议兼容，只是位置被策略关掉 —
+        # 计入未就绪类
         if reason in ("local_not_ready", "cloud_model_missing", "cooldown",
                       "cross_location_disabled"):
             had_protocol_compatible = True
 
         included = reason == "ok"
         decisions.append(CandidateDecision(candidate_id=cand.id,
-                                           included=included, reason=reason,
-                                           detail=sdetail))
+                                           included=included, reason=reason))
         if included and chosen is None:
             chosen = resolved
         if included:

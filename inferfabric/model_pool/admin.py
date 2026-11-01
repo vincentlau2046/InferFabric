@@ -127,7 +127,7 @@ def _selection_view(sel) -> dict:
         "chosen": sel.chosen.candidate.id if sel.chosen else None,
         "error": sel.error,
         "decisions": [{"id": d.candidate_id, "included": d.included,
-                       "reason": d.reason, "detail": d.detail}
+                       "reason": d.reason}
                       for d in sel.decisions],
     }
 

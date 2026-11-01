@@ -141,10 +141,13 @@ class TestEvidenceRules:
 
 
 class TestVisionFiltering:
-    """7.9.0：能力归模型，池归优先级。vision 是唯一请求感知维度 —
+    """7.10.0：vision 从「排除维度」降为「排序偏好」。带图请求把
+    vision-capable 候选排到前面（软优先），其余候选仍按优先级参与
+    同一尝试链 — 没有配置 VL / 无可用 VL 时纯优先级正常调用。
     vision-capable 判定源 = 模型本体（本地 RuntimeView.local_vision ←
-    models.d model_type=vl；云 cloud_models[key].supports_vision=True）。
-    池候选 features 字段退役：读时容忍，不构成任何路由行为。
+    models.d model_type=vl；云 cloud_models[key].supports_vision=True）；
+    None（未知）不构成偏好。池候选 features 字段退役：读时容忍，
+    不构成任何路由行为。是否真支持由模型/provider 自身处理。
     """
 
     def test_vision_request_routes_to_vision_capable_local(self):
@@ -163,8 +166,9 @@ class TestVisionFiltering:
                          supports_vision=True)}))
         assert sel.chosen.candidate.id == "c1"
 
-    def test_vision_request_excludes_non_vision_by_priority_fallthrough(self):
-        # 文本候选 p1、视觉候选 p2：带图请求越过 p1 落到 p2
+    def test_vision_request_prefers_vision_capable_over_priority(self):
+        # 文本候选 p1、视觉候选 p2：带图请求软优先 VL → 选中 l2，
+        # 但 t1 仍按优先级参与同一尝试链（ordered 里排其后）
         cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
                  _cand("l2", 2, kind="local", model_name="qwen-vl")]
         snap = _pool_snap(cands)
@@ -172,8 +176,19 @@ class TestVisionFiltering:
                      _rt(*cands, active={"qwen-txt", "qwen-vl"},
                          local_vision={"qwen-vl"}))
         assert sel.chosen.candidate.id == "l2"
-        assert ({d.candidate_id: d.reason for d in sel.decisions}["t1"]
-                == "feature_unsupported")
+        assert ({d.candidate_id: (d.reason, d.included) for d in sel.decisions}
+                ["t1"] == ("ok", True))
+        assert ([r.candidate.id for r in sel.ordered] == ["l2", "t1"])
+
+    def test_vision_request_without_vision_capable_routes_by_priority(self):
+        # 无配置 VL / 无可用 VL：纯优先级正常调用（不排除、不报错）
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
+        snap = _pool_snap(cands)
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt"}))
+        assert sel.chosen.candidate.id == "t1"
+        assert sel.error is None
+        assert sel.ordered[0].candidate.id == "t1"
 
     def test_no_vision_request_pure_priority_vl_at_p1_serves_all(self):
         # 用户裁决：VL 排最前就全接 — 无图请求不跳过 VL
@@ -198,34 +213,17 @@ class TestVisionFiltering:
                 ["l2"] == ("ok", True))
         assert sel.compatible_count == 2
 
-    def test_vision_request_no_vision_capable_is_compatibility_error(self):
-        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
-        snap = _pool_snap(cands)
-        sel = select(snap, _req(vision=True),
-                     _rt(*cands, active={"qwen-txt"}))
-        assert sel.chosen is None
-        assert sel.decisions[0].reason == "feature_unsupported"
-        assert sel.error == "no_compatible_target"
-
-    def test_vision_unsupported_detail_is_self_explaining(self):
-        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt")]
-        snap = _pool_snap(cands)
-        sel = select(snap, _req(vision=True),
-                     _rt(*cands, active={"qwen-txt"}))
-        d = sel.decisions[0]
-        assert d.reason == "feature_unsupported"
-        assert "vision" in d.detail and "not vision-capable" in d.detail
-
-    def test_cloud_supports_vision_unset_is_not_vision_capable(self):
-        # 未声明 supports_vision（None）≠ 能看图 — vision 必须显式声明
+    def test_cloud_supports_vision_unknown_gets_no_preference(self):
+        # 未声明 supports_vision（None）= 能力未知 → 不构成偏好，
+        # 按优先级正常调用（是否支持由 provider 自身处理）
         from types import SimpleNamespace
         cand = _cand("c1", 1, kind="cloud", provider="prov", model_id="m1")
         snap = _pool_snap([cand])
         sel = select(snap, _req(vision=True),
                      _rt(cand, cloud={"prov/m1": SimpleNamespace(
                          supports_vision=None)}))
-        assert sel.chosen is None
-        assert sel.decisions[0].reason == "feature_unsupported"
+        assert sel.chosen.candidate.id == "c1"
+        assert sel.error is None
 
     def test_undiscovered_cloud_candidate_not_statically_vision_excluded(self):
         # 云模型未发现 → 视觉能力未知，不做静态视觉判定；
@@ -250,30 +248,33 @@ class TestVisionFiltering:
 
     def test_pool_candidate_features_field_is_ignored(self):
         # 存量 YAML 的候选 features（如遗留 [vision]）读时容忍、
-        # 不构成任何路由行为：声明 [vision] 但模型本体无视觉 → 带图仍拒；
-        # 未声明但模型本体有视觉 → 带图照接
+        # 不构成任何路由行为：TXT 模型声明 [vision] 不构成视觉偏好；
+        # 未声明但模型本体有视觉 → 照样获得 VL 软优先
         c1 = _cand("legacy", 1, kind="local", model_name="qwen-txt",
                    features=("vision",))
         snap = _pool_snap([c1])
         sel = select(snap, _req(vision=True),
                      _rt(c1, active={"qwen-txt"}, local_vision={"qwen-vl"}))
-        assert sel.chosen is None
+        assert sel.chosen.candidate.id == "legacy"
         c2 = _cand("plain", 1, kind="local", model_name="qwen-vl", features=())
         snap2 = _pool_snap([c2])
         sel2 = select(snap2, _req(vision=True),
                       _rt(c2, active={"qwen-vl"}, local_vision={"qwen-vl"}))
         assert sel2.chosen.candidate.id == "plain"
 
-    def test_vision_excluded_counts_as_no_ready_not(self):
-        # 视觉排除是静态兼容性问题（no_compatible_target），即使其他
-        # 候选因未就绪被排除 — 与 7.8.0 错误码映射一致
+    def test_vision_no_longer_affects_error_classification(self):
+        # 7.10.0：带图请求不再是兼容性维度 — 未就绪就是未就绪
+        # （local_not_ready），错误码与视觉无关
         cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
                  _cand("l2", 2, kind="local", model_name="qwen-vl")]
         snap = _pool_snap(cands)
         sel = select(snap, _req(vision=True),
                      _rt(*cands, active=set(), local_vision={"qwen-vl"}))
-        # l2 视觉兼容但未就绪 → no_ready_target（不是 no_compatible）
+        reasons = {d.candidate_id: d.reason for d in sel.decisions}
+        assert reasons["t1"] == "local_not_ready"
+        assert reasons["l2"] == "local_not_ready"
         assert sel.error == "no_ready_target"
+        assert sel.compatible_count == 2
 
 
 class TestLocationAndReadiness:

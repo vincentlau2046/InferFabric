@@ -376,9 +376,11 @@ class TestPoolChatDispatch:
         assert body["status"] == "pool_disabled"
         assert any(k.lower() == "retry-after" for k in (hdrs or {}))
 
-    def test_vision_request_no_vision_capable_candidate_400(self, registry):
-        # 7.9.0：池内候选模型本体均无视觉（本地 llm / 云未声明 supports_vision）
-        # → 带图请求 400；遗留 features 声明不构成任何路由行为
+    def test_vision_request_no_vision_capable_routes_by_priority(
+            self, registry, forwarded):
+        # 7.10.0：池内候选模型本体均无视觉（本地 llm / 云未声明
+        # supports_vision）→ 带图请求按优先级正常调用 p1（是否支持由
+        # 模型/provider 自身处理）；遗留 features 声明不构成任何路由行为
         cfg = _raw_config()
         for c in cfg["pools"]["fast"]["candidates"]:
             c["features"] = ["vision"]   # 遗留声明 — 读时忽略
@@ -396,20 +398,55 @@ class TestPoolChatDispatch:
             ]}]}
 
         assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        assert body["status"] == "no_compatible_target"
-        # 自解释：候选 id + 视觉语义明细 + 模型侧修复指引
-        assert "loc: feature_unsupported" in body["error"]
-        assert "not vision-capable" in body["error"]
-        assert "no vision-capable candidate" in body["error"]
+        assert len(forwarded) == 1
+        assert forwarded[0]["port"] == 8101   # 纯优先级 → 本地 p1
+        assert h.sent == []                   # 无错误信封
 
-    def test_vision_metadata_failure_does_not_reroute_to_cloud(
+    def test_vision_metadata_failure_unknown_local_routes_by_priority(
             self, registry, forwarded, monkeypatch):
-        # 安全评审（fail-open 路由）：mgr.list_models 异常不得把全部本地
-        # 候选判成「确认无视觉」→ allow_cross_location 下带图请求被元数据
-        # 故障改道到云（图像出网）。元数据不可用 = 未知（同云未发现语义）
-        # → 静态视觉判定跳过，按优先级走本地 p1
+        # 7.10.0：mgr.list_models 异常 = 本地视觉能力全部未知（None 三态）
+        # → 不构成偏好也不排除，云未声明（None）同样无偏好 → 纯优先级
+        # 走本地 p1（元数据故障不得改变路由结果）
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        cloud_calls = []
+
+        def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
+                       original_model=None, suppress_client_errors=False, timeout=None):
+            cloud_calls.append(data["model"])
+            return SimpleNamespace(status=200, usage={}, ttft_ms=None,
+                                   duration_ms=1.0, error=None)
+
+        monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=None)},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1")})
+
+        def boom():
+            raise RuntimeError("models.d unreadable")
+        monkeypatch.setattr(pm.mgr, "list_models", boom)
+
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+            ]}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        assert len(forwarded) == 1
+        assert forwarded[0]["port"] == 8101   # 纯优先级 → 本地 p1
+        assert cloud_calls == []
+
+    def test_vision_prefers_declared_cloud_vl_over_unknown_local(
+            self, registry, forwarded, monkeypatch):
+        # 7.10.0（用户裁决「VL 优先路由 VL」）：本地视觉元数据故障（未知）
+        # 时，唯一已知 vision-capable 的云候选获得软优先 — 带图请求合法
+        # 落云（这是偏好而非元数据故障改道：判定源是云模型本体声明）
         cfg = _raw_config()
         cfg["pools"]["fast"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
@@ -441,9 +478,8 @@ class TestPoolChatDispatch:
             ]}]}
 
         assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
-        assert len(forwarded) == 1
-        assert forwarded[0]["port"] == 8101   # 本地 p1，未被元数据故障排除
-        assert cloud_calls == []              # 不得改道云
+        assert cloud_calls == ["cloud-m"]      # 已知 VL 云候选软优先
+        assert forwarded == []
 
     def test_vision_request_routes_to_vision_capable_candidate(self, registry, forwarded):
         # 带图请求越过 p1 文本候选，落到 p2 的 VL 本地模型（model_type=vl）
@@ -492,46 +528,17 @@ class TestPoolChatDispatch:
         assert len(forwarded) == 1
         assert forwarded[0]["port"] == 8102   # p1 = VL，纯文本也由它服务
 
-    def test_feature_unsupported_400_message_self_explaining(self, registry):
-        # 400 消息自解释：候选 id + 视觉明细 + 模型侧修复指引；日志 error 码不变
-        cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"] = [
-            {"id": "cld", "priority": 1, "kind": "cloud",
-             "provider": "prov", "model_id": "cloud-m",
-             "declared_protocols": ["openai"]}]
-        registry.update(cfg, expected_revision=registry.snapshot().revision)
-        pm = FakePM(registry, cloud_models={"prov/cloud-m": SimpleNamespace(
-            supports_vision=None)})
-        h = FakeHandler()
-        data = {"model": "iff/fast", "messages": [
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
-            ]}]}
-
-        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
-        status, body, _ = h.sent[-1]
-        assert status == 400
-        msg = body["error"]
-        assert "No eligible target for iff/fast" in msg
-        assert ("cld: feature_unsupported "
-                "[request requires vision; model is not vision-capable]") in msg
-        assert "no vision-capable candidate" in msg
-        assert "云面板" in msg
-        assert pm.logger.entries[-1].error == "no_compatible_target"
-
-    def test_no_ready_target_message_has_no_vision_suffix(self, registry):
-        # cross-review M-3：池内有 vision-capable 候选但未就绪 → 503
-        # no_ready_target，消息不得追加「池内无视觉候选」声明指引后缀
-        # （事实错误死胡同 — VL 候选就在决策表里）。文本候选的
-        # feature_unsupported 仍须逐候选列出。
+    def test_no_ready_target_message_lists_readiness_reasons(self, registry):
+        # 7.10.0：视觉不再是排除维度 — 503 no_ready_target 消息只列
+        # 就绪类理由，不含 feature_unsupported / 视觉指引后缀
         cfg = _raw_config()
         cfg["pools"]["fast"]["candidates"].append(
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
         cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
         registry.update(cfg, expected_revision=registry.snapshot().revision)
-        # VL 未激活（active 只含 qwen-small）→ vlloc local_not_ready
-        pm = FakePM(registry, active={"qwen-small"},
+        # 全部本地候选未激活 → no_ready_target
+        pm = FakePM(registry, active=set(),
                     local_models={"qwen-small": _local_model()},
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
@@ -546,8 +553,9 @@ class TestPoolChatDispatch:
         assert status == 503
         assert body["status"] == "no_ready_target"
         msg = body["error"]
+        assert "loc: local_not_ready" in msg, msg
         assert "vlloc: local_not_ready" in msg, msg
-        assert "feature_unsupported" in msg, msg
+        assert "feature_unsupported" not in msg, msg
         assert "no vision-capable candidate in this pool" not in msg, msg
 
     def test_tools_request_routed_but_normalized(self, registry, forwarded):

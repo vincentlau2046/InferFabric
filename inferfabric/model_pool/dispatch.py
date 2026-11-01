@@ -134,8 +134,7 @@ def runtime_view(pm) -> RuntimeView:
                 local_vision.add(served)
                 # 双收 name+served_name（同 active_services 策略）：手写
                 # YAML 可用内部 name 引用候选 — 只收 served 会让带图请求
-                # 把该 VL 候选误判 feature_unsupported，且指引指向已声明
-                # 过的 models.d（死胡同，cross-review M-2）
+                # 拿不到该 VL 候选的视觉偏好（cross-review M-2 语义延续）
                 if served != name:
                     local_vision.add(name)
         except Exception:
@@ -165,40 +164,6 @@ def _ensure_cloud_discovered(pm, pool_snap) -> None:
     except Exception as e:
         log.warning("cloud discovery failed on pool path (%s) — "
                     "cloud candidates use last known state", type(e).__name__)
-
-
-def _has_non_migratable_history(protocol: str, data: dict) -> bool:
-    """spec §7：不可迁移的历史（无原目标归属时拒绝跨候选迁移）。
-
-    - OpenAI：assistant.tool_calls / role:tool 消息（工具调用历史）
-    - Anthropic：带 signature 的 thinking 块、redacted_thinking 块、
-      tool_use/tool_result 块
-    单候选池不受影响（无从迁移 — 同一物理目标内重试是安全的）。
-    """
-    msgs = data.get("messages")
-    if not isinstance(msgs, list):
-        return False
-    for msg in msgs:
-        if not isinstance(msg, dict):
-            continue
-        if protocol == "openai":
-            if msg.get("role") == "tool" or msg.get("tool_calls"):
-                return True
-        else:
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "thinking" and block.get("signature"):
-                    return True
-                # redacted_thinking 是加密归属块：换目标即校验失败（终审 #3）
-                if block.get("type") == "redacted_thinking":
-                    return True
-                if block.get("type") in ("tool_use", "tool_result"):
-                    return True
-    return False
 
 
 def _agent_kwargs(handler) -> dict:
@@ -248,29 +213,16 @@ def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, messa
 def _no_eligible_message(model: str, sel) -> str:
     """no eligible target 的自解释消息（OpenAI/Anthropic 共用）。
 
-    7.9.0：feature_unsupported = 池内无 vision-capable 候选 — 指引指向
-    模型侧声明入口（能力归模型），不指向池编辑器。
+    逐候选列出排除理由；7.10.0 起视觉不再是排除维度，消息只含
+    位置/协议/就绪类理由。
     """
     parts = []
     for d in sel.decisions:
         if d.included:
             continue
-        s = f"{d.candidate_id}: {d.reason}"
-        if d.detail:
-            s += f" [{d.detail}]"
-        parts.append(s)
-    msg = f"No eligible target for {model} ({', '.join(parts) or 'no candidates'})"
-    # 声明指引后缀只在「兼容性 400」时追加：no_ready_target（503）时池内
-    # 有 vision-capable 候选只是未就绪，说「池内无视觉候选」是事实错误的
-    # 死胡同（cross-review M-3）
-    if sel.error == "no_compatible_target" and any(
-            (not d.included) and d.reason == "feature_unsupported"
-            for d in sel.decisions):
-        msg += (" — no vision-capable candidate in this pool; declare the "
-                "model's vision capability (local: models.d model_type=vl; "
-                "cloud: 云面板 → 模型 → 视觉 chip) or add a vision-capable "
-                "candidate to the pool")
-    return msg
+        parts.append(f"{d.candidate_id}: {d.reason}")
+    return (f"No eligible target for {model} "
+            f"({', '.join(parts) or 'no candidates'})")
 
 
 def handle_pool_chat(handler, pm, data, model) -> bool:
@@ -318,17 +270,8 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
             message=_no_eligible_message(model, sel))
         return True
 
-    # spec §7：不可迁移历史 + 多候选可服务 → 拒绝（无从安全迁移）。
-    # 用静态兼容数而非当前就绪数：冷却/宕机中的备用随时可能恢复成
-    # 迁移目标，就绪数波动不得改变拒绝决策（终审 #3）
-    if sel.compatible_count > 1 and _has_non_migratable_history("openai", data):
-        _send_pool_error_openai(
-            handler, pm, req_id=req_id, key_name=key_name, model=model,
-            code="no_compatible_target",
-            message=f"Request for {model} carries tool-call history and the pool "
-                    f"has multiple eligible targets — refusing to migrate it "
-                    f"(session affinity is not yet supported)")
-        return True
+    # 7.10.0：用户裁决 — 网关不解析会话历史（不可迁移历史守卫已删）。
+    # 历史块是否被目标模型接受由模型/provider 自身处理。
 
     # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
     # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
@@ -436,16 +379,7 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
             message=_no_eligible_message(model, sel))
         return True
 
-    # spec §7：不可迁移历史（thinking 签名/tool_use/tool_result）+ 多候选
-    # 可服务 → 拒绝（签名只对生成它的目标有效）
-    if sel.compatible_count > 1 and _has_non_migratable_history("anthropic", data):
-        _send_pool_error_anthropic(
-            handler, pm, req_id=req_id, key_name=key_name, model=model,
-            code="no_compatible_target",
-            message=f"Request for {model} carries non-migratable history "
-                    f"(thinking signatures / tool results) and the pool has "
-                    f"multiple eligible targets — refusing to migrate it")
-        return True
+    # 7.10.0：用户裁决 — 网关不解析会话历史（不可迁移历史守卫已删）。
 
     # 统一限流（同 OpenAI 路径；Anthropic 直连路径带 30s 等待语义，保持一致）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
