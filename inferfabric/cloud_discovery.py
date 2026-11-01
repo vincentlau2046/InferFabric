@@ -356,18 +356,22 @@ class CloudDiscovery:
                     if m.model_id not in merged:
                         merged[m.model_id] = m
                     merged[f"{m.provider}/{m.model_id}"] = m
-                # 白名单模型缺席成功 /models：保留（白名单赢）+ 每转态单次告警
-                fresh_ids = {m.model_id for m in models}
-                absent = self._known_absent.setdefault(name, set())
-                for mid in cfg.enabled_models:
-                    if mid in fresh_ids:
-                        absent.discard(mid)
-                    elif mid not in absent:
-                        log.warning(
-                            "Provider %s: whitelisted model '%s' absent from /models "
-                            "— kept routable (whitelist wins; uncheck in panel to remove)",
-                            name, mid)
-                        absent.add(mid)
+                # 白名单模型缺席成功 /models：保留（白名单赢）+ 每转态单次告警。
+                # cross-review M-3：无 openai_base 的 provider 根本不抓取
+                # /models（_discover_provider 返回 []），其白名单模型缺席是
+                # 永久配置状态而非转态 — 不发误导性「absent from /models」告警。
+                if cfg.openai_base:
+                    fresh_ids = {m.model_id for m in models}
+                    absent = self._known_absent.setdefault(name, set())
+                    for mid in cfg.enabled_models:
+                        if mid in fresh_ids:
+                            absent.discard(mid)
+                        elif mid not in absent:
+                            log.warning(
+                                "Provider %s: whitelisted model '%s' absent from /models "
+                                "— kept routable (whitelist wins; uncheck in panel to remove)",
+                                name, mid)
+                            absent.add(mid)
                 log.info("Provider %s: discovered %d models (%d routed)", name, len(models), routed)
             except Exception as e:
                 log.warning("Provider %s discovery failed: %s", name, e)
@@ -380,6 +384,13 @@ class CloudDiscovery:
                 k: v for k, v in merged.items()
                 if (pcfg := self._providers.get(v.provider)) is not None
                 and pcfg.enabled
+                # cross-review I-2：per-model 对账 — 抓取按 OLD 白名单过滤、
+                # 耗时可达分钟级，期间用户可能已取消勾选/删 spec + reload。
+                # 发布只查 provider 级会让显式撤销延迟一轮轮询（≤1h）生效。
+                and (v.model_id in pcfg.enabled_models
+                     or v.model_id in {(spec or {}).get("model_id") or mk
+                                       for mk, spec in pcfg.model_specs.items()}
+                     or k in pcfg.model_specs)
             }
             # floor 注册：specs ∪ 白名单（短键 first-wins；白名单兜底复用旧条目元数据）
             self._register_spec_only_models(merged)
@@ -593,29 +604,44 @@ class CloudDiscovery:
         # enabled provider）— 旧元数据仅在条目仍属 floor 时复用；YAML 取消
         # 勾选/删 spec 即时撤销（不等下一轮轮询）。锁序保持 _save_lock →
         # _models_lock（_save_lock 已释放，无新嵌套）。
-        with self._models_lock:
-            for name in list(self._candidates):
-                if name not in self._providers:
-                    self._candidates.pop(name, None)
-            for name in list(self._known_absent):
-                if name not in self._providers:
-                    self._known_absent.pop(name, None)
-            reconciled: dict[str, CloudModel] = {}
-            for name, cfg in self._providers.items():
-                if not cfg.enabled:
-                    continue
-                spec_ids = {(spec or {}).get("model_id") or mid
-                            for mid, spec in cfg.model_specs.items()}
-                for k, v in self._cloud_models.items():
-                    if v.provider != name:
+        if self._config_corrupt or not self._providers:
+            # cross-review I-1：载入失败/零 provider 是意外状态而非显式用户
+            # 移除 — 不破坏性清空注册表（与 discover_all 的瞬态守卫对齐）。
+            # 事故类防线：corrupt SIGHUP 不得把全部云模型打成 404。
+            log.warning("CloudDiscovery.reload: config corrupt or no providers "
+                        "— keeping previous %d models", len(self._cloud_models))
+        else:
+            with self._models_lock:
+                for name in list(self._candidates):
+                    if name not in self._providers:
+                        self._candidates.pop(name, None)
+                for name in list(self._known_absent):
+                    pcfg = self._providers.get(name)
+                    if pcfg is None or not pcfg.enabled:
+                        # 删除/禁用 provider：absent 状态随之失效（重新启用后
+                        # 首轮发现按新转态重新告警）
+                        self._known_absent.pop(name, None)
+                    else:
+                        # cross-review M-4：白名单缩减同步收敛 absent — 否则
+                        # 取消勾选再重新勾选后，新一轮缺席转态被陈旧集合吞掉
+                        self._known_absent[name] = (
+                            self._known_absent[name] & set(pcfg.enabled_models))
+                reconciled: dict[str, CloudModel] = {}
+                for name, cfg in self._providers.items():
+                    if not cfg.enabled:
                         continue
-                    if (v.model_id in cfg.enabled_models
-                            or v.model_id in spec_ids
-                            or k in cfg.model_specs):
-                        reconciled[k] = v
-            self._cloud_models = reconciled
-            self._register_spec_only_models(self._cloud_models)
-            self._register_whitelist_models(self._cloud_models)
+                    spec_ids = {(spec or {}).get("model_id") or mid
+                                for mid, spec in cfg.model_specs.items()}
+                    for k, v in self._cloud_models.items():
+                        if v.provider != name:
+                            continue
+                        if (v.model_id in cfg.enabled_models
+                                or v.model_id in spec_ids
+                                or k in cfg.model_specs):
+                            reconciled[k] = v
+                self._cloud_models = reconciled
+                self._register_spec_only_models(self._cloud_models)
+                self._register_whitelist_models(self._cloud_models)
         # 7.9.1 轮询自愈：reload 已先 stop_polling — 末尾以新 interval 重启
         # （幂等：线程存活即返回）。SIGHUP 路径（config_reloader 只调 reload()）
         # 由此自动恢复轮询；handler 的显式 start_polling() 成为 no-op。

@@ -638,6 +638,31 @@ class TestShrunkenFetchFloor:
             cd.discover_all()
             assert _absent_count() == 2
 
+    def test_no_openai_base_provider_skips_absent_warning(
+            self, tmp_path, caplog):
+        """cross-review M-3：无 openai_base（anthropic-only）provider 根本不抓取
+        /models — 其白名单模型不应触发「absent from /models」误导性告警。
+        """
+        import logging
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "anthropic-only": {
+                    "api_key": "sk-a",
+                    "anthropic_base": "https://example.com/anthropic/v1",
+                    "enabled_models": ["claude-x"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        with caplog.at_level(logging.WARNING, logger="inferfabric.cloud_discovery"):
+            cd.discover_all()
+        absent_warnings = [r for r in caplog.records
+                           if "absent from /models" in r.getMessage()]
+        assert not absent_warnings
+        # floor 语义不变：仍可路由
+        assert cd.resolve_route("claude-x", set()) == "cloud:anthropic-only"
+
 
 class TestCloudReloadReconciliation:
     """7.9.1：reload() 调和注册表 + 重启轮询（SIGHUP 路径修复）。
@@ -763,6 +788,87 @@ class TestCloudReloadReconciliation:
             assert cd._poll_thread is t1
         finally:
             cd.stop_polling()
+
+    def test_reload_corrupt_yaml_keeps_registry(self, tmp_path):
+        """cross-review I-1：损坏 YAML 的 reload 不得破坏性清空注册表。
+
+        612a47f 的回归：reload 先清 _providers，_load_config 解析失败后
+        _providers 保持空 → 严格 floor 调和把 _cloud_models 清成 {} → 全部
+        云模型 404 且轮询无法重启（0 providers），比事故前（corrupt reload
+        保留旧注册表照常工作）更糟。与 discover_all 的瞬态守卫对齐：
+        providers 空/载入失败 → 保旧 + 告警。
+        """
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, self._yaml_v1(tmp_path))
+        cd = CloudDiscovery(p)
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+        reg_before = dict(cd.cloud_models)
+
+        p.write_text("providers: [unclosed")  # YAML 解析失败
+        try:
+            cd.reload()
+        finally:
+            cd.stop_polling()
+        assert cd._config_corrupt is True
+        # 注册表存活 — corrupt reload 是意外，不是显式用户移除动作
+        assert cd.cloud_models == reg_before
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+        assert cd.resolve_route("k3", set()) == "cloud:prov-b"
+
+    def test_reload_shrunk_whitelist_resets_known_absent(
+            self, tmp_path, monkeypatch):
+        """cross-review M-4：reload 缩减存活 provider 白名单时 _known_absent
+        同步收敛 — 否则用户取消勾选再经 YAML 重新勾选后，新一轮缺席转态
+        被陈旧的 absent 集合吞掉（不再告警）。
+        """
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b'{"data": [{"id": "other-model"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5", "k3"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        cd.discover_all()  # 两者均缺席成功抓取 → absent = {glm-5, k3}
+        assert cd._known_absent.get("prov-a") == {"glm-5", "k3"}
+
+        # YAML 取消勾选 glm-5（保留 k3）→ reload 收敛 absent
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["k3"],
+                }
+            }
+        })
+        try:
+            cd.reload()
+        finally:
+            cd.stop_polling()
+        assert cd._known_absent.get("prov-a") == {"k3"}
+        # 用户显式移除 — 注册表同步撤销
+        assert cd.resolve_route("glm-5", set()) is None
+        assert cd.resolve_route("k3", set()) == "cloud:prov-a"
 
 
 class TestShortNameCollisionContract:
@@ -1029,3 +1135,52 @@ class TestPublishReconciliation:
         assert "b1" in reg
         assert cd.resolve_route("b1", set()) == "cloud:prov-b"
         assert "a1" in reg  # 原有 floor 不受影响
+
+    def test_publish_does_not_resurrect_model_unchecked_during_fetch(
+            self, tmp_path, monkeypatch):
+        """cross-review I-2：抓取窗口内用户取消勾选 + reload 完成 — 发布时
+        per-model 对账当前 floor，不复活已撤销的模型（F-2 的 per-model 残留）。
+
+        抓取按 OLD cfg.enabled_models 过滤（:346），耗时可达分钟级；发布若
+        只查 provider 存活+enabled，取消勾选要等下一轮轮询（≤1h）才生效 —
+        违反核心不变量（discover_all 后条目 ≡ 当前 floor）。
+        """
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+
+        def _fake_discover(cfg):
+            # 模拟抓取期间（锁外、分钟级）用户 YAML 取消勾选 + reload 完成
+            _write_yaml(p, {
+                "providers": {
+                    "prov-a": {
+                        "api_key": "sk-a",
+                        "openai_base": "http://127.0.0.1:1",
+                        "timeout": 1,
+                        "enabled_models": [],
+                    }
+                }
+            })
+            cd.reload()
+            # 抓取结果按旧白名单过滤 — 含已撤销的 glm-5
+            return [CloudModel(model_id="glm-5", provider="prov-a",
+                               discovered_at=time.time())]
+
+        monkeypatch.setattr(cd, "_discover_provider", _fake_discover)
+        try:
+            reg = cd.discover_all()
+        finally:
+            cd.stop_polling()
+        # 发布时按当前 per-model floor 对账 — 不复活已取消勾选的模型
+        assert "glm-5" not in reg and "prov-a/glm-5" not in reg
+        assert cd.resolve_route("glm-5", set()) is None
