@@ -15,7 +15,7 @@
 | runtime 冒烟 | ✅ | dev scratch `HOME`（白名单模型 + dead base）：启动即在 `GET /v1/models` 见该模型（`discovered_at: 0.0` 裸 floor）→ `POST /admin/cloud/discover` 抓取失败 → 不驱逐 + `keeping floor routable (1 whitelisted, 0 spec models)` — 事故场景端到端复现通过。注：CLAUDE.md 记载的 `IFF_DATA_DIR` 环境变量在代码中不存在（`config.py` 硬编码 `Path.home()`）— 冒烟改用 `HOME` 覆盖；文档失实待单独修 |
 | cross-review | ✅ | fresh-context subagent 全 diff 评审：核心修复正确、锁纪律合规、612a47f 两 MEDIUM 确认关闭；2 Important + 2 Minor 全修（cross-review 修复行）；1 Info 既有问题记录为已知残留 |
 | 版本 | ✅ | 7.9.1（补丁位，自主）；README 历史表已加行 |
-| 合并/部署 | 待 | ff-merge 沙箱 main → 生产 main + BatchMode push；**生产重启需用户单独授权**；重启后按 spec 部署后验证清单核验 |
+| 合并/部署 | ✅ 2026-11-02 | ff-merge + BatchMode push 完成（pre-push 钩子全量绿 + import 冒烟 v7.9.1 OK），生产 main = 33bff09；**用户授权后 00:30:54 重启上线 7.9.1**。部署后验证全过：启动 journal 见 floor 生效（Qianfan 抓取失败 → `keeping floor routable (4 spec models)`）；`/v1/models` 启动即含 glm-5；手动 discover 后仍在（glm-5/glm-5.3/glm-5.3-flash）；glm-5 `/v1/messages` 200；`absent from /models` 告警 0 条、fetch-failed 仅按次（Qianfan 永久 404，1 次/发现轮，可选运维：关其 discovery）。**用户裁决的收尾运维已执行**：`action: remove` 将 glm-5 从 spec 通道撤除（恢复白名单单一事实源，面板「取消勾选」恢复移除能力）— 撤除后 glm-5 经白名单 floor 仍可路由（7.9.1 行为在生产实证） |
 
 ## 执行裁决记录
 
