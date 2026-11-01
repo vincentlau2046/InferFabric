@@ -359,3 +359,72 @@ class TestCompatibility:
             assert cd.resolve_route(mid, local_models=set()) == "cloud:baidu-codingplan"
         # 无发现候选（discovery 关）
         assert cd.get_candidates("baidu-codingplan") == []
+
+
+class TestStartupFloor:
+    """7.9.1 启动 floor：构造即注册白名单模型（消灭重启后 404 空窗）。
+
+    缺陷：__init__ 原本只注册 specs — 白名单模型要等首次云请求的懒加载
+    发现或最多 1h 轮询才可路由（生产实例：12:18 重启 → glm-5 到 12:38
+    首次发现前不可路由）。
+    """
+
+    def test_startup_registers_whitelist_models_before_discovery(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    # dead base：任何发现都不可能成功 — 只验证构造即注册
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        # 构造完成后（未执行任何 discover）即可路由
+        assert "glm-5" in cd.cloud_models
+        assert "tathr-glm/glm-5" in cd.cloud_models
+        assert cd.cloud_models["glm-5"].discovered_at == 0.0  # 白名单声明，未实际发现
+        assert cd.resolve_route("glm-5", local_models=set()) == "cloud:tathr-glm"
+
+    def test_startup_whitelist_bare_merges_spec(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                    "models": {"glm-5": {"context_window": 128000}},
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        # 同名 spec 元数据在启动时即并入白名单条目
+        assert cd.cloud_models["glm-5"].context_window == 128000
+
+    def test_startup_whitelist_flags_from_bases(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "dual": {
+                    "api_key": "sk-test",
+                    "openai_base": "https://api.example.com/v1",
+                    "anthropic_base": "https://api.example.com/anthropic",
+                    "enabled_models": ["glm-5"],
+                },
+                "openai-only": {
+                    "api_key": "sk-test",
+                    "openai_base": "https://api2.example.com/v1",
+                    "enabled_models": ["k3"],
+                },
+            }
+        })
+        cd = CloudDiscovery(p)
+        dual = cd.cloud_models["glm-5"]
+        assert dual.openai_available is True and dual.anthropic_available is True
+        only = cd.cloud_models["k3"]
+        assert only.openai_available is True and only.anthropic_available is False

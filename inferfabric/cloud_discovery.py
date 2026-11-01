@@ -229,6 +229,8 @@ class CloudDiscovery:
             self._load_config(config_path)
             # Register spec-only models on startup so they're visible before first discover
             self._register_spec_only_models(self._cloud_models)
+            # 7.9.1: 白名单模型同样启动即注册（floor）— 消灭重启后到首次发现前的 404 空窗
+            self._register_whitelist_models(self._cloud_models)
 
     @property
     def providers(self) -> dict[str, ProviderConfig]:
