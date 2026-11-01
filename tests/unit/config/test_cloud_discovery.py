@@ -469,3 +469,93 @@ class TestDiscoverProviderFailureContract:
         cfg = self._cfg(openai_base="")
         # 永久配置状态（未配置 openai base）→ 空 list，不触发失败告警
         assert cd._discover_provider(cfg) == []
+
+
+class TestFetchFailureFloor:
+    """7.9.1 P0 事故修复：抓取失败不逐出白名单模型（floor = specs ∪ 白名单）。
+
+    事故复现（2026-11-01 生产）：tathr-glm /models 600s 超时 → discover_all
+    整表替换把白名单模型 glm-5 静默逐出 → 404 直到手动「模型发现」。
+    floor 语义：单一 provider 抓取失败只减抓取贡献，不减 floor。
+    """
+
+    def _write_cfg(self, tmp_path, mock_server):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    "openai_base": f"http://127.0.0.1:{mock_server}",
+                    "enabled_models": ["glm-5"],
+                },
+                "specprov": {
+                    "discovery": {"enabled": False},
+                    "openai_base": "https://api.example.com/v1",
+                    "models": {"x1": {"model_id": "x1"}},
+                },
+            }
+        })
+        return CloudDiscovery(p)
+
+    def _fail_urlopen(self, monkeypatch):
+        import urllib.error
+        from inferfabric import cloud_discovery as cdm
+
+        def _fake_urlopen(req, timeout=None):
+            raise urllib.error.URLError("the handshake operation timed out")
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+
+    def test_fetch_failure_retains_whitelist_models(self, tmp_path, mock_server, monkeypatch):
+        cd = self._write_cfg(tmp_path, mock_server)
+        # 第一次发现成功（mock server 返回 glm-5，在白名单内）
+        reg = cd.discover_all()
+        assert "glm-5" in reg
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+
+        # 第二轮：抓取失败 — 事故复现点
+        self._fail_urlopen(monkeypatch)
+        reg2 = cd.discover_all()
+        # 白名单模型保留（RED：现状被整表替换逐出）
+        assert "glm-5" in reg2
+        assert "tathr-glm/glm-5" in reg2
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+        # 其他 provider 的 spec 模型完好
+        assert "x1" in reg2 and "specprov/x1" in reg2
+        assert cd.cloud_models["glm-5"].provider == "tathr-glm"
+
+    def test_fetch_failure_retains_old_metadata(self, tmp_path, mock_server, monkeypatch):
+        cd = self._write_cfg(tmp_path, mock_server)
+        cd.discover_all()  # 成功发现 → glm-5 discovered_at > 0
+        assert cd.cloud_models["glm-5"].discovered_at > 0
+
+        self._fail_urlopen(monkeypatch)
+        reg2 = cd.discover_all()
+        # 保留的是旧条目（带元数据），不是裸重建
+        assert reg2["glm-5"].discovered_at > 0
+
+    def test_fetch_failure_logs_retained_count(self, tmp_path, mock_server, monkeypatch, caplog):
+        import logging
+        cd = self._write_cfg(tmp_path, mock_server)
+        cd.discover_all()
+        self._fail_urlopen(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger="inferfabric.cloud_discovery"):
+            cd.discover_all()
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("tathr-glm" in m and "1 whitelisted" in m for m in msgs), msgs
+
+    def test_fetch_failure_no_floor_stays_empty(self, tmp_path, monkeypatch):
+        """无白名单无 spec 的 provider 抓取失败 → 注册表为空（guard 语义不变）。"""
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "bare-provider": {
+                    "api_key": "sk-test",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        models = cd.discover_all()
+        assert len(models) == 0

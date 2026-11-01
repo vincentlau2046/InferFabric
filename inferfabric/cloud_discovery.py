@@ -212,6 +212,9 @@ class CloudDiscovery:
         # v6.1 Phase 1: 发现候选快照（白名单过滤前的上游 /models 结果，供面板勾选；
         # 不持久化 —— 重启后「刷新发现」/轮询自动补回）
         self._candidates: dict[str, list[CloudModel]] = {}
+        # 7.9.1: 白名单模型缺席成功 /models 的「已告警」集合（每转态单次告警，
+        # 模型回归即清除；仅 discover_all 读写，无锁需要）
+        self._known_absent: dict[str, set[str]] = {}
         self._models_lock = threading.RLock()  # protects _cloud_models + _providers reads/writes
         # 锁序约定: _save_lock → _models_lock (reload 嵌套时)。handler add/delete: _models_lock → save_config(_save_lock)，不嵌套。
         # G-2: price config cached for metrics_aggregator
@@ -311,13 +314,30 @@ class CloudDiscovery:
         v6.1 Phase 1 白名单制：上游 /models 结果先进 candidates 快照（面板勾选用），
         只有 model_id 在 cfg.enabled_models 里的**才进注册表**（可路由）。specs
         恒进（含手填）。未勾选的发现模型 → None（404），不静默兜底。
+
+        7.9.1 floor 语义（P0 修复）：每个 enabled provider 的可路由集 = floor =
+        specs ∪ enabled_models。上游抓取只丰富元数据 + 刷新候选快照，**从不缩减
+        floor** — 单一 provider 抓取失败（None）不等于「该 provider 0 模型」，
+        绝不静默逐出用户显式勾选的模型。白名单模型离开路由的唯一途径是显式
+        用户动作（取消勾选/移除/删 provider/禁用 provider）。
         """
+        # 锁内快照旧注册表：floor 兜底时复用旧元数据（如 discovered_at），
+        # 同时避免与并发策展 rebuild 的竞态。网络抓取保持在锁外。
+        with self._models_lock:
+            old = dict(self._cloud_models)
         merged: dict[str, CloudModel] = {}
         for name, cfg in self._providers.items():
             if not cfg.enabled or not cfg.discovery_enabled:
                 continue
             try:
                 models = self._discover_provider(cfg)
+                if models is None:
+                    # 抓取失败 ≠ 上游 0 模型：floor 兜底（循环后统一注册）
+                    log.warning(
+                        "Provider %s discovery fetch failed — keeping floor routable "
+                        "(%d whitelisted, %d spec models)",
+                        name, len(cfg.enabled_models), len(cfg.model_specs))
+                    continue
                 # 候选快照（网络抖动时保留旧候选，不覆盖为空）
                 if models:
                     self._candidates[name] = list(models)
@@ -334,11 +354,24 @@ class CloudDiscovery:
                     if m.model_id not in merged:
                         merged[m.model_id] = m
                     merged[f"{m.provider}/{m.model_id}"] = m
+                # 白名单模型缺席成功 /models：保留（白名单赢）+ 每转态单次告警
+                fresh_ids = {m.model_id for m in models}
+                absent = self._known_absent.setdefault(name, set())
+                for mid in cfg.enabled_models:
+                    if mid in fresh_ids:
+                        absent.discard(mid)
+                    elif mid not in absent:
+                        log.warning(
+                            "Provider %s: whitelisted model '%s' absent from /models "
+                            "— kept routable (whitelist wins; uncheck in panel to remove)",
+                            name, mid)
+                        absent.add(mid)
                 log.info("Provider %s: discovered %d models (%d routed)", name, len(models), routed)
             except Exception as e:
                 log.warning("Provider %s discovery failed: %s", name, e)
-        # 也注册仅有 model_specs 但未被发现的模型
+        # floor 注册：specs ∪ 白名单（短键 first-wins；白名单兜底复用旧条目元数据）
         self._register_spec_only_models(merged)
+        self._register_whitelist_models(merged, old=old)
         # Preserve old models if new discovery yields nothing (network blip protection)
         if not merged and self._cloud_models:
             log.warning("Discovery yielded 0 models — keeping previous %d models",
@@ -712,6 +745,52 @@ class CloudDiscovery:
                 merged[f"{name}/{mid}"] = m
                 log.debug("Registered spec-only model: %s/%s (upstream %s)",
                           name, mid, upstream_id)
+
+    @staticmethod
+    def _bare_whitelist_model(mid: str, name: str, cfg: ProviderConfig) -> CloudModel:
+        """白名单兜底条目：仅凭用户勾选声明构建（无上游发现数据）。"""
+        return CloudModel(
+            model_id=mid,
+            provider=name,
+            openai_available=bool(cfg.openai_base),
+            anthropic_available=bool(cfg.anthropic_base),
+            discovered_at=0.0,  # 0 表示未实际发现，仅白名单声明
+        )
+
+    def _register_whitelist_models(self, merged: dict[str, CloudModel],
+                                   old: dict[str, CloudModel] | None = None):
+        """7.9.1 floor：注册 enabled provider 的白名单（enabled_models）模型。
+
+        白名单 = 用户显式勾选（声明），是可路由 floor 的一部分：上游 /models
+        抓取失败或列表缺失都不得缩减。短键 first-wins（与发现路径
+        ``if m.model_id not in merged`` 及 spec 路径 ``if mid in merged: continue``
+        一致 — 配置序首 provider 赢短键，前缀键恒全）。
+
+        元数据优先级：旧注册表条目（保 discovered_at 等发现元数据）→ 裸
+        CloudModel；同名 spec 由 _merge_model_spec 并入。键用 enabled_models
+        中存储的原始 mid（与发现路径按 m.model_id 键一致，含 "/" 的 id 不 split）。
+        """
+        for name, cfg in self._providers.items():
+            if not cfg.enabled:
+                continue
+            for mid in cfg.enabled_models:
+                if mid in merged:
+                    continue  # 已注册（发现/spec 先到），first-wins
+                m = None
+                source = "bare"
+                if old:
+                    for v in old.values():
+                        if v.provider == name and v.model_id == mid:
+                            m = v
+                            source = "old"
+                            break
+                if m is None:
+                    m = self._bare_whitelist_model(mid, name, cfg)
+                m = self._merge_model_spec(m, cfg, spec_key=mid)
+                merged[mid] = m
+                merged[f"{name}/{mid}"] = m
+                log.debug("Registered whitelisted model: %s/%s (source: %s)",
+                          name, mid, source)
 
     def _load_config(self, config_path: Path):
         # v4.7.0: Inject secrets.env before expanding ${VAR}
