@@ -559,3 +559,81 @@ class TestFetchFailureFloor:
         cd = CloudDiscovery(p)
         models = cd.discover_all()
         assert len(models) == 0
+
+
+class TestShrunkenFetchFloor:
+    """7.9.1 用户裁决（保留/白名单赢）：成功抓取但 /models 缩水（上游真删）
+    也不驱逐白名单模型 — 失败以上游真实错误呈现；面板取消勾选是唯一移除途径。
+    """
+
+    def _write_cfg(self, tmp_path, mock_server):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "tathr-glm": {
+                    "api_key": "sk-test",
+                    "openai_base": f"http://127.0.0.1:{mock_server}",
+                    "enabled_models": ["glm-5"],
+                },
+            }
+        })
+        return CloudDiscovery(p)
+
+    def _shrunken_urlopen(self, monkeypatch):
+        from inferfabric import cloud_discovery as cdm
+
+        class _Resp:
+            def read(self):
+                return b'{"data": [{"id": "other-model"}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+                            lambda req, timeout=None: _Resp())
+
+    def test_whitelist_model_absent_from_successful_fetch_stays_routable(
+            self, tmp_path, mock_server, monkeypatch):
+        cd = self._write_cfg(tmp_path, mock_server)
+        cd.discover_all()  # glm-5 在新鲜列表中
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+
+        # 成功抓取但列表缩水（glm-5 已不在 /models 中）
+        self._shrunken_urlopen(monkeypatch)
+        reg = cd.discover_all()
+        assert "glm-5" in reg and "tathr-glm/glm-5" in reg
+        assert cd.resolve_route("glm-5", set()) == "cloud:tathr-glm"
+        # 保留旧条目元数据（非裸重建）
+        assert reg["glm-5"].discovered_at > 0
+        # 候选快照仍刷新为缩水集（面板如实反映上游现状）
+        cands = cd.get_candidates("tathr-glm")
+        assert [m.model_id for m in cands] == ["other-model"]
+
+    def test_whitelist_absent_warning_logs_once_per_transition(
+            self, tmp_path, mock_server, monkeypatch, caplog):
+        import logging
+        cd = self._write_cfg(tmp_path, mock_server)
+        cd.discover_all()  # glm-5 在场
+
+        def _absent_count():
+            return sum(1 for r in caplog.records
+                       if "kept routable" in r.getMessage()
+                       and "glm-5" in r.getMessage())
+
+        with caplog.at_level(logging.WARNING, logger="inferfabric.cloud_discovery"):
+            self._shrunken_urlopen(monkeypatch)
+            cd.discover_all()  # 第一次缺席
+            assert _absent_count() == 1
+            cd.discover_all()  # 连续缺席 — 不刷屏
+            assert _absent_count() == 1
+            # 模型回归 → 转态清除
+            monkeypatch.undo()
+            cd.discover_all()
+            assert _absent_count() == 1
+            # 再次缺席 → 第二次告警（新一轮转态）
+            self._shrunken_urlopen(monkeypatch)
+            cd.discover_all()
+            assert _absent_count() == 2
