@@ -881,3 +881,151 @@ class TestShortNameCollisionContract:
         # 白名单 bare 不覆盖短键，但前缀键注册（对齐发现路径碰撞契约）
         assert "prov-b/glm-5" in reg
         assert reg["prov-b/glm-5"].provider == "prov-b"
+
+    def test_reload_drops_unchecked_whitelist_model(self, tmp_path):
+        """安全加固（review F-1）：YAML 取消勾选（provider 仍启用）→ reload 即撤销。
+
+        缺陷：reload 只加不减 — 被取消勾选的模型滞留可路由直到下一轮轮询。
+        floor 不变式：enabled provider 的条目恰好 = specs ∪ 白名单。
+        """
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5", "k3"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        assert "glm-5" in cd.cloud_models and "k3" in cd.cloud_models
+        try:
+            v2 = {
+                "providers": {
+                    "prov-a": {
+                        "api_key": "sk-a",
+                        "openai_base": "http://127.0.0.1:1",
+                        "timeout": 1,
+                        "enabled_models": ["k3"],
+                    }
+                }
+            }
+            _write_yaml(p, v2)
+            cd.reload()
+            reg = cd.cloud_models
+            assert "glm-5" not in reg and "prov-a/glm-5" not in reg
+            assert cd.resolve_route("glm-5", set()) is None
+            assert "k3" in reg  # 未撤销的白名单模型保留
+        finally:
+            cd.stop_polling()
+
+    def test_reload_drops_removed_spec_model(self, tmp_path):
+        """安全加固（review F-1）：YAML 删除 spec（provider 仍启用）→ reload 即撤销。"""
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "discovery": {"enabled": False},
+                    "models": {"x1": {"model_id": "x1"}, "x2": {"model_id": "x2"}},
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        assert "x1" in cd.cloud_models and "x2" in cd.cloud_models
+        try:
+            v2 = {
+                "providers": {
+                    "prov-a": {
+                        "api_key": "sk-a",
+                        "openai_base": "http://127.0.0.1:1",
+                        "timeout": 1,
+                        "discovery": {"enabled": False},
+                        "models": {"x2": {"model_id": "x2"}},
+                    }
+                }
+            }
+            _write_yaml(p, v2)
+            cd.reload()
+            reg = cd.cloud_models
+            assert "x1" not in reg and "prov-a/x1" not in reg
+            assert cd.resolve_route("x1", set()) is None
+            assert "x2" in reg
+        finally:
+            cd.stop_polling()
+
+
+class TestPublishReconciliation:
+    """安全加固（review F-2）：discover_all 发布临界区对账当前配置。
+
+    闭合与 reload 的并发竞态：抓取在锁外、耗时可达分钟级 — 期间配置可能
+    已变。发布时按当前 _providers 过滤（不复活已删/禁 provider 的条目）+
+    重跑 floor（补注册新增/启用 provider 的 floor）。
+    """
+
+    def test_publish_does_not_resurrect_provider_disabled_during_fetch(
+            self, tmp_path, monkeypatch):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        assert "glm-5" in cd.cloud_models  # 启动 floor
+
+        def _fake_discover(cfg):
+            # 模拟抓取期间并发 reload 禁用了本 provider
+            cd._providers["prov-a"].enabled = False
+            return [CloudModel(model_id="glm-5", provider="prov-a",
+                               discovered_at=time.time())]
+
+        monkeypatch.setattr(cd, "_discover_provider", _fake_discover)
+        reg = cd.discover_all()
+        # 发布时不复活被禁 provider 的条目（严格 floor：发布空集）
+        assert "glm-5" not in reg
+        assert cd.resolve_route("glm-5", set()) is None
+
+    def test_publish_registers_floor_of_provider_enabled_during_fetch(
+            self, tmp_path, monkeypatch):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["a1"],
+                },
+                "prov-b": {
+                    "api_key": "sk-b",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled": False,
+                    "enabled_models": ["b1"],
+                },
+            }
+        })
+        cd = CloudDiscovery(p)
+        assert "b1" not in cd.cloud_models  # 启动时 prov-b 禁用 → 无 floor
+
+        def _fake_discover(cfg):
+            # 模拟抓取期间并发 reload 启用了 prov-b
+            cd._providers["prov-b"].enabled = True
+            return []
+
+        monkeypatch.setattr(cd, "_discover_provider", _fake_discover)
+        reg = cd.discover_all()
+        # 发布时补注册新启用 provider 的 floor
+        assert "b1" in reg
+        assert cd.resolve_route("b1", set()) == "cloud:prov-b"
+        assert "a1" in reg  # 原有 floor 不受影响

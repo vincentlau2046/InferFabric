@@ -371,15 +371,36 @@ class CloudDiscovery:
                 log.info("Provider %s: discovered %d models (%d routed)", name, len(models), routed)
             except Exception as e:
                 log.warning("Provider %s discovery failed: %s", name, e)
-        # floor 注册：specs ∪ 白名单（短键 first-wins；白名单兜底复用旧条目元数据）
-        self._register_spec_only_models(merged)
-        self._register_whitelist_models(merged, old=old)
-        # Preserve old models if new discovery yields nothing (network blip protection)
-        if not merged and self._cloud_models:
-            log.warning("Discovery yielded 0 models — keeping previous %d models",
-                        len(self._cloud_models))
-            return dict(self._cloud_models)
         with self._models_lock:
+            # 发布前对账当前配置（安全加固，闭合与 reload 的并发竞态）：
+            # 抓取在锁外、耗时可达分钟级 — 期间配置可能已变。发布时
+            # ① 不复活已删/禁 provider 的条目；② 重跑 floor（补注册
+            # reload 期间新增/启用 provider 的 specs ∪ 白名单）。
+            merged = {
+                k: v for k, v in merged.items()
+                if (pcfg := self._providers.get(v.provider)) is not None
+                and pcfg.enabled
+            }
+            # floor 注册：specs ∪ 白名单（短键 first-wins；白名单兜底复用旧条目元数据）
+            self._register_spec_only_models(merged)
+            self._register_whitelist_models(merged, old=old)
+            if not merged:
+                if not self._providers:
+                    # reload 进行中的瞬态（providers 已清空未重载）— 保留旧注册表
+                    log.warning("Discovery yielded 0 models (config reload in "
+                                "progress?) — keeping previous %d models",
+                                len(self._cloud_models))
+                    return dict(self._cloud_models)
+                # 严格 floor：当前配置的 floor 为空（全部撤销/禁用）→ 如实发布
+                # 空集，不复活已撤销条目
+                if self._cloud_models:
+                    log.warning("Discovery yielded 0 models and no floor "
+                                "configured — publishing empty registry "
+                                "(%d previous models dropped)",
+                                len(self._cloud_models))
+                    self._cloud_models = {}
+                self._last_discovery = time.time()
+                return {}
             self._cloud_models = merged
         self._last_discovery = time.time()
         return merged
@@ -568,9 +589,10 @@ class CloudDiscovery:
         with self._models_lock:
             self._providers = {}
         self._load_config(path)
-        # 7.9.1 调和：注册表与已删除/禁用 provider 的旧条目对齐 + 新 provider
-        # 注册 floor（specs ∪ 白名单）。锁序保持 _save_lock → _models_lock
-        # （_save_lock 已释放，无新嵌套）。
+        # 7.9.1 调和：注册表严格重建为新配置的 floor（specs ∪ 白名单，逐
+        # enabled provider）— 旧元数据仅在条目仍属 floor 时复用；YAML 取消
+        # 勾选/删 spec 即时撤销（不等下一轮轮询）。锁序保持 _save_lock →
+        # _models_lock（_save_lock 已释放，无新嵌套）。
         with self._models_lock:
             for name in list(self._candidates):
                 if name not in self._providers:
@@ -578,11 +600,20 @@ class CloudDiscovery:
             for name in list(self._known_absent):
                 if name not in self._providers:
                     self._known_absent.pop(name, None)
-            self._cloud_models = {
-                k: v for k, v in self._cloud_models.items()
-                if (pcfg := self._providers.get(v.provider)) is not None
-                and pcfg.enabled
-            }
+            reconciled: dict[str, CloudModel] = {}
+            for name, cfg in self._providers.items():
+                if not cfg.enabled:
+                    continue
+                spec_ids = {(spec or {}).get("model_id") or mid
+                            for mid, spec in cfg.model_specs.items()}
+                for k, v in self._cloud_models.items():
+                    if v.provider != name:
+                        continue
+                    if (v.model_id in cfg.enabled_models
+                            or v.model_id in spec_ids
+                            or k in cfg.model_specs):
+                        reconciled[k] = v
+            self._cloud_models = reconciled
             self._register_spec_only_models(self._cloud_models)
             self._register_whitelist_models(self._cloud_models)
         # 7.9.1 轮询自愈：reload 已先 stop_polling — 末尾以新 interval 重启
