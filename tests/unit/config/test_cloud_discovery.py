@@ -637,3 +637,129 @@ class TestShrunkenFetchFloor:
             self._shrunken_urlopen(monkeypatch)
             cd.discover_all()
             assert _absent_count() == 2
+
+
+class TestCloudReloadReconciliation:
+    """7.9.1：reload() 调和注册表 + 重启轮询（SIGHUP 路径修复）。
+
+    缺陷：reload() 重设 _providers 但不协调 _cloud_models/_candidates —
+    已删除/禁用 provider 的旧条目滞留、新 provider 的 floor 不注册；
+    且 SIGHUP 路径（config_reloader 只调 reload()）stop_polling 后无人
+    重启轮询线程 — 轮询永久停摆直到进程重启。
+    """
+
+    def _yaml_v1(self, tmp_path):
+        return {
+            "providers": {
+                "prov-a": {
+                    "api_key": "sk-a",
+                    "openai_base": "http://127.0.0.1:1",  # dead — 免抓取验证 floor
+                    "timeout": 1,
+                    "enabled_models": ["glm-5"],
+                },
+                "prov-b": {
+                    "api_key": "sk-b",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "enabled_models": ["k3"],
+                },
+            }
+        }
+
+    def test_reload_drops_removed_provider_entries(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, self._yaml_v1(tmp_path))
+        cd = CloudDiscovery(p)
+        assert "glm-5" in cd.cloud_models and "k3" in cd.cloud_models
+
+        # YAML 编辑：删除 prov-a（用户显式动作 — floor 允许移除）
+        v2 = self._yaml_v1(tmp_path)
+        del v2["providers"]["prov-a"]
+        _write_yaml(p, v2)
+        cd.reload()
+        reg = cd.cloud_models
+        assert "glm-5" not in reg and "prov-a/glm-5" not in reg
+        assert "prov-a" not in cd._candidates
+        # 另一 provider 的白名单模型 reload 后免抓取仍可路由
+        assert "k3" in reg
+        assert cd.resolve_route("k3", set()) == "cloud:prov-b"
+
+    def test_reload_drops_disabled_provider_entries(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, self._yaml_v1(tmp_path))
+        cd = CloudDiscovery(p)
+        assert "glm-5" in cd.cloud_models
+
+        v2 = self._yaml_v1(tmp_path)
+        v2["providers"]["prov-a"]["enabled"] = False
+        _write_yaml(p, v2)
+        cd.reload()
+        reg = cd.cloud_models
+        assert "glm-5" not in reg and "prov-a/glm-5" not in reg
+        assert "k3" in reg  # enabled provider 不受影响
+
+    def test_reload_registers_new_provider_floor(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        v1 = {"providers": {"prov-b": self._yaml_v1(tmp_path)["providers"]["prov-b"]}}
+        _write_yaml(p, v1)
+        cd = CloudDiscovery(p)
+
+        # YAML 编辑：新增 prov-c（spec + 白名单）
+        v2 = dict(v1)
+        v2["providers"] = dict(v1["providers"])
+        v2["providers"]["prov-c"] = {
+            "api_key": "sk-c",
+            "openai_base": "http://127.0.0.1:1",
+            "timeout": 1,
+            "enabled_models": ["new-wl"],
+            "models": {"new-spec": {"model_id": "new-spec"}},
+        }
+        _write_yaml(p, v2)
+        cd.reload()
+        reg = cd.cloud_models
+        # 新 provider 的 spec + 白名单 floor 均注册，免抓取可路由
+        assert "new-spec" in reg and "prov-c/new-spec" in reg
+        assert "new-wl" in reg and "prov-c/new-wl" in reg
+        assert cd.resolve_route("new-wl", set()) == "cloud:prov-c"
+
+    def test_reload_restarts_polling(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "poller": {
+                    "api_key": "sk-x",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "discovery": {"enabled": True, "interval": 3600},
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        try:
+            cd.reload()
+            # SIGHUP 链路修复：reload 后轮询线程存活（现状 RED — stop 后无人重启）
+            assert cd._poll_thread is not None
+            assert cd._poll_thread.is_alive()
+        finally:
+            cd.stop_polling()
+
+    def test_reload_double_start_polling_noop(self, tmp_path):
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, {
+            "providers": {
+                "poller": {
+                    "api_key": "sk-x",
+                    "openai_base": "http://127.0.0.1:1",
+                    "timeout": 1,
+                    "discovery": {"enabled": True, "interval": 3600},
+                }
+            }
+        })
+        cd = CloudDiscovery(p)
+        try:
+            cd.reload()
+            t1 = cd._poll_thread
+            cd.start_polling()  # handler 的显式调用 — 应为 no-op
+            assert cd._poll_thread is t1
+        finally:
+            cd.stop_polling()

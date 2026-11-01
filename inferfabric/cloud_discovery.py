@@ -568,6 +568,27 @@ class CloudDiscovery:
         with self._models_lock:
             self._providers = {}
         self._load_config(path)
+        # 7.9.1 调和：注册表与已删除/禁用 provider 的旧条目对齐 + 新 provider
+        # 注册 floor（specs ∪ 白名单）。锁序保持 _save_lock → _models_lock
+        # （_save_lock 已释放，无新嵌套）。
+        with self._models_lock:
+            for name in list(self._candidates):
+                if name not in self._providers:
+                    self._candidates.pop(name, None)
+            for name in list(self._known_absent):
+                if name not in self._providers:
+                    self._known_absent.pop(name, None)
+            self._cloud_models = {
+                k: v for k, v in self._cloud_models.items()
+                if (pcfg := self._providers.get(v.provider)) is not None
+                and pcfg.enabled
+            }
+            self._register_spec_only_models(self._cloud_models)
+            self._register_whitelist_models(self._cloud_models)
+        # 7.9.1 轮询自愈：reload 已先 stop_polling — 末尾以新 interval 重启
+        # （幂等：线程存活即返回）。SIGHUP 路径（config_reloader 只调 reload()）
+        # 由此自动恢复轮询；handler 的显式 start_polling() 成为 no-op。
+        self.start_polling()
 
     # ── internal ──
 

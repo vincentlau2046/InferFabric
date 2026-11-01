@@ -736,6 +736,8 @@ class TestCloudDiscoveryBasic:
         cd.reload(p)
         assert "prov1" not in cd.providers
         assert "prov2" in cd.providers
+        # 7.9.1: reload 现会重启轮询线程（prov2 discovery 默认开）— 卫生收尾
+        cd.stop_polling()
 
     def test_get_provider_config(self, tmp_path):
         from inferfabric.cloud_discovery import CloudDiscovery
