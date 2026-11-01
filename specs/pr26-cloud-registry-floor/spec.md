@@ -83,8 +83,11 @@ fix-then-ship，以下各配 RED→GREEN）：
 - **I-1 corrupt reload 保注册表**：`reload()` 先清 `_providers` 再载入 —
   YAML 解析失败时 providers 保持空，612a47f 的严格 floor 调和会把注册表
   清成 {}（比事故前更糟：corrupt SIGHUP 全部云模型 404 且轮询无法重启）。
-  修复：`_config_corrupt or not _providers` 时跳过调和、保留旧注册表
-  （与 `discover_all` 的瞬态守卫对齐）。
+  修复：载入失败（解析失败/文件缺失，意外状态）跳过调和、保留旧注册表
+  （与 `discover_all` 的瞬态守卫对齐）。**安复评细分**：valid-empty
+  （用户显式删光所有 provider）≠ corrupt — 显式移除即时生效，如实发布
+  空注册表并清理 candidates/absent 关联状态（reload 是同步调用、可区分
+  两者；discover_all 的瞬态守卫不受影响）。
 - **I-2 发布 per-model 对账**（F-2 的 per-model 残留）：抓取按 OLD 白名单
   过滤，期间用户取消勾选 + reload 完成后，provider 级过滤不足以拦截 —
   显式撤销延迟一轮轮询（≤1h）生效。修复：发布过滤扩展为 per-model

@@ -604,11 +604,12 @@ class CloudDiscovery:
         # enabled provider）— 旧元数据仅在条目仍属 floor 时复用；YAML 取消
         # 勾选/删 spec 即时撤销（不等下一轮轮询）。锁序保持 _save_lock →
         # _models_lock（_save_lock 已释放，无新嵌套）。
-        if self._config_corrupt or not self._providers:
-            # cross-review I-1：载入失败/零 provider 是意外状态而非显式用户
-            # 移除 — 不破坏性清空注册表（与 discover_all 的瞬态守卫对齐）。
-            # 事故类防线：corrupt SIGHUP 不得把全部云模型打成 404。
-            log.warning("CloudDiscovery.reload: config corrupt or no providers "
+        if self._config_corrupt or not path.exists():
+            # cross-review I-1 / 安复评：载入失败（解析失败/文件缺失）是意外
+            # 状态而非显式用户移除 — 不破坏性清空注册表（与 discover_all 的
+            # 瞬态守卫对齐）。事故类防线：corrupt SIGHUP 不得把全部云模型
+            # 打成 404。
+            log.warning("CloudDiscovery.reload: config corrupt or missing "
                         "— keeping previous %d models", len(self._cloud_models))
         else:
             with self._models_lock:
@@ -639,6 +640,12 @@ class CloudDiscovery:
                                 or v.model_id in spec_ids
                                 or k in cfg.model_specs):
                             reconciled[k] = v
+                if not self._providers and self._cloud_models:
+                    # valid-empty（用户显式删光所有 provider）≠ corrupt：
+                    # 显式移除即时生效 — 如实发布空注册表（安复评细分）
+                    log.warning("CloudDiscovery.reload: all providers removed — "
+                                "publishing empty registry (%d previous models dropped)",
+                                len(self._cloud_models))
                 self._cloud_models = reconciled
                 self._register_spec_only_models(self._cloud_models)
                 self._register_whitelist_models(self._cloud_models)

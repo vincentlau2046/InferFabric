@@ -10,7 +10,7 @@
 | cross-review 修复 | ✅ | fresh-context subagent 全 diff 评审，verdict = **fix-then-ship**：核心修复/锁纪律/两 MEDIUM 关闭均确认；**2 Important + 2 Minor 全修**（各 RED→GREEN，见执行裁决记录）；核心不变量按 I-2 补强为 per-model 粒度 |
 | 前端实现 | 无 | 面板无改动（whitelisted-but-absent 展示 = 后续小项，API 已回传 `enabled_models`） |
 | TDD | ✅ | T1–T8 全部 RED→GREEN；T7 RED 揭出助手短名碰撞契约缺口（缺被碰方前缀键），按发现路径实际语义修复；基线 1925（plan 写 1923，以实测为准） |
-| 全量回归 | ✅ 1959 passed | unit+integration（基线 1925 + 34 新增，零回归；cross-review 修复后复跑） |
+| 全量回归 | ✅ 1961 passed | unit+integration（基线 1925 + 36 新增，零回归；安复评细分修复后复跑） |
 | import 冒烟 | ✅ | `python3 -c "import inferfabric"` → 7.9.1 |
 | runtime 冒烟 | ✅ | dev scratch `HOME`（白名单模型 + dead base）：启动即在 `GET /v1/models` 见该模型（`discovered_at: 0.0` 裸 floor）→ `POST /admin/cloud/discover` 抓取失败 → 不驱逐 + `keeping floor routable (1 whitelisted, 0 spec models)` — 事故场景端到端复现通过。注：CLAUDE.md 记载的 `IFF_DATA_DIR` 环境变量在代码中不存在（`config.py` 硬编码 `Path.home()`）— 冒烟改用 `HOME` 覆盖；文档失实待单独修 |
 | cross-review | ✅ | fresh-context subagent 全 diff 评审：核心修复正确、锁纪律合规、612a47f 两 MEDIUM 确认关闭；2 Important + 2 Minor 全修（cross-review 修复行）；1 Info 既有问题记录为已知残留 |
@@ -29,10 +29,15 @@
   旧注册表照常工作）。评审实测复现：floor `['glm-5','prov/glm-5']` →
   corrupt YAML → reload → 注册表 `[]` + `_config_corrupt=True` + 轮询
   无法重启 + `/admin/cloud/reload` 仍回 `"status":"reloaded"`。修复：
-  `_config_corrupt or not _providers` → 跳过调和保旧 + 告警（与
-  discover_all 瞬态守卫对齐；有效空配置同样保旧 — discover_all 对
-  providers 空的语义一致，删光所有 provider 属极端边角）。
-  RED：`test_reload_corrupt_yaml_keeps_registry`。
+  载入失败（`_config_corrupt`/文件缺失）→ 跳过调和保旧 + 告警（与
+  discover_all 瞬态守卫对齐）。**安复评细分**（合并后自动复评 MEDIUM：
+  fail-open/allowlist bypass）：valid-empty（显式删光所有 provider）≠
+  corrupt — reload 是同步调用、可区分两者，valid-empty 如实发布空注册表
+  + 清理 candidates/absent（显式移除即时生效，符合用户裁决）；文件缺失
+  与 corrupt 同类保旧；discover_all 的瞬态守卫不受影响。
+  RED：`test_reload_corrupt_yaml_keeps_registry` /
+  `test_reload_valid_empty_config_publishes_empty_registry`；
+  钉行为：`test_reload_missing_file_keeps_registry`。
 - **I-2（Important，已修）**：F-2 只闭到 provider 级 — 抓取按 OLD
   `enabled_models` 过滤（分钟级窗口），期间取消勾选 + reload 完成后发布
   复活已撤销模型，显式移除延迟一轮轮询（≤1h）生效，违反核心不变量。
@@ -77,9 +82,10 @@
 
 ## 验证记录
 
-- 新增测试 34：TestDiscoverProviderFailureContract(5) + TestFetchFailureFloor(4)
+- 新增测试 36：TestDiscoverProviderFailureContract(5) + TestFetchFailureFloor(4)
   + TestShrunkenFetchFloor(2+1 M-3) + TestCloudReloadReconciliation(5+2 安全
-  +1 I-1 +1 M-4) + TestPublishReconciliation(2+1 I-2) + TestShortNameCollisionContract(3)
+  +1 I-1 +1 M-4 +2 安复评细分) + TestPublishReconciliation(2+1 I-2)
+  + TestShortNameCollisionContract(3)
   + TestStartupFloor(3) + TestRebuildFloor(3) + test_cloud_reload_handler_floor(1)。
 - 卫生：`test_core_comprehensive.py::test_reload` 补 `stop_polling()`。
 - 消费者 sweep：config/、cloud probe/provider-models/key-expand、core

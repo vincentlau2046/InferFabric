@@ -815,6 +815,43 @@ class TestCloudReloadReconciliation:
         assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
         assert cd.resolve_route("k3", set()) == "cloud:prov-b"
 
+    def test_reload_missing_file_keeps_registry(self, tmp_path):
+        """文件缺失（意外删除）与 corrupt 同类 — 保旧，不清空注册表。"""
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, self._yaml_v1(tmp_path))
+        cd = CloudDiscovery(p)
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+
+        p.unlink()
+        try:
+            cd.reload()
+        finally:
+            cd.stop_polling()
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+        assert cd.resolve_route("k3", set()) == "cloud:prov-b"
+
+    def test_reload_valid_empty_config_publishes_empty_registry(self, tmp_path):
+        """安全复评：valid-empty（用户显式删光所有 provider）≠ corrupt —
+        显式移除动作应即时生效（用户裁决：移除唯一途径 = 显式用户动作），
+        如实发布空注册表，不保旧。
+        """
+        p = tmp_path / "cloud_provider.yaml"
+        _write_yaml(p, self._yaml_v1(tmp_path))
+        cd = CloudDiscovery(p)
+        assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+
+        _write_yaml(p, {"providers": {}})
+        try:
+            cd.reload()
+        finally:
+            cd.stop_polling()
+        assert cd._config_corrupt is False
+        assert cd.cloud_models == {}
+        assert cd.resolve_route("glm-5", set()) is None
+        assert cd.resolve_route("k3", set()) is None
+        # 关联状态一并清理
+        assert cd._candidates == {} and cd._known_absent == {}
+
     def test_reload_shrunk_whitelist_resets_known_absent(
             self, tmp_path, monkeypatch):
         """cross-review M-4：reload 缩减存活 provider 白名单时 _known_absent
