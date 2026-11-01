@@ -14,6 +14,7 @@
 | cross-review | ✅ ship | fresh-context subagent 全 diff 评审：0 Critical / 0 Important / 2 Minor（selector 两处注释失实）+ 1 README 表述建议 + 3 Info（云侧 VL home 移位语义记录 / VL 冷却时带图落 TXT 由上游 400 终止 = 新契约推论 / 测试记账口径）— Minor+建议已顺手修（提交 2）；七项逐查全过（守卫零残留 / 排序语义确定 / detail 消费面完整 / 错误码语义不变 / PR-14 冻结面零改动 / 翻面断言为换钉非弱化 / 边界无缺陷），评审本机复跑全量 1958 + 浏览器 10/10 |
 | committed-tree 复验 | ✅ | 干净 worktree 全量 1958 passed + import 冒烟 7.10.0（提交 1 后复验；提交 2 仅注释/README，随后复跑 model_pool + import） |
 | 版本 | ✅ 7.10.0 | minor（用户裁决即批准）；README 历史行 + 正文契约更新（「未声明能力不投递」→「VL 软优先」；示例 features 行退役） |
+| 链路梳理 follow-up | ✅ | 用户裁决（2026-11-02）：修池路径流式 include_usage 缺失并合入 7.10.0 — `handle_pool_chat` 入口注入 `stream_options.include_usage=true`（setdefault 语义，先于选路，本地/云候选同享），4 例新契约测试 RED→GREEN；Anthropic 无对应缺口（流恒带 usage，SSE 旁路提取），全量 1962 |
 | 合并/部署 | 待 | ff-merge + BatchMode push；**生产重启需用户单独授权** |
 
 ## 执行记录

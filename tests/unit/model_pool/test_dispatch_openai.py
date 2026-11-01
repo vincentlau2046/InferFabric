@@ -584,3 +584,78 @@ class TestPoolChatDispatch:
         status, body, _ = h.sent[-1]
         assert status == 429
         assert forwarded == []
+
+
+class TestStreamUsageInjection:
+    """7.10.0：与直连路径（chat_handlers PR-G2）对齐 — 流式请求透明注入
+    stream_options.include_usage=true。OpenAI SSE 默认不回 usage，不注入
+    则池流式流量 RequestLog token 记 0、dashboard 统计失真。"""
+
+    def test_streaming_request_injects_include_usage(self, registry, forwarded):
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+
+        assert len(forwarded) == 1
+        assert forwarded[0]["stream"] is True
+        assert forwarded[0]["body"]["stream_options"] == {"include_usage": True}
+
+    def test_non_streaming_request_not_injected(self, registry, forwarded):
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+
+        assert len(forwarded) == 1
+        assert "stream_options" not in forwarded[0]["body"]
+
+    def test_client_stream_options_preserved(self, registry, forwarded):
+        # 客户端已设 include_usage=False（明确不要 usage）→ setdefault 语义，
+        # 不覆盖客户端显式选择 — 与直连路径行为一致
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "stream": True,
+                "stream_options": {"include_usage": False},
+                "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+
+        assert len(forwarded) == 1
+        assert forwarded[0]["body"]["stream_options"] == {"include_usage": False}
+
+    def test_streaming_cloud_candidate_also_injected(
+            self, registry, monkeypatch):
+        # 云候选同链路：注入发生在入口（选路前），云流式请求同样拿到
+        # usage chunk — 与直连路径（注入先于云路由）对齐
+        cloud_bodies = []
+
+        def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
+                       original_model=None, suppress_client_errors=False, timeout=None):
+            cloud_bodies.append(dict(data))
+            return SimpleNamespace(status=200, usage={}, ttft_ms=None,
+                                   duration_ms=1.0, error=None)
+
+        monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
+        cfg = _raw_config()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active=set(), local_models={},
+                    cloud_models={"prov/cloud-m": SimpleNamespace(
+                        supports_vision=None)},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1")})
+        h = FakeHandler()
+        data = {"model": "iff/fast", "stream": True,
+                "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+
+        assert len(cloud_bodies) == 1
+        assert cloud_bodies[0]["stream_options"] == {"include_usage": True}

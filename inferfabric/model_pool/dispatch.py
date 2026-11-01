@@ -273,6 +273,16 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
     # 7.10.0：用户裁决 — 网关不解析会话历史（不可迁移历史守卫已删）。
     # 历史块是否被目标模型接受由模型/provider 自身处理。
 
+    # 与直连路径对齐（chat_handlers PR-G2）：流式请求透明注入
+    # stream_options.include_usage=true — OpenAI SSE 默认不回 usage，
+    # 不注入则池流式流量 RequestLog token 记 0。setdefault 语义不覆盖
+    # 客户端显式选择；注入先于选路，本地/云候选同享（直连路径同序）。
+    # Anthropic 入口无对应缺口：其流恒带 usage（message_start/message_delta）。
+    if data.get("stream", False):
+        if "stream_options" not in data:
+            data["stream_options"] = {}
+        data["stream_options"].setdefault("include_usage", True)
+
     # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
     # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
