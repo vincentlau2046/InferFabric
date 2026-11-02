@@ -653,6 +653,13 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
     page.wait_for_selector(
         '.mp-tree-row[data-mp-tree-pool="fast"] + .mp-tree-tl'
         ' .mp-tl-dot.mp-tl-cooldown', state="attached")
+    # 方案 A：时间线行落在候选链列起点（grid-column:5，替代 34px 魔法缩进）
+    xs = page.eval_on_selector(
+        '.mp-tree-row[data-mp-tree-pool="fast"] + .mp-tree-tl',
+        "e => ({ tl: e.getBoundingClientRect().left,"
+        " cand: e.previousElementSibling.querySelector('.mp-tree-cands')"
+        "        .getBoundingClientRect().left })")
+    assert abs(xs["tl"] - xs["cand"]) <= 1.0, xs
 
 
 # ── 5d. 方案 A：调用树行共享六列网格 — 跨行列对齐（真实坐标）─────────
