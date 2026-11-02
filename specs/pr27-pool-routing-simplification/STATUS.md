@@ -15,7 +15,9 @@
 | committed-tree 复验 | ✅ | 干净 worktree 全量 1958 passed + import 冒烟 7.10.0（提交 1 后复验；提交 2 仅注释/README，随后复跑 model_pool + import） |
 | 版本 | ✅ 7.10.0 | minor（用户裁决即批准）；README 历史行 + 正文契约更新（「未声明能力不投递」→「VL 软优先」；示例 features 行退役） |
 | 链路梳理 follow-up | ✅ | 用户裁决（2026-11-02）：修池路径流式 include_usage 缺失并合入 7.10.0 — `handle_pool_chat` 入口注入 `stream_options.include_usage=true`（setdefault 语义，先于选路，本地/云候选同享），4 例新契约测试 RED→GREEN；Anthropic 无对应缺口（流恒带 usage，SSE 旁路提取），全量 1962 |
-| 合并/部署 | 待 | ff-merge + BatchMode push；**生产重启需用户单独授权** |
+| 调用树网格对齐 follow-up | ✅ 7.10.1 | 用户批准方案 A：共享六列 subgrid 网格（端口\|链a\|角色\|链b\|候选链\|态徽标）对齐端口/角色/候选链起点，候选内部自然排布；`@supports not` flex 回退；零闪烁（treeHtml DOM 输出不变，applyDynamic by-id 翻转不受影响）；面板单测 4 新钉 + 浏览器 test_05b 时间线坐标断言 + test_05d 四行左缘 ≤1px 断言（RED 实测 16.9px 错位）；cross-review 0 Critical / 1 Important（README 测试数字失实，已修）+ 5 Minor（4 修 1 缓：轨道分割正则嵌套括号前瞻脆弱点） |
+| committed-tree 复验 (7.10.1) | ✅ | 干净 worktree 全量 1966 passed + 面板/浏览器 154 passed + import 冒烟 7.10.1 |
+| 合并/部署 | ✅ 2026-11-02 | 7.10.0 已随用户授权重启上线并验证（iff/fast 400 根因消除）；7.10.1 ff-merge + BatchMode push |
 
 ## 执行记录
 
@@ -32,3 +34,8 @@
   删除前从未走到转发层，暴露后按 CloudResult 契约修正 fake
   （`committed=True, status=200`）。
 - `compatible_count` 保留为纯观测字段（注释已更新）；无消费者依赖。
+- 7.10.1 调用树对齐（2026-11-02，用户授权「同步处理」）：UI 门禁遵循
+  dashboard-ui-testing-gate — 真实 chromium 坐标断言驱动（test_05d RED
+  实测 role 行错位 16.9px → 修复后 ≤1px），文本断言不作为可用性证据。
+  review 修复随回归 154 passed 后提交（39f2564），committed-tree 复验
+  干净 worktree 全绿后合并。
