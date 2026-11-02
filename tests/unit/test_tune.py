@@ -96,6 +96,15 @@ presets:
     enable_mtp: true
     draft_tokens: 1
     kv_capacity: 100000
+  # kv=0 = auto 哨兵：引擎自取池顶——不按 min 钳制成 1、不触发 kv<窗口 ❌
+  kv-auto:
+    max_concurrency: 5
+    max_context: 262144
+    default_max_tokens: 32768
+    prefill_chunk: 2048
+    enable_mtp: true
+    draft_tokens: 3
+    kv_capacity: 0
 """
 
 
@@ -209,6 +218,24 @@ def test_preview_kv_below_window_blocking(model):
     p = tune.preview(model, "kv-under-window")
     assert any(i.startswith("❌") and "kv_capacity" in i and "max_context" in i
                for i in p["issues"])
+
+
+def test_preview_kv_zero_auto_sentinel(model):
+    """kv_capacity=0 是 auto 哨兵：不按 min 钳制成 1，也不触发 kv<窗口 ❌。
+
+    回归：engine_caps 曾给 kv_capacity 定 min=1，VL 场景 kv 一律 0 被抬成 1，
+    再被 validate_scenario 误报 ❌ kv 1 < 窗口 → apply 被 TuneError 拦死。
+    """
+    p = tune.preview(model, "kv-auto")
+    assert p["after"]["kv_capacity"] == 0                      # 未被抬成 1
+    assert not any("kv_capacity" in n for n in p["clamp_notes"])
+    assert not [i for i in p["issues"] if i.startswith("❌")]
+
+
+def test_apply_kv_zero_sentinel_not_blocked(model):
+    """apply(dry) 不因 kv=0 误报 ❌ 而 TuneError（场景可正常应用）。"""
+    r = tune.apply(model, "kv-auto", dry=True)
+    assert r["status"] == "preview"
 
 
 def test_preview_wild_clamp_and_whitelist(model):

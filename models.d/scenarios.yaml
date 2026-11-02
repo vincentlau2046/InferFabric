@@ -24,17 +24,17 @@ Qwen38-27B-TXT:
     draft_tokens: 1
     kv_capacity: 612000
 Qwen38-27B-VL:
-  # 2026-11-02 统一场景: C5 · 256K · kv auto（三场景仅保留工作负载差异字段）
+  # 2026-11-03: 仅 big-batch 调 C5·262144；short-ctx/small-batch 维持原值
   short-ctx:
     max_concurrency: 5
-    max_context: 262144
+    max_context: 131072
     default_max_tokens: 16384
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 3
     kv_capacity: 0
   small-batch:
-    max_concurrency: 5
+    max_concurrency: 2
     max_context: 262144
     default_max_tokens: 32768
     prefill_chunk: 2048

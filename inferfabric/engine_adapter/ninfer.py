@@ -110,14 +110,15 @@ class NInferAdapter(EngineAdapter):
     def engine_caps(self, model: ModelConfig) -> dict[str, dict]:
         """引擎 C++ 硬限（engine.cpp/serve_options/speculative_options 核实）:
         max_concurrency [1,8]、draft_tokens [1,5]、prefill_chunk 128 倍数、
-        max_context ≤ 256K、kv_capacity ≥ 1（64 页对齐由引擎启动时处理）。"""
+        max_context ≤ 256K、kv_capacity: 0=auto 哨兵（引擎自取池顶，不钳制）；
+        显式值 ≥ 1（64 页对齐由引擎启动时处理）。"""
         return {
             "max_concurrency": {"min": 1, "max": 8},
             "draft_tokens": {"min": 1, "max": 5},
             "prefill_chunk": {"step": 128},
             "max_context": {"min": 16, "max": 262144},
             "default_max_tokens": {"min": 1},
-            "kv_capacity": {"min": 1},
+            "kv_capacity": {"min": 0},
             "enable_mtp": {},
         }
 
@@ -125,11 +126,13 @@ class NInferAdapter(EngineAdapter):
         """超卖 / 满载余量 / MTP 保护。values 为已钳制的场景目标值。
 
         kv 取场景目标值（values 里写了 kv_capacity 用场景值；未写 = 模型 YAML 固定值）。
+        kv=0 是 auto 哨兵（引擎自取池顶，必然 ≥ 窗口），跳过 kv<窗口 硬校验。
         池顶 = C × ⌈window/64⌉ × 64（池按 64-token 页分配）。
         - 池顶 > kv：超卖 (池顶−kv)/池顶 —— 满载时超出物理池的部分靠 preempt 兜底，
           是刻意设计（场景按需求配 C/W，池不够就换小场景），仅 ⚠ 不阻塞。
         - 池顶 < kv：满载余量 (1−池顶/kv) —— 池没吃满，可加大 C/W。
-        - kv < 窗口：引擎硬校验不通过（validate_target_options）、启动必失败，❌ 阻塞。
+        - 显式 kv（>0）< 窗口：引擎硬校验不通过（validate_target_options）、
+          启动必失败，❌ 阻塞。
         """
         issues: list[str] = []
         c = values.get("max_concurrency")
@@ -137,7 +140,7 @@ class NInferAdapter(EngineAdapter):
         kv = values.get("kv_capacity")
         if kv is None:
             kv = model.ninfer.kv_capacity if model.ninfer else 0
-        if kv is not None and w is not None and kv < w:
+        if kv and w and kv < w:  # kv=0（auto 哨兵）不参与硬校验
             issues.append(
                 f"❌kv_capacity {kv} < max_context {w}（引擎要求 kv ≥ 窗口，否则启动失败）")
         if c and w and kv:

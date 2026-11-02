@@ -7,11 +7,11 @@
 # 不要只看本 YAML —— 场景已应用时本 YAML 数值是 baseline，不等于 live。
 #
 # 场景一览（定义在 models.d/scenarios.yaml 侧车，本文件不内联 presets；
-# 2026-11-02 起统一: C5 · 262144 · kv auto，三场景仅 default_max_tokens 有差异）:
-#   default     C5 · 262144 · draft3+lmhead · kv auto≈390K（= 本文件值；池顶 1310720，超卖 ~236%）
-#   short-ctx   C5 · 262144 · draft3+lmhead · kv auto≈390K（max_tokens 16K）
-#   small-batch C5 · 262144 · draft3+lmhead · kv auto≈390K（max_tokens 32K）
-#   big-batch   C5 · 262144 · draft3+lmhead · kv auto≈390K（max_tokens 32K）
+# 2026-11-03: 仅 big-batch 调 C5·256K，其余维持）:
+#   default     C3 · 262144 · draft3+lmhead · kv auto≈390K（= 本文件值；池顶 786432，超卖 ~102%）
+#   short-ctx   C5 · 131072 · draft3+lmhead · kv auto≈390K（视觉低延迟；池顶 655360，超卖 ~68%）
+#   small-batch C2 · 262144 · draft3+lmhead · kv auto≈390K（视觉顶窗；池顶 524288，超卖 ~34%）
+#   big-batch   C5 · 262144 · draft3+lmhead · kv auto≈390K（视觉长窗批处理；池顶 1310720，超卖 ~236%）
 # 2026-10-23 起对齐官方配置：MTP3（draft-tokens 3）+ --lm-head-draft 优化 proposal head
 # （官方 serving.md 示例 + 性能基准标准配置；Code 205 tok/s / Structured 232 @ C1）。
 # kv_capacity = 0（auto）＝ v3 引擎自动取顶（2026-10-22 实测 390,016 tokens；
@@ -40,7 +40,7 @@ ninfer:
   kv_capacity: 0
   kv_dtype: nvfp4
   weight_precision: NVFP4
-  max_concurrency: 5
+  max_concurrency: 3
   default_max_tokens: 32000
   prefill_chunk: 2048
   pending_timeout_ms: 600000
