@@ -655,6 +655,30 @@ def test_05b_tree_cooldown_click_opens_timeline(page, scratch_base):
         ' .mp-tl-dot.mp-tl-cooldown', state="attached")
 
 
+# ── 5d. 方案 A：调用树行共享六列网格 — 跨行列对齐（真实坐标）─────────
+
+def test_05d_tree_columns_shared_grid_aligned(page, scratch_base):
+    """方案 A 网格对齐钉子（2026-11-02）：树四行（零池即渲染，R3 不隐藏）
+    中端口列、角色列、候选链起点各自跨行 x 坐标一致（±1px）。
+
+    flex 时代链路段 flex:1 吸收剩余空间：角色文本长度差 → 链路宽度差 →
+    角色列/候选链起点逐行错位。subgrid 共享轨道后三列起点跨行恒定。"""
+    _open_pools_tab(page, scratch_base)
+    page.wait_for_selector("#mpTree .mp-tree-row:nth-child(4)")
+    cols = page.eval_on_selector_all(
+        ".mp-tree-row",
+        "els => els.map(e => ({"
+        " port: e.querySelector('.mp-tree-port').getBoundingClientRect().left,"
+        " role: e.querySelector('.mp-tree-role').getBoundingClientRect().left,"
+        " cand: (e.querySelector('.mp-tree-cands') ||"
+        "        e.querySelector('.mp-tree-leaf')).getBoundingClientRect().left"
+        "}))")
+    assert len(cols) >= 4, cols
+    for key in ("port", "role", "cand"):
+        xs = [c[key] for c in cols]
+        assert max(xs) - min(xs) <= 1.0, (key, cols)
+
+
 # ── 8. VL 软优先路由（7.10.0：vision 排序偏好，非排除维度）──────────
 
 def test_08_vision_soft_preference_and_passthrough(page, scratch_base):

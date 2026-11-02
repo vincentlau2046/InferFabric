@@ -656,6 +656,50 @@ class TestMotionTokens:
         assert "transition: none" in block
 
 
+# ── 方案 A：调用树行共享六列网格（2026-11-02 对齐裁决）──────────────
+# 契约：.mp-tree 是六显式轨道 grid（端口|链a|角色|链b|候选链|态徽标）；
+# 树行以 subgrid 继承同一组共享轨道 → 端口列、角色列、候选链起点跨行
+# 对齐（flex 时代链路 flex:1 吸收剩余空间，角色文本长度差 → 链路宽度
+# 差 → 角色/候选起点错位）；时间线行落在候选列起点；候选链内部自然
+# 排布不变；无 subgrid 的内核回退旧 flex 布局。
+
+
+class TestTreeGridAlignment:
+    def _block(self, css: str, selector: str) -> str:
+        m = re.search(re.escape(selector) + r"\s*\{(.*?)\n\}", css, re.S)
+        assert m, selector + " block missing"
+        return m.group(1)
+
+    def _css(self) -> str:
+        return (DASHBOARD_DIR / "fragments" / "style.css").read_text(
+            encoding="utf-8")
+
+    def test_tree_container_is_six_track_grid(self):
+        block = self._block(self._css(), ".mp-tree")
+        assert "display: grid" in block
+        cols = re.search(r"grid-template-columns:\s*([^;]+);", block).group(1)
+        # 括号感知分割：minmax(12px, 24px) 内部空格不算轨道边界
+        tracks = re.split(r"\s+(?![^(]*\))", cols.strip())
+        assert len(tracks) == 6, tracks
+
+    def test_row_inherits_shared_tracks_via_subgrid(self):
+        block = self._block(self._css(), ".mp-tree-row")
+        assert "grid-template-columns: subgrid" in block
+        assert "grid-column: 1 / -1" in block
+
+    def test_timeline_row_starts_at_candidate_column(self):
+        block = self._block(self._css(), ".mp-tree-tl")
+        assert "grid-column: 5" in block
+
+    def test_no_subgrid_fallback_keeps_flex_rows(self):
+        css = self._css()
+        m = re.search(
+            r"@supports not \(grid-template-columns: subgrid\)\s*\{(.*?)\n\}",
+            css, re.S)
+        assert m, "subgrid fallback missing"
+        assert "display: flex" in m.group(1)
+
+
 # ── UI/UX P1 Task 3：A3 错误即导航（常驻 banner + 行动入口）──
 # 契约：
 # - doMpToggle 409/非 409 失败、doMpUndo 失败 →

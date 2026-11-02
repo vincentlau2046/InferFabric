@@ -1696,16 +1696,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
    文本色全走主题令牌（双主题 ≥4.5:1 — 浏览器门禁钉住）；
    --ink-3 仅用于非文本链路线（WCAG 非文本 3:1 达标）。 */
 .mp-tree {
-  display: flex; flex-direction: column; gap: var(--sp-1);
+  /* 方案 A（2026-11-02）：六显式共享轨道 — 端口|链a|角色|链b|候选链|态徽标。
+     行以 subgrid 继承同一组轨道 → 端口/角色列与候选链起点跨行对齐
+     （flex 时代链路 flex:1 吸收剩余空间，角色文本长度差 → 起点错位）；
+     候选链内部自然排布不变。无 subgrid 的内核走下方 @supports 回退。 */
+  display: grid; grid-template-columns: max-content minmax(12px, 24px) max-content minmax(12px, 24px) minmax(0, 1fr) max-content;
+  column-gap: var(--sp-1); row-gap: var(--sp-1);
   padding: var(--sp-2); margin-bottom: var(--sp-3);
   border: 1px solid var(--border); border-radius: var(--radius-md);
   background: var(--surface);
 }
 .mp-tree-row-diag { cursor: pointer; }
-.mp-tree-tl { margin: 0 2px 6px 34px; padding-top: 2px; }
 .mp-tree-row {
-  display: flex; align-items: center; gap: var(--sp-1);
+  grid-column: 1 / -1;
+  display: grid; grid-template-columns: subgrid;
+  align-items: center;
   min-height: 28px;
+}
+.mp-tree-tl { grid-column: 5 / -1; margin: 0 2px 6px 0; padding-top: 2px; }
+@supports not (grid-template-columns: subgrid) {
+  .mp-tree { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .mp-tree-row { display: flex; align-items: center; gap: var(--sp-1); min-height: 28px; }
+  .mp-tree-tl { grid-column: auto; margin: 0 2px 6px 34px; padding-top: 2px; }
 }
 .mp-tree-port, .mp-tree-role, .mp-tree-leaf {
   font-size: var(--fs-table); color: var(--ink); white-space: nowrap;
