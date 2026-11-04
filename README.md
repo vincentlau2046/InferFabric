@@ -203,7 +203,7 @@ gpu_role: exclusive
 ninfer:
   served_name: Qwen38-27B-TXT
   weight_path: ~/models/ninfer-nvfp4/model.ninfer  # 权重路径
-  docker_image: ninfer:auto                          # Docker 镜像
+  docker_image: ninfer:accept-map-v2                 # Docker 镜像（当前部署线：接受并映射 disable_parallel_tool_use + thinking.display=updates）
   port: 8007
   container_name: iff-ninfer-my-model
   max_context: 204800           # 最大上下文
@@ -342,20 +342,20 @@ models.d/scenarios.yaml            ← 第 2 层：场景定义侧车（单一�
 - **启动即读**：`switch()` 部署非活跃模型前重读磁盘「YAML + 应用层」——长驻代理的内存不会启动旧场景。
 - **展示读磁盘**：CLI / Dashboard / API 的「当前场景」一律直读应用层文件（`status().scenario_active`），不读代理内存。
 - **单写者 + 文件锁**：应用层只由 `tune.apply` 写入（`fcntl.flock` 排他锁覆盖写文件 + 重启临界区），并发写者串行化；其余工具链只读。
-- **kv_capacity 是场景可选字段**（ninfer 白名单含它，v6.1.1+）：场景写它即覆盖模型 YAML 固定池，不写=沿用。Qwen38-27B-VL v3 引擎场景一律 0（auto≈390K；显式 >390,016 直接 FATAL）。场景 C×W 池顶超出即「超卖」——预期行为（满载由引擎 preempt 兜底），`iff tune` 仅 ⚠ 提示、不阻塞。
+- **kv_capacity 是场景可选字段**（ninfer 白名单含它，v6.1.1+）：场景写它即覆盖模型 YAML 固定池，不写=沿用。**TXT/VL 全场景一律 0（auto，v7.10.2 起）**：v3 引擎新规划器带 1GiB headroom 策略，显式 kv 稍超预算即启动 FATAL（qwen3.8-27b NVFP4 KV 实测 ≈23.8KiB/token），auto 由引擎按剩余显存自取池顶（TXT ≈583K / VL ≈388K tokens）。场景 C×W 池顶超出即「超卖」——预期行为（满载由引擎 preempt 兜底），`iff tune` 仅 ⚠ 提示、不阻塞。
 - **draft>1 自动冒烟**：`draft_tokens > 1` 的场景应用后自动跑一条短请求冒烟，失败自动还原上一次配置。
 - **场景变更事件日志**：每次生效的 apply（写应用层/重启/回滚，含失败路径）发一行 JSON 结构化事件 `[tune-event]`（from→to 场景、关键参数、池顶/超卖、MTP 冒烟、状态）——CLI 跑走 stdout、Dashboard 走 systemd journal；可按时间戳与 `/api/request_log`、指标日志 join，做「场景参数 × 指标」关联分析，持续优化部署参数。
 
-### 当前场景定义（NInfer 双模型；TXT 2026-10-09 重校准，VL 2026-11-03 big-batch 调 C5·256K）
+### 当前场景定义（NInfer 双模型；TXT 2026-10-09 重校准，VL 2026-11-03 big-batch 调 C5·256K；TXT/VL 2026-11-04 起 kv 全场景 0=auto）
 
-| 场景（使用档位） | Qwen38-27B-TXT（kv 池 632K） | Qwen38-27B-VL（kv auto≈390K） |
+| 场景（使用档位） | Qwen38-27B-TXT（kv auto≈583K） | Qwen38-27B-VL（kv auto≈388K） |
 |------|------|------|
 | **short-ctx** 低延迟 | C6 · 131072 · MTP draft=2 · 超卖 25.0% | C5 · 131072 · MTP draft=3 · 超卖 ~68% |
 | **small-batch** 顶窗批处理 | C3 · 262144 · MTP draft=3 · 超卖 18.0% | C2 · 262144 · MTP draft=3 · 超卖 ~34% |
 | **big-batch** 长窗批处理 | C5 · 168000 · MTP draft=1 · 超卖 27.1% | C5 · 262144 · MTP draft=3 · 超卖 ~236% |
 
 > 场景名 = 使用档位（并发/用途），**不代表窗口大小**（small-batch 反而是顶窗长档）。
-> VL 2026-11-03: 仅 big-batch 调 C5 · 262144（池顶 1310720，超卖 ~236%），short-ctx/small-batch/default 维持原值；default = 模型 YAML 当前值：TXT C4 · 155000 · draft=1（池顶 620032，满载余量 1.9%，零抢占）；VL C3 · 262144 · draft=3（池顶 786432，超卖 ~102%）。
+> VL 2026-11-03: 仅 big-batch 调 C5 · 262144（池顶 1310720，超卖 ~236%），short-ctx/small-batch/default 维持原值；default = 模型 YAML 当前值：TXT C4 · 155000 · draft=1；VL C3 · 262144 · draft=3。kv_capacity 全场景 0（auto）——v3 引擎显式 kv 受 1GiB headroom 预算约束，稍超即启动 FATAL，故一律交引擎自取池顶。
 > 场景字段白名单（ninfer）：`max_concurrency / max_context / default_max_tokens / prefill_chunk / enable_mtp / draft_tokens / kv_capacity`（越界自动钳制）。
 
 ### 用法
@@ -400,6 +400,7 @@ Dashboard 推理页模型卡有 **⚙ 场景** 按钮：三阶段模态框（选
 | 5xx（未提交） | 最多重试原目标 1 次，之后切下一候选 |
 | 401 / 403 | 端点冷却 60s（按 endpoint_fingerprint，双协议共享——凭证级故障）+ 切下一候选 |
 | 400 / 404 / 422 / 内容安全 / 501 | **终止，不回退**（确定性错误，换候选也无解）；404 额外隔离端点 30 分钟 |
+| 400 `parallel_tool_use_not_supported`（v7.10.4） | 例外：判定候选**引擎能力不匹配** → 切下一候选（如云端候选接受该字段），不冷却端点（引擎只拒这一请求形状）；全部候选不兼容 → 干净 503 `pool_unavailable` 信封 |
 | 已提交任何字节 | 永不重试/切换；流中断上报截断遥测 |
 
 统一预算：`max_attempts` 计**所有真实上游调用**（含同目标重试）；`deadline_ms` 覆盖限流排队与等待；准入失败（容量门超时/候选冷却中）**不消耗** attempt 预算。冷却期过半后以**半开单飞探测**恢复（同一端点并发只放一个探测请求）。
@@ -434,7 +435,7 @@ pools:
 
 ### 管理
 
-管理面端点见 [Model Pools (admin)](#model-pools-admin)；Dashboard「模型池」TAB 可视化同一能力，v7.1.0 起为运营视图：每池双协议健康灯（绿=首选服务中/黄=回退中/红=无可用候选）、候选链运行态（服务中/未启动/冷却/隔离倒计时/最近失败）、三段式编辑器（raw 基底防丢数据，编辑→预览→CAS 应用，会话内回滚）、空态初始化向导（fast/premium/small/classifier 四角色引导创建）与接入片段（OpenAI/Anthropic 复制即用代码）。`/v1/models` 列出启用池为 `{"id":"iff/fast","owned_by":"iff-pool"}`。
+管理面端点见 [Model Pools (admin)](#model-pools-admin)；Dashboard「模型池」TAB 可视化同一能力（截图见 [Dashboard](#dashboard-v7104)）：顶部已配置调用树 + 四组常驻池卡，卡片单动作内联编辑（替换/上移/下移/删除/新增候选/高级池参数，每动作独立 preview→apply CAS 门禁）、候选链运行态（服务中/未启动/冷却/隔离倒计时/最近失败）、延迟心跳与故障时间线、接入片段（OpenAI/Anthropic 复制即用代码）。`/v1/models` 列出启用池为 `{"id":"iff/fast","owned_by":"iff-pool"}`。
 
 ---
 
@@ -458,7 +459,7 @@ API Keys are never stored in plaintext—automatically converted to `${ENV_VAR}`
 
 ---
 
-## Dashboard (v6.0.1)
+## Dashboard (v7.10.4)
 
 A macOS-inspired sidebar dashboard for model management, monitoring, and multi-engine inference:
 
@@ -466,10 +467,10 @@ A macOS-inspired sidebar dashboard for model management, monitoring, and multi-e
 |:---:|:---:|
 | **Overview — GPU metrics + model cards** | **Inference — model lifecycle & engine metrics** |
 | ![Dashboard Overview](docs/screenshots/00-dashboard-overview.png) | ![Inference](docs/screenshots/03-inference.png) |
-| **Monitor — 统一时间档位三卡（功耗/Token/延迟）** | **Cloud providers management** |
-| ![Metrics](docs/screenshots/04-metrics.png) | ![Cloud Providers](docs/screenshots/02-cloud-providers.png) |
-| **Anomaly detection** | |
-| ![Anomaly](docs/screenshots/05-anomaly.png) | |
+| **Monitor — 统一时间档位三卡（功耗/Token/延迟）** | **Model Pools — 调用树 + 候选卡片内联编辑** |
+| ![Metrics](docs/screenshots/04-metrics.png) | ![Model Pools](docs/screenshots/06-model-pools.png) |
+| **Cloud providers management** | **Anomaly detection** |
+| ![Cloud Providers](docs/screenshots/02-cloud-providers.png) | ![Anomaly](docs/screenshots/05-anomaly.png) |
 
 **Features**:
 - Sidebar navigation（总览/推理/监控/部署/云端/异常）
@@ -482,7 +483,7 @@ A macOS-inspired sidebar dashboard for model management, monitoring, and multi-e
 - **Two-scope token charts**: local engine vs. cloud provider consumption split side-by-side
 - Inference model card **⚙ 场景** control: three-phase modal — pick scenario (`GET /admin/tune/scenarios`) → diff/warning preview (`/admin/tune/preview`) → apply (`POST /admin/tune`, in-process + file lock); card badge shows the live scenario read straight from the applied-layer file
 - Cloud provider management: CRUD, auto-discover, connection test, API key masked-then-expanded forwarding
-- 模型池 TAB（v7.1.0 运营视图）：双协议健康灯 + 候选链运行态（服务中/未启动/冷却/隔离/最近失败）；三段式编辑器（raw 基底、替换候选继承优先级、validate 预览门禁、CAS 应用 + 会话内回滚）；空态四角色初始化向导；接入片段（OpenAI/Anthropic 复制即用，含 ACL 与 /v1 提示）；单池 enabled 原子开关（CAS 冲突 409 → 提示刷新）
+- 模型池 TAB（v7.5.0 运营视图重构 → v7.10.3 卡片内联）：顶部已配置调用树（五态徽标 + 双链路着色 + 行共享 subgrid 跨行对齐 + 故障时间线展开）；四组常驻池卡，**卡片单动作内联编辑**——替换/上移/下移/删除/新增候选/高级池参数（max_attempts/deadline_ms/accept_declared）全部收进候选卡，每动作独立走 preview→apply 门禁（validate + dry-run + CAS expected_revision，409 冲突横幅）；接入片段（OpenAI/Anthropic 复制即用，含 ACL 与 /v1 提示）；单池 enabled 原子开关（CAS 冲突 409 → 提示刷新）；双主题对比度 ≥4.5:1 真实浏览器门禁
 - Anomaly detection: top-N anomalies with severity classification
 - Dual-protocol routing: local vLLM/sglang + cloud OpenAI-compatible, unified via YAML engine-type aliases
 - Dark mode (default) + light mode, typography hierarchy, WCAG AA contrast
@@ -709,9 +710,9 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 | **v5.8.0** | **2026-09** | **PR-19: Production-grade aiohttp async edge (`--async`)** — hybrid executor model, 7 stream routes with incremental SSE pump, 30+ buffered routes with full header propagation, chunked request body support, 100MB client_max_size, EADDRINUSE retry, systemd sd_notify, C extension wheel rebuild (2.7x perf), dead route cleanup, **path normalization fix**: `/v1/completions`/`/api/chat`/`/api/generate` aliased to `/v1/chat/completions` (engine-type-driven via YAML). |
 | **v6.0.0** | **2026-09** | **Dashboard data-chain engine-agnostic + two-scope** — token stats DB-sourced (no longer vLLM Prometheus-only, works across vLLM/sglang/ninfer); local vs. cloud two-scope token charts; `/api/engine_metrics` route (KV cache / batch size / seq length / TPOT / TTFT / throughput); **6-KPI 2×3 panel** with Batch Size + unified TPOT(ms, 2dp)/TTFT(s, 2dp) units; 30-day standardized bar charts; live snapshot freshness (ETag/304 + TTL single-flight cache); AnomalyCollector tab. |
 | **v6.0.1** | **2026-09** | **统一 Monitor 三卡时间档位单位语义（分钟/小时/天/周，整体弃用 月）** — 功耗/电费 小时/天/周（周 = 近 90 天 · 7 天周桶，双轴单网格 W 0–600 + 温度 nice 刻度）；Token 用量 分钟/小时/天/周（60min·12×5min / 24h·24×1h / 30d·30×1d / 90d·13×1周，双 scope + Cache Hit Rate）；模型延迟趋势 分钟/小时/天（相对年龄对齐、严格 12/24/30 桶）；`/api/token-curve` 档位重定义，`/api/latency`、`/api/power` 端点就位。 |
-| **v7.10.2** | **2026-11-03** | **kv_capacity=0 auto 哨兵修复 + VL big-batch C5·256K 校准** — 修复：`engine_caps` 曾给 kv_capacity 定 min=1，`_clamp` 把 0（auto 哨兵）抬成 1（场景预览显示 "kv_capacity 0 → 1"），`validate_scenario` 随之误报 ❌ kv 1 < 窗口 → `apply()` TuneError——VL 场景（kv 一律 0）全部无法应用。改动：kv_capacity min 1→0（0=auto 不钳制，显式值仍 ≥1）；kv<窗口 硬校验跳过 kv=0（auto 时引擎自取池顶必然 ≥ 窗口）；回归测试 ×2（preview 不钳制/无 ❌ + apply(dry) 不被拦）。场景校准（用户裁决）：VL 仅 big-batch 调 C5·262144·kv auto（池顶 1310720，超卖 ~236%，preempt 兜底为预期），short-ctx/small-batch/default 维持原值；README 场景表 + 字段白名单（补 kv_capacity）同步。环境注记：系统 Python 3.12→3.14.4 后 pytest 重建（user-site pip 26.2.2 + pytest 9.2.0，vendored cp313 abi3 依赖兼容 3.14），unit 1876 全绿；integration `test_restart_smoke` 2 例为 py3.14 环境性失败（干净树复现，另行处理）。 |
 | **v7.10.4** | **2026-11-04** | **池故障转移：引擎能力不匹配候选自动切换（parallel_tool_use_not_supported）** — Claude Code 新 session 首条请求带 `tool_choice.disable_parallel_tool_use=true` + 73 tools，NInfer 引擎硬编码拒绝（400 parallel_tool_use_not_supported）→ 每次 session 首轮必挂。修复（方案 A，池层止血；引擎侧方案 B 另行换镜像）：① forwarder suppress 分支在丢弃 body 前提取上游 `error.code` → `CloudResult.upstream_code`（解析失败一律 None，默认转发路径逐字节不变，PR-14 边界保持）；② pool_forward 新增 `incompatible` 传输信号 → 该候选切下一候选（云 glm-5 接受该字段）、不冷却端点（引擎只拒这个请求形状）、半开探测撞上按探测通过处理、状态守卫（仅 400，429/5xx 绝不被绕过）、固定错误动作表对无信号结果零变化；③ dispatch 把 code=parallel_tool_use_not_supported 映射为候选不兼容，其余 400 维持「终止不回退」，全部候选不兼容 → 客户端收干净 503 pool_unavailable 信封；OpenAI 本地路径无此机制的不对称已文档化。门禁：14 条新测试 RED→GREEN（forwarder 4 / pool_forward 7 / dispatch 3 含端到端 503）+ 全量 1981 绿 + cross-review SAFE TO MERGE（3 minor 全处置：探测中立/状态守卫/不对称文档化）。 |
 | **v7.10.3** | **2026-11-04** | **Dashboard 整洁批次 + 模型池卡片内联（纯前端，零后端）** — ① 模型池编辑模态 → 卡片单动作内联：替换/上移/下移/删除/新增候选/池参数（高级面板）全部收进候选卡，每动作独立走 preview→apply 门禁（validate/dry-run/update CAS + expected_revision，409 冲突横幅）；回滚按钮与 `_undo` 机制删除（用户裁决）。② 决策块整块删除（用户二次裁决 2026-11-04）：「当前选择：X」行与「排除：reason」行都不再渲染，路由态改由在役候选卡标记（绿边框 mp-cand-active + 调用中 pill，applyDynamic 按 id 摘旧挂新翻转，chosen 不进 structSig 零闪烁契约保持）+ 头部协议健康灯承载；structSig 同步摘除 protocols 键（无渲染面数据不再触发整块重建）。③ 整洁/对齐批次（本批一并合入）：P0 卡片等高/操作行钉底/meta 列 4 槽定宽、P1 双主题设计令牌（暖炭黑 dark + 暖瓷白 light 一等公民）、异常页严重度摘要 tiles（点击应用服务端过滤）、推理页 4 槽位卡片解剖统一 + 切换结果真实校验、监控 th.num 右对齐、概览页 GPU tr-bars 实时填充、长度无关对齐（卡片等高 + margin-top:auto 钉底）。④ validate 非 2xx 显示真实 HTTP 错误（403/挡写环境不再误报空「校验未通过」）。门禁：单测 144（test_decisions_block_deleted / applyDynamic 翻转 / 内联动作全流）+ 真实浏览器 15/15（含双主题对比度 ≥4.5:1）+ cross-review APPROVE（2 条注释 minor 已修，1 条 2xx 非 JSON 兜底挂起）。 |
+| **v7.10.2** | **2026-11-03** | **kv_capacity=0 auto 哨兵修复 + VL big-batch C5·256K 校准** — 修复：`engine_caps` 曾给 kv_capacity 定 min=1，`_clamp` 把 0（auto 哨兵）抬成 1（场景预览显示 "kv_capacity 0 → 1"），`validate_scenario` 随之误报 ❌ kv 1 < 窗口 → `apply()` TuneError——VL 场景（kv 一律 0）全部无法应用。改动：kv_capacity min 1→0（0=auto 不钳制，显式值仍 ≥1）；kv<窗口 硬校验跳过 kv=0（auto 时引擎自取池顶必然 ≥ 窗口）；回归测试 ×2（preview 不钳制/无 ❌ + apply(dry) 不被拦）。场景校准（用户裁决）：VL 仅 big-batch 调 C5·262144·kv auto（池顶 1310720，超卖 ~236%，preempt 兜底为预期），short-ctx/small-batch/default 维持原值；README 场景表 + 字段白名单（补 kv_capacity）同步。环境注记：系统 Python 3.12→3.14.4 后 pytest 重建（user-site pip 26.2.2 + pytest 9.2.0，vendored cp313 abi3 依赖兼容 3.14），unit 1876 全绿；integration `test_restart_smoke` 2 例为 py3.14 环境性失败（干净树复现，另行处理）。 |
 | **v7.10.1** | **2026-11-02** | **模型池调用树方案 A 网格对齐 — 行共享六列 subgrid，端口/角色列与候选链起点跨行对齐（用户批准方案 A）** — flex 时代链路段 `flex:1` 吸收剩余空间，角色文本长度差 → 链路宽度差 → 角色列/候选链起点逐行错位（实测角色列 x 坐标差 16.9px）。改动：`.mp-tree` 升级为六显式轨道 grid（端口\|链a\|角色\|链b\|候选链\|态徽标），树行 `grid-template-columns: subgrid` 继承共享轨道 → 三列起点跨行恒定，候选链内部自然排布与零闪烁纪律（applyDynamic by-id、structSig）不变；时间线行 `grid-column: 5/-1` 落候选列起点（替代 34px 魔法缩进）；无 subgrid 内核 `@supports` 回退旧 flex。DOM 结构与 treeHtml 输出零变化。TDD：单测 TestTreeGridAlignment×4（CSS 契约）+ 浏览器门禁 test_05d（真实 chromium 坐标断言 ±1px），全量单测 1966 过（其中 dashboard 面板单测 143）、浏览器 11/11。 |
 | **v7.10.0** | **2026-11-02** | **PR-27：模型池路由简化 — 删「不可迁移历史」守卫 + vision 降为排序偏好（用户裁决 2026-11-02）** — 事故：coding agent 会话经 `iff/fast` 报 400 "carries non-migratable history (thinking signatures / tool results) … refusing to migrate it"——守卫在候选选择**之前**粗粒度解析会话历史（凡多候选池 + 带工具/thinking 历史即拒），既不看历史来源模型（fast p1 就是会话的 glm-5），也与真实客户端行为不符（Claude/coding agent 中途换模型不会被拒）。用户裁决：网关不解析会话负载，是否支持由模型/provider 自身处理。**改动**：① 整体删除 `_has_non_migratable_history` + OpenAI/Anthropic 双守卫（多候选池照常按优先级转发，会话亲和需求一并撤销）；② vision 从排除维度降为**软优先排序**：带图请求把 vision-capable 候选排前（`(not vision_pref, priority, id)` 键），其余候选仍按优先级参与同一尝试链 — 没配置 VL / 无可用 VL 时纯优先级正常调用（不再 400 `no_compatible_target`）；`feature_unsupported` 理由与 `CandidateDecision.detail` 字段删除，`_vision_capable` 三态保留（None=未知=无偏好）；③ `no_ready_target` 503 语义不变。浏览器门禁 test_08 重写为直通 200 契约（真实 chromium）。④ 顺带补齐直连/池链路差异（链路梳理裁决）：池 OpenAI 路径流式请求透明注入 `stream_options.include_usage=true`（对齐直连 PR-G2）— 此前池流式流量 RequestLog token 记 0、dashboard 统计失真；setdefault 不覆盖客户端显式选择，注入先于选路（本地/云候选同享）；Anthropic 路径无对应缺口（其流恒带 usage，message_start/message_delta 由 SSE 旁路提取）。 |
 | **v7.9.1** | **2026-11-01** | **PR-26：云模型注册表 floor 语义 — 白名单/spec 模型不再被发现的瞬时失败静默驱逐（P0 事故修复）** — 事故：tathr-glm `/models` 整点轮询 600s SSL 超时被当作「该 provider 0 模型」，`discover_all()` 全量重建注册表把白名单模型 glm-5 静默逐出 → 下游 404 `Unknown model: glm-5`，直到用户手点「模型发现」才恢复。修复：核心不变量 = 每 enabled provider 的注册表条目恰为 floor(P) = specs ∪ whitelist，上游 `/models` 只丰富元数据（新抓取条目 → 旧注册表条目 → 裸 CloudModel 三级回退）**从不缩减 floor**；`_discover_provider` 三态化（`None`=抓取失败 / `list`=成功，失败与「上游 0 模型」可区分）；`__init__` 启动即注册白名单（消灭重启后 ~1h 的 404 空窗）；策展重建去 `_candidates` 快照依赖（重启后策展动作不再丢白名单）；`reload()` 调和注册表（删/禁 provider 清残留、新 provider floor 就位）+ 末尾幂等 `start_polling()`（SIGHUP 后轮询不再永久停摆）。移除唯一途径 = 显式用户动作（取消勾选/移除/删/禁 provider，用户裁决「白名单赢」）；缺席成功抓取的白名单模型按状态迁移 WARNING 一次（"kept routable — whitelist wins"），不整点刷屏。**安全加固**（评审 2×MEDIUM）：reload 严格 per-provider floor（YAML 取消勾选即时生效）+ `discover_all` 发布临界区对账（堵并发 reload 双向竞态）。已知残留（记录在案）：`stop_polling` join 超时可致短暂双轮询（自限，两线程收敛同一 floor；加固 = 线程代际 token，follow-up）。 |
