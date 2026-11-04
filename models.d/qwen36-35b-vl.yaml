@@ -3,7 +3,7 @@ description: "Qwen3.6-35B-A3B MoE NVFP4 Abliterated (sakamakismile/Huihui Qwen3.
 gpu_role: exclusive
 model_type: vl
 quantization: NVFP4
-peak_vram_mb: 31000
+peak_vram_mb: 30000
 
 vllm:
   model_dir: Huihui-Qwen3.6-35B-A3B-abliterated-NVFP4
