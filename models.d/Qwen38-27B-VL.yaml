@@ -27,13 +27,13 @@ type: ninfer
 gpu_role: exclusive
 model_type: vl
 quantization: NVFP4
-peak_vram_mb: 30500
+peak_vram_mb: 30000
 
 ninfer:
   served_name: Qwen38-27B-VL
   model_id: Qwen38-27B-VL
   weight_path: ~/models/ninfer-qwen38-27b-vl/qwen3_8_27b_vl_nvfp4.ninfer
-  docker_image: ninfer:v3
+  docker_image: ninfer:accept-map-v2
   port: 8009
   container_name: iff-ninfer-qwen38-vl
   max_context: 262144

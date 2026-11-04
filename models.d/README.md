@@ -72,7 +72,7 @@
 
 > ⚠️ **多模态模型 `vision: true` 时，顶到显卡显存上限，端口务必避开 CPU/桌面占用的空间**；用 `ninfer:vl` 这类带视觉支持的镜像。
 
-> 💡 **KV 池调优**：`kv_capacity=0`(auto) 会留 1024MiB 自动头寸 + 空闲余量，池较小但最稳。若需更高 KV，可压 `media_live_mib`（视觉下不低于 ~384MiB）+ 设**显式** `kv_capacity`（如 420000）。显式值会吃满可用（`weights 后可用`≈10.2GiB/卡上，边界≈434K tokens；桌面/远程客户端如 ToDesk 占用会直接压低此上限 → `Engine runtime reservation requires ... available` FATAL ）。显式值太高会启动失败，需 ≤ 上限并留少量余量。参见 [timeline]。
+> 💡 **KV 池调优（2026-11-04 起，v3 规划器镜像线）**：**默认一律 `kv_capacity: 0`(auto)**——auto 留 1GiB headroom + 按剩余显存自取池顶（TXT ≈583K / VL ≈388K tokens，qwen3.8-27b NVFP4 KV 实测 ≈23.8KiB/token）。**显式 kv 在 v3 规划器下极易启动即 FATAL**（预算 = 权重后余量 − 1GiB，稍超即 `resolve_kv_capacity` 失败，亚秒 exit 1）；确需显式值先按 23.8KiB/token 心算并留足余量。桌面/远程客户端（ToDesk 等）占用会压低可用上限。参见 [timeline]。
 
 #### ollama_daemon
 用于 Ollama 守护进程（基础设施）。
@@ -130,9 +130,10 @@
 | 8004 | `ovis-ocr2.yaml` | `ovis-ocr2` | vllm | shared | OvisOC2 0.8B 端到端文档OCR |
 | 8005 | `gemma4-31b-vl.yaml` | `gemma4-31b-vl` | vllm | exclusive | Gemma4-31B IT NVFP4 Dense VL |
 | 8006 | `muse-glimmer-vl.yaml` | `muse-glimmer` | vllm | exclusive | Meta Muse Glimmer 30B NVFP4 VL （SGLang） |
-| 8007 | `Qwen38-27B-TXT.yaml` | `Qwen38-27B-TXT` | ninfer | exclusive | Qwen3.8-27B NVFP4 NInfer（纯文本，MTP，KV 固定 600K） |
+| 8007 | `Qwen38-27B-TXT.yaml` | `Qwen38-27B-TXT` | ninfer | exclusive | Qwen3.8-27B NVFP4 NInfer（纯文本，MTP，v3 产物 + kv=0 auto≈583K） |
 | 8008 | `qwen36-35b-vl.yaml` | `qwen36-35b-vl` | vllm | exclusive | Qwen3.6-35B A3B MoE NVFP4 VL |
-| 8009 | `Qwen38-27B-VL.yaml` | `Qwen38-27B-VL` | ninfer | exclusive | Qwen3.8-27B NVFP4 NInfer 多模态 VL（视觉塔 + NVFP4 KV） |
+| 8009 | `Qwen38-27B-VL.yaml` | `Qwen38-27B-VL` | ninfer | exclusive | Qwen3.8-27B NVFP4 NInfer 多模态 VL（视觉塔 + NVFP4 KV，kv=0 auto≈388K） |
+| 8010 | `qwen36-35b-ninfer.yaml` | `qwen36-35b-ninfer` | ninfer | exclusive | Qwen3.6-35B A3B MoE NVFP4 NInfer（官方 v3 产物，vision+MTP3；就绪未 serve，DFlash adapter 缺口） |
 | 8188 | `comfyui.yaml` | — | comfyui | shared | ComfyUI 图像生成 |
 | 8880 | `tts-qwen3.yaml` | — | tts_server | shared | Qwen3-TTS 1.7B 语音合成 |
 | 8881 | `asr-sensevoice.yaml` | — | asr_server | shared | ASR SenseVoice-Small 中文语音识别 |
@@ -143,7 +144,9 @@
 **注释**：
 - `model_affinity.yaml` 为云模型路由配置，不占用端口。
 - GPU 角色：`exclusive` = 独占 GPU、`shared` = 共享 GPU、`none` = CPU 运行。
-- `qwen3-vl-4b-prefill` / `qwen3-vl-4b-decode`（P/D 分离，端口 8010/8011）已归档至 `archive/*.yaml.bak`（2026-09-21，暂不启用 PD 分离；如需恢复：还原文件名回 `models.d/` 并在本表加回两行）。
+- `qwen3-vl-4b-prefill` / `qwen3-vl-4b-decode`（P/D 分离，端口 8010/8011）已归档至 `archive/*.yaml.bak`（2026-09-21，暂不启用 PD 分离；如需恢复：还原文件名回 `models.d/` 并在本表加回两行；8010 现已重新分配给 `qwen36-35b-ninfer`，恢复时需先腾挪端口）。
+- 2026-11-04/05: NInfer 引擎镜像线切换——TXT/VL `docker_image` 统一 `ninfer:accept-map-v2`（1ca85a95 线 + disable_parallel 接受并映射 + thinking.display=updates；TXT 侧引擎探针未验证，VL 全套已验证）；TXT weight_path 升 v3 产物 `qwen3_8_27b_nvfp4_v3.ninfer`；TXT YAML + `scenarios.yaml` TXT 三场景 `kv_capacity` 全部改 0（auto，v3 规划器显式 kv 预算不足即 FATAL）。
+- 2026-11-03: 新增 `qwen36-35b-ninfer.yaml`（8010，官方 NVFP4 v3 产物，kv_dtype fp8、MTP3 首版；DFlash 投机 adapter 缺口，就绪未 serve）。
 
 ---
 

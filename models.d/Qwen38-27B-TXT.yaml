@@ -21,15 +21,18 @@ type: ninfer
 gpu_role: exclusive
 model_type: llm
 quantization: NVFP4
-peak_vram_mb: 30500
+peak_vram_mb: 30000
 ninfer:
   served_name: Qwen38-27B-TXT
-  weight_path: ~/models/ninfer-nvfp4/qwen3_8_27b_nvfp4.ninfer
-  docker_image: ninfer:auto
+  weight_path: ~/models/ninfer-nvfp4/qwen3_8_27b_nvfp4_v3.ninfer
+  docker_image: ninfer:accept-map-v2
   port: 8007
   container_name: iff-ninfer-qwen38
   max_context: 200000
-  kv_capacity: 632000
+  # 2026-11-04: 切 accept-map（1ca85a95 线）后必须 kv=0 auto——新规划器 headroom
+  # 策略下显式 kv 632000 物理放不下（≈13.9GiB > 预算 ≈12.7GiB，启动即 FATAL），
+  # 与 VL 2026-11-03 的结论同款。auto 实测解析 ≈500-560K tokens。
+  kv_capacity: 0
   kv_dtype: nvfp4
   weight_precision: NVFP4
   max_concurrency: 4

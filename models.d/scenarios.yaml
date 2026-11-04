@@ -1,4 +1,6 @@
 Qwen38-27B-TXT:
+  # 2026-11-04: 全场景 kv 改 0（auto）——accept-map（1ca85a95 线）新规划器
+  # headroom 策略下显式 kv 启动即 FATAL（同 VL 2026-11-03 处理）。
   short-ctx:
     max_concurrency: 6
     max_context: 131072
@@ -6,7 +8,7 @@ Qwen38-27B-TXT:
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 2
-    kv_capacity: 590000
+    kv_capacity: 0
   small-batch:
     max_concurrency: 3
     max_context: 262144
@@ -14,7 +16,7 @@ Qwen38-27B-TXT:
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 3
-    kv_capacity: 645000
+    kv_capacity: 0
   big-batch:
     max_concurrency: 5
     max_context: 168000
@@ -22,7 +24,7 @@ Qwen38-27B-TXT:
     prefill_chunk: 2048
     enable_mtp: true
     draft_tokens: 1
-    kv_capacity: 612000
+    kv_capacity: 0
 Qwen38-27B-VL:
   # 2026-11-03: 仅 big-batch 调 C5·262144；short-ctx/small-batch 维持原值
   short-ctx:

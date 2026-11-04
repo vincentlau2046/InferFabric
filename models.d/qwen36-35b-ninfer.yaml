@@ -1,0 +1,44 @@
+# ═══════════════════════════════════════════════════════════════════
+# Qwen3.6-35B-A3B → NInfer 框架迁移（2026-11-03）。
+# 权重 = 官方 neroued/Qwen3.6-35B-A3B-NInfer 产物（container v3，sha256
+# 3e332976…be84，manifest text+vision+mtp+dflash；官方 base，非 abliterated）。
+# 量化 = NVFP4 全系列角色化混合：MoE 专家 Q4 gate/up + Q5/Q6 down，
+#        shared expert/mixer Q8，敏感层（gates/norms/lm_head/vision）BF16/FP32。
+# 运行时要求 runtime ≥ 98dada0e（container v3 reader）→ docker_image ninfer:master
+# （upstream master a754fcf3 构建；现役 ninfer:auto/ninfer:v3 均只认 v2 container）。
+# ── 与现役 27B 的差异 ──
+# kv_dtype: fp8（官方 README serving 基线；如需 NVFP4 KV 后续 tune 验证）
+# draft_tokens ≤ 5：上游 35B 另有 DFlash 投机（draft ≤15），生产 adapter
+#   （process_manager/ninfer.py）暂无 --spec dflash/--proposal-head 透传，
+#   首版走 MTP3；DFlash 支持为后续 PR。
+# ═══════════════════════════════════════════════════════════════════
+name: qwen36-35b-ninfer
+description: Qwen3.6-35B-A3B MoE — NInfer 引擎（官方 NVFP4 产物，vision + MTP，container v3）
+type: ninfer
+gpu_role: exclusive
+model_type: vl
+quantization: NVFP4
+peak_vram_mb: 30000
+
+ninfer:
+  served_name: qwen36-35b-ninfer
+  model_id: qwen36-35b-ninfer
+  weight_path: ~/models/ninfer-nvfp4/qwen3_6_35b_a3b.ninfer
+  docker_image: ninfer:master
+  port: 8010
+  container_name: iff-ninfer-qwen36-35b
+  max_context: 131072
+  kv_capacity: 0
+  kv_dtype: fp8
+  weight_precision: NVFP4
+  max_concurrency: 2
+  default_max_tokens: 32768
+  prefill_chunk: 2048
+  pending_timeout_ms: 600000
+  enable_mtp: true
+  draft_tokens: 3
+  enable_lm_head_draft: true
+  vision: true
+  startup_timeout: 180
+  media_cache_mib: 0
+  media_live_mib: 512
