@@ -227,6 +227,10 @@ class AttemptResult:
     status: int | None = None
     error: str | None = None
     retry_after: float | None = None
+    # 候选能力不匹配本请求（传输层信号，2026-11-04）：如本地引擎 400
+    # code=parallel_tool_use_not_supported — 换候选可解（云接受该字段），
+    # 但不冷却端点（其他请求形状不受影响）。False = 固定动作表不变。
+    incompatible: bool = False
     route: str | None = None
     usage: dict = field(default_factory=dict)
     ttft_ms: float | None = None
@@ -248,6 +252,7 @@ class AttemptRecord:
     ok: bool = False
     admitted: bool = True
     retry_after: float | None = None
+    incompatible: bool = False
     duration_ms: float | None = None
 
 
@@ -362,15 +367,18 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         records.append(AttemptRecord(
             ordinal=len(records) + 1, candidate_id=cand.candidate.id, route=res.route,
             status=res.status, error=res.error, committed=res.committed,
-            ok=res.ok, retry_after=res.retry_after,
+            ok=res.ok, retry_after=res.retry_after, incompatible=res.incompatible,
             duration_ms=(mono() - t0) * 1000.0))
 
-        # 半开探测结果回写（健康端点未注册探测 → no-op，终审 #18）
+        # 半开探测结果回写（健康端点未注册探测 → no-op，终审 #18）。
+        # incompatible 视作探测通过（cross-review 2026-11-04）：端点有应答、
+        # 只是拒绝这个请求形状 — 探测撞上它不得把健康端点续冷一整个 TTL
         if cooldowns is not None:
             # 运行态视图：记录最近一次真实传输尝试（v7.1.0；与探测回写同钟）
             cooldowns.record_attempt(cand.endpoint_fingerprint, res.ok,
                                      res.status, now=mono())
-            cooldowns.finish_probe(cand.endpoint_fingerprint, res.ok, now=mono())
+            cooldowns.finish_probe(cand.endpoint_fingerprint,
+                                   res.ok or res.incompatible, now=mono())
 
         if res.ok:
             # P3 数据底盘：延迟环旁录（只记成功且有 TTFT；缺省 None 不旁录）
@@ -392,7 +400,20 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                                   route=res.route, physical_model=pm_id,
                                   cloud_provider=prov, usage=res.usage,
                                   ttft_ms=res.ttft_ms, attempts=records)
-        if res.status in (401, 403):
+        if res.incompatible and res.status == 400:
+            # 候选能力不匹配本请求（2026-11-04）：本地引擎不支持请求中的
+            # 某个 API 选项（如 parallel_tool_use_not_supported）→ 该候选
+            # 确定无法服务本请求，切下一候选。不冷却端点：引擎拒绝的是
+            # 这个请求形状，其他请求（无该选项）照常服务。真实状态保留
+            # 在 records 供观测（_log_failed_attempts 会告警该次尝试）。
+            # 状态守卫（cross-review）：incompatible 只对 400 生效 — 带
+            # incompatible 的 429/5xx/401 继续走下方既有动作表，绝不允许
+            # 该信号绕过 Retry-After 等待或 5xx 同目标重试。
+            log.info("pool candidate '%s' incompatible for this request "
+                     "(status=%s error=%s) — trying next candidate",
+                     cand.candidate.id, res.status, res.error)
+            queue.pop(0)
+        elif res.status in (401, 403):
             if cooldowns is not None:
                 cooldowns.add(cand.endpoint_fingerprint, now=mono(),
                               reason=f"cooldown_{res.status}")

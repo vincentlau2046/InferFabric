@@ -47,6 +47,11 @@ _ERROR_CONTRACT = {
 
 _RETRY_AFTER_S = 10
 
+# 上游错误码 → 「候选能力不匹配本请求」（2026-11-04）：本地引擎不支持请求
+# 中的某个 API 选项，换候选（云）可解。真实畸形请求（其他 code / 无 code）
+# 不在此列 — 维持「终止不回退」既有语义（spec §6.2 不回退类不动）。
+_INCOMPATIBLE_UPSTREAM_CODES = frozenset({"parallel_tool_use_not_supported"})
+
 
 def is_pool_name(model: str) -> bool:
     return isinstance(model, str) and model.startswith(POOL_PREFIX)
@@ -465,6 +470,11 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
     （committed → 终止不回退）— 这是 PR-14 冻结核心路径的既有语义。
     ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，终审 #13）—
     不再调 handle_ollama_native（该路径无返回信号，无法区分已交付/未提交）。
+
+    已知不对称（cross-review 2026-11-04，文档化不改码）：OpenAI 本地候选
+    没有 parallel_tool_use_not_supported 故障转移 — _forward_request 把引擎
+    400 直发客户端并记为成功提交（PR-14 冻结）；不兼容信号机制仅存在于
+    Anthropic 本地路径（forward_anthropic_local suppress 契约）。
     """
     route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
@@ -542,6 +552,16 @@ def _attempt_local_anthropic(handler, pm, data, *, model, pool, cand,
         gate.release()
     committed = getattr(result, "committed", False)
     status = getattr(result, "status", None)
+    upstream_code = getattr(result, "upstream_code", None)
+    if (not committed and status == 400
+            and upstream_code in _INCOMPATIBLE_UPSTREAM_CODES):
+        # 引擎能力不匹配（如 disable_parallel_tool_use 被拒）→ 本候选对
+        # 本请求不可服务，标记不兼容切下一候选（pool_forward 动作表外信号，
+        # 不冷却端点）。真实状态/错误保留供 _log_failed_attempts 观测。
+        return AttemptResult(ok=False, committed=False, status=status,
+                             incompatible=True, route=route,
+                             error=getattr(result, "error", None),
+                             retry_after=getattr(result, "retry_after", None))
     if committed and status == 200 and not getattr(result, "error", None):
         return AttemptResult(ok=True, status=200, committed=True, route=route,
                              usage=getattr(handler, "_usage", {}) or {},

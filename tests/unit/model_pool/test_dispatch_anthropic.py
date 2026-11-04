@@ -242,3 +242,96 @@ class TestPoolMessagesDispatch:
 
         assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
         assert len(anth_local) == 1
+
+
+# ── 候选不兼容故障转移（NInfer parallel_tool_use_not_supported，2026-11-04）──
+
+class TestParallelToolUseFailover:
+    """本地引擎 400 code=parallel_tool_use_not_supported → 候选对本请求
+    不兼容 → 切下一候选（云 glm-5 接受 disable_parallel_tool_use）。
+    其他 400（真实畸形请求）保持「终止不回退」既有语义。"""
+
+    def _pm_with_cloud(self, registry, anth_local_code):
+        """本地候选 qwen-small 在役，返回 (pm, cloud_calls, fake_local)。"""
+        cloud_calls = []
+
+        def fake_cloud(handler, data, provider_cfg, cloud_model, protocol="openai",
+                       original_model=None, suppress_client_errors=False, timeout=None):
+            cloud_calls.append({"model": data["model"], "protocol": protocol})
+            return SimpleNamespace(status=200, usage={}, ttft_ms=None,
+                                   duration_ms=1.0, error=None)
+
+        def fake_local(handler, pm, data, auth_header, model_obj, original_model,
+                       suppress_client_errors=False, timeout=None):
+            return CloudResult(status=400, committed=False,
+                               error="Local upstream returned HTTP 400",
+                               upstream_code=anth_local_code)
+
+        return cloud_calls, fake_local, fake_cloud
+
+    def test_parallel_tool_use_400_falls_to_cloud(self, registry, monkeypatch):
+        cloud_calls, fake_local, fake_cloud = self._pm_with_cloud(registry, "parallel_tool_use_not_supported")
+        monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
+        monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
+        cfg = _raw_config_anthropic()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": object()},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
+        h = FakeMessagesHandler()
+        data = {"model": "iff/fast", "messages": []}
+
+        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert cloud_calls == [{"model": "cloud-m", "protocol": "anthropic"}]
+        assert h.sent == []                      # 成功路径无错误信封
+
+    def test_other_400_terminates_no_fallback(self, registry, monkeypatch):
+        # 真实畸形请求（无 code）→ 终止不回退，云不被调用，发 400 信封
+        cloud_calls, fake_local, fake_cloud = self._pm_with_cloud(registry, None)
+        monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
+        monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
+        cfg = _raw_config_anthropic()
+        cfg["pools"]["fast"]["allow_cross_location"] = True
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={"prov/cloud-m": object()},
+                    providers={"prov": SimpleNamespace(
+                        openai_base="https://base/v1",
+                        anthropic_base="https://base/v1")})
+        h = FakeMessagesHandler()
+        data = {"model": "iff/fast", "messages": []}
+
+        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert cloud_calls == []
+        status, body, _ = h.sent[-1]
+        assert status == 400
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+
+    def test_all_candidates_incompatible_503_envelope(self, registry, monkeypatch):
+        # 端到端：池内唯一本地候选不兼容 → 客户端收到干净的 503
+        # pool_unavailable 信封，绝不见到上游 400
+        def fake_local(handler, pm, data, auth_header, model_obj, original_model,
+                       suppress_client_errors=False, timeout=None):
+            return CloudResult(status=400, committed=False,
+                               error="Local upstream returned HTTP 400",
+                               upstream_code="parallel_tool_use_not_supported")
+
+        monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()},
+                    cloud_models={}, providers={})
+        h = FakeMessagesHandler()
+        data = {"model": "iff/fast", "messages": []}
+
+        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        status, body, _ = h.sent[-1]
+        assert status == 503
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "overloaded_error"
+        assert any(k.lower() == "retry-after" for k in (h.sent[-1][2] or {}))

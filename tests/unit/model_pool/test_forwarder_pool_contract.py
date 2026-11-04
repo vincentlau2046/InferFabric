@@ -9,6 +9,7 @@
   （默认路径回归由既有 tests/unit/infra/test_forwarder.py 36 例证明）
 """
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -225,3 +226,69 @@ class TestTimeoutPropagation:
         forward_anthropic_local(_FakeHandler(), MagicMock(), {"messages": []},
                                 "auth", _make_model(), "iff/fast")
         assert mock_conn.call_args.kwargs["timeout"] == 300
+
+
+# ── 上游错误码提取（parallel_tool_use_not_supported 故障转移，2026-11-04）──
+
+class TestUpstreamErrorCodeExtraction:
+    """suppress 模式解析上游 4xx body 的 error.code → CloudResult.upstream_code。
+
+    背景：NInfer 引擎对 `tool_choice.disable_parallel_tool_use=true` + 多工具
+    请求返回 400 code=parallel_tool_use_not_supported（引擎能力不匹配，非请求
+    畸形）— 池层据此把该候选标记为「对本请求不兼容」切下一候选（云 glm-5
+    接受该字段）。真实畸形请求（其他 code/无 code）行为不变：终止不回退。
+    """
+
+    @patch("inferfabric.forwarder.HTTPConnection")
+    def test_400_body_error_code_extracted(self, mock_conn):
+        body = json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "disable_parallel_tool_use=true requires at most one "
+                       "tool call, which NInfer cannot guarantee",
+            "code": "parallel_tool_use_not_supported"}}).encode()
+        mock_conn.return_value.getresponse.return_value = _resp(400, body=body)
+        h = _FakeHandler()
+        out = forward_anthropic_local(h, MagicMock(), {"messages": []}, "auth",
+                                      _make_model(), "iff/fast",
+                                      suppress_client_errors=True)
+        assert isinstance(out, CloudResult)
+        assert out.status == 400 and out.committed is False
+        assert out.upstream_code == "parallel_tool_use_not_supported"
+        assert h.wfile.data == b""          # 未写客户端
+
+    @patch("inferfabric.forwarder.HTTPConnection")
+    def test_400_body_without_code_is_none(self, mock_conn):
+        # Anthropic 错误信封常规形状（无 code 字段）→ upstream_code=None，
+        # 池层维持「终止不回退」既有语义
+        body = json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "messages: field required"}}).encode()
+        mock_conn.return_value.getresponse.return_value = _resp(400, body=body)
+        out = forward_anthropic_local(_FakeHandler(), MagicMock(),
+                                      {"messages": []}, "auth",
+                                      _make_model(), "iff/fast",
+                                      suppress_client_errors=True)
+        assert out.upstream_code is None
+
+    @patch("inferfabric.forwarder.HTTPConnection")
+    def test_400_non_json_body_is_none(self, mock_conn):
+        mock_conn.return_value.getresponse.return_value = _resp(400, body=b"<html>oops</html>")
+        out = forward_anthropic_local(_FakeHandler(), MagicMock(),
+                                      {"messages": []}, "auth",
+                                      _make_model(), "iff/fast",
+                                      suppress_client_errors=True)
+        assert out.upstream_code is None
+
+    @patch("inferfabric.forwarder.HTTPConnection")
+    def test_429_body_error_code_also_extracted(self, mock_conn):
+        # 两个 suppress 分支（可重试/不可重试）都提取，保持契约一致
+        body = json.dumps({"type": "error", "error": {
+            "type": "rate_limit_error", "code": "slow_down"}}).encode()
+        mock_conn.return_value.getresponse.return_value = _resp(
+            429, body=body, headers={"Retry-After": "3"})
+        out = forward_anthropic_local(_FakeHandler(), MagicMock(),
+                                      {"messages": []}, "auth",
+                                      _make_model(), "iff/fast",
+                                      suppress_client_errors=True)
+        assert out.status == 429 and out.retry_after == 3.0
+        assert out.upstream_code == "slow_down"

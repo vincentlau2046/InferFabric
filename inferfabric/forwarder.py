@@ -44,8 +44,33 @@ class CloudResult:
     committed: bool = True
     # 429 时上游 Retry-After 秒数（suppress 模式读取，供池层预算内等待）
     retry_after: float | None = None
+    # suppress 模式下上游 4xx body 的 error.code（如 NInfer 的
+    # parallel_tool_use_not_supported）— 供池层区分「候选能力不匹配」与
+    # 「请求畸形」（前者可切候选，后者终止不回退）。None = 未解析到 code
+    upstream_code: str | None = None
 
 log = logging.getLogger("inferfabric.forwarder")
+
+
+def _upstream_error_code(raw: bytes) -> str | None:
+    """从上游错误响应 body 提取 error.code（Anthropic 错误信封形状）。
+
+    suppress 模式专用：body 在丢弃前解析一次，供池层区分「候选能力不匹配」
+    （如 NInfer parallel_tool_use_not_supported → 切候选）与「请求畸形」
+    （终止不回退）。任何解析失败 → None（契约：无 code 不改变池层行为）。
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    err = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(err, dict):
+        code = err.get("code")
+        if isinstance(code, str) and code:
+            return code
+    return None
 
 
 def _retry_after_seconds(headers) -> float | None:
@@ -502,8 +527,9 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
             if suppress_client_errors and should_retry_on_status(resp.status):
                 # 未提交失败（429/5xx）→ 不写客户端、不退避，状态原样上交
                 # 池层按动作表处理（终审 #10：429/503 语义不再丢失）
+                raw = b""
                 try:
-                    resp.read()
+                    raw = resp.read()
                 except Exception:
                     pass
                 resp.close()
@@ -512,7 +538,8 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                     error=f"Local upstream returned HTTP {resp.status}",
                     committed=False,
                     retry_after=(_retry_after_seconds(resp.headers)
-                                 if resp.status == 429 else None))
+                                 if resp.status == 429 else None),
+                    upstream_code=_upstream_error_code(raw))
 
             if should_retry_on_status(resp.status) and attempt < UPSTREAM_LOCAL_RETRIES:
                 try:
@@ -529,16 +556,20 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
             if suppress_client_errors and resp.status != 200:
                 # 非重试 4xx（400/404/422/501…）→ 同样不写客户端：
                 # committed=False + 真实状态，池层按「终止不回退」处理并由
-                # dispatch 发唯一信封（终审 #10）
+                # dispatch 发唯一信封（终审 #10）。body 丢弃前提取 error.code
+                # — 候选能力不匹配类（parallel_tool_use_not_supported）由
+                # dispatch 转为「不兼容」信号切下一候选
+                raw = b""
                 try:
-                    resp.read()
+                    raw = resp.read()
                 except Exception:
                     pass
                 resp.close()
                 return CloudResult(
                     status=resp.status,
                     error=f"Local upstream returned HTTP {resp.status}",
-                    committed=False)
+                    committed=False,
+                    upstream_code=_upstream_error_code(raw))
 
             if was_stream:
                 # G-1b: 旁路观察 Anthropic SSE 事件提取 usage（message_start 的

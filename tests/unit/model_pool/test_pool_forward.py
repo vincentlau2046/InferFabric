@@ -528,3 +528,95 @@ class TestRunAttemptsHistory:
         t = Recorder([_ok()])
         out = run_attempts(_pool(), [_cand("c1")], t)
         assert out.ok is True
+
+
+# ── 候选不兼容故障转移（parallel_tool_use_not_supported，2026-11-04）──
+
+class TestIncompatibleCandidate:
+    """传输层上报 incompatible=True（候选能力不匹配本请求）→ 切下一候选。
+
+    与固定动作表的关系：这是传输层信号（类似 committed/admitted），不是
+    新状态码类 — 不冷却端点（引擎只是不支持这个请求形状，其他请求正常）。
+    """
+
+    def test_incompatible_falls_to_next_candidate(self):
+        t = Recorder([AttemptResult(status=400,
+                                    error="parallel_tool_use_not_supported",
+                                    incompatible=True),
+                      _ok()])
+        out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
+        assert out.ok is True
+        assert t.calls == ["c1", "c2"]           # 400 + incompatible → 切换
+
+    def test_incompatible_does_not_cool_endpoint(self):
+        t = Recorder([AttemptResult(status=400,
+                                    error="parallel_tool_use_not_supported",
+                                    incompatible=True),
+                      _ok()])
+        cd = CooldownStore()
+        out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t,
+                           cooldowns=cd)
+        assert out.ok is True
+        assert not cd.is_cooling("fp-c1")        # 不冷却：其他请求形状不受影响
+        assert not cd.is_cooling("fp-c2")
+
+    def test_incompatible_all_candidates_exhausted_pool_unavailable(self):
+        t = Recorder([AttemptResult(status=400,
+                                    error="parallel_tool_use_not_supported",
+                                    incompatible=True)])
+        out = run_attempts(_pool(), [_cand("c1")], t)
+        assert out.ok is False and out.committed is False
+        assert out.error_code == "pool_unavailable"
+        assert out.status is None                # 无信封状态 → 503 pool_unavailable
+
+    def test_incompatible_recorded_in_attempt_log(self):
+        t = Recorder([AttemptResult(status=400,
+                                    error="parallel_tool_use_not_supported",
+                                    incompatible=True),
+                      _ok()])
+        out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
+        first = out.attempts[0]
+        assert first.status == 400               # 真实状态保留（观测）
+        assert first.incompatible is True
+
+    def test_incompatible_false_keeps_fixed_action_table(self):
+        # 回归锚点：不带 incompatible 的 400 仍走「终止不回退」
+        t = Recorder([AttemptResult(status=400, error="bad request"), _ok()])
+        out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
+        assert out.ok is False
+        assert out.status == 400
+        assert t.calls == ["c1"]
+
+
+class TestIncompatibleProbeAndGuard:
+    """cross-review 修复（2026-11-04）：探测中立 + 状态码守卫。"""
+
+    def test_incompatible_probe_result_does_not_recool(self):
+        # 半开探测撞上不兼容请求（引擎对其他请求形状健康）→ 不得重新冷却：
+        # 探测语义 = probe_pass（条目删除，完全恢复），非 probe_fail（续冷）
+        cd = CooldownStore()
+        cd.add("fp-c1", now=0.0, ttl=10.0)             # 先冷却（如 401）
+        # 时间线：deadline_start=0；c1 全程 t=20（TTL=10 已过 → 授予探测）
+        clocks = iter([0.0])
+        mono = lambda: next(clocks, 20.0)
+        t = Recorder([AttemptResult(status=400,
+                                    error="parallel_tool_use_not_supported",
+                                    incompatible=True),
+                      _ok()])
+        out = run_attempts(_pool(deadline_ms=60000), [_cand("c1"), _cand("c2")],
+                           t, cooldowns=cd, monotonic=mono)
+        assert out.ok is True
+        assert "fp-c1" not in cd.entries(now=21.0)     # probe_pass：条目删除
+
+    def test_incompatible_with_429_keeps_wait_and_retry(self):
+        # 状态守卫：incompatible=True 只对 400 生效；429 仍走等待重试动作表
+        sleeps = []
+        clock = iter([0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0])
+        t = Recorder([AttemptResult(status=429, retry_after=1.0,
+                                    incompatible=True),
+                      _ok()])
+        out = run_attempts(_pool(deadline_ms=5000), [_cand("c1")], t,
+                           monotonic=lambda: next(clock), sleep=sleeps.append)
+        assert out.ok is True
+        assert t.calls == ["c1", "c1"]                 # 同目标等待重试，未切候选
+        assert sleeps == [1.0]
