@@ -125,6 +125,7 @@
         ? '匹配 ' + UI.fmtNum(rows.length) + ' / ' + UI.fmtNum(_events.length) + ' 条'
         : UI.fmtNum(_events.length) + ' 条';
     }
+    renderSummary();
   }
 
   /* ── 加载骨架（UI.skeleton 同款 .skeleton/.skeleton-row，逐行占位） ── */
@@ -181,6 +182,24 @@
     }
   }
 
+  /* ── 严重度摘要：当前（服务端过滤后）事件的严重度分布；点击 tile = 应用该严重度过滤 ── */
+  var SEV_KEYS = ['critical', 'error', 'warning', 'info'];
+  var SEV_TILE = {
+    critical: 'anomSumCrit', error: 'anomSumErr',
+    warning: 'anomSumWarn',  info: 'anomSumInfo',
+  };
+  function renderSummary() {
+    var counts = { critical: 0, error: 0, warning: 0, info: 0 };
+    for (var i = 0; i < _events.length; i++) {
+      var s = _events[i].severity;
+      if (counts[s] != null) counts[s]++;
+    }
+    SEV_KEYS.forEach(function (s) {
+      var el = $(SEV_TILE[s]);
+      if (el) el.textContent = _events.length ? String(counts[s]) : '—';
+    });
+  }
+
   /* ── 全文搜索：客户端过滤（~200ms debounce，匹配 message/model/category） ── */
   function onSearchInput() {
     if (_searchTimer) clearTimeout(_searchTimer);
@@ -206,4 +225,17 @@
   if (catEl) catEl.addEventListener('change', loadAnomalies);
   if (sevEl) sevEl.addEventListener('change', loadAnomalies);
   if (searchEl) searchEl.addEventListener('input', onSearchInput);
+
+  /* 严重度摘要 tile：点击 = 应用该严重度过滤（与 #anomSevFilter 同走服务端过滤） */
+  var sumTiles = document.querySelectorAll('#anomSummary .anom-sum');
+  sumTiles.forEach(function (tile) {
+    tile.addEventListener('click', function () {
+      var sev = tile.getAttribute('data-sev');
+      var sevFilter = $('anomSevFilter');
+      if (sevFilter) {
+        sevFilter.value = (sevFilter.value === sev) ? '' : sev;
+      }
+      loadAnomalies();
+    });
+  });
 })();

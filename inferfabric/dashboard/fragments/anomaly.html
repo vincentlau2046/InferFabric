@@ -28,6 +28,22 @@
                aria-label="全文搜索" autocomplete="off">
         <span class="anom-count mono" id="anomCount">0 条</span>
       </div>
+      <!-- 严重度摘要：4 等宽 tile（点击 = 应用该严重度过滤，复用服务端过滤）。
+           给"原始事件表"一个焦点与层级——先看分布，再钻表。 -->
+      <div class="anom-summary" id="anomSummary">
+        <button type="button" class="anom-sum sev-crit" data-sev="critical">
+          <span class="anom-sum-n mono" id="anomSumCrit">—</span><span class="anom-sum-l">critical</span>
+        </button>
+        <button type="button" class="anom-sum sev-err" data-sev="error">
+          <span class="anom-sum-n mono" id="anomSumErr">—</span><span class="anom-sum-l">error</span>
+        </button>
+        <button type="button" class="anom-sum sev-warn" data-sev="warning">
+          <span class="anom-sum-n mono" id="anomSumWarn">—</span><span class="anom-sum-l">warning</span>
+        </button>
+        <button type="button" class="anom-sum sev-info" data-sev="info">
+          <span class="anom-sum-n mono" id="anomSumInfo">—</span><span class="anom-sum-l">info</span>
+        </button>
+      </div>
       <!-- 事件表：时间 / 严重度（图标+标签）/ 类别 / 消息（critical 行整行高亮 row-crit） -->
       <div class="cp-table-wrap">
         <table class="if-table" id="anomTable">

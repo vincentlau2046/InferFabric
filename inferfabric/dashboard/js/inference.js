@@ -155,10 +155,13 @@
     actions += '<button type="button" class="btn btn-sec btn-sm" data-action="scenario" data-model="' + nm + '">' +
       UI.icon('gear', 14) + '场景</button>';
 
-    var quant = m.quantization ? escHtml(m.quantization) : '';
-    var portHtml = (port != null && active)
-      ? '<div class="inf-stat"><dt>端口</dt><dd class="mono">:' + escHtml(port) + '</dd></div>'
-      : '';
+    /* 卡片解剖统一：4 个固定 meta 槽位（端口/uptime/精度/场景），缺失值显式
+       占位 "—"。同组/跨组所有卡同构 → 列宽恒定、卡高一致、操作行钉底对齐。
+       （此前端口仅 active 渲染、精度仅量化非空渲染 → 每卡槽数不同 → 列参差。） */
+    var portVal = (port != null && active) ? ':' + escHtml(port) : '—';
+    var upVal = active ? UI.fmtDur(upSecs) : '—';
+    var quantVal = m.quantization ? escHtml(m.quantization) : '—';
+    var scnTitle = escHtml(scn === 'default' ? 'default（= 模型 YAML 当前值）' : '已应用场景 ' + scn);
 
     return '' +
       '<div class="if-card inf-card">' +
@@ -169,12 +172,11 @@
         '</div>' +
         '<div class="if-card-body">' +
           '<dl class="inf-stats">' +
-            portHtml +
-            '<div class="inf-stat"><dt>uptime</dt><dd class="mono">' + (active ? UI.fmtDur(upSecs) : '—') + '</dd></div>' +
-            (quant ? '<div class="inf-stat"><dt>精度</dt><dd class="mono">' + quant + '</dd></div>' : '') +
+            '<div class="inf-stat"><dt>端口</dt><dd class="mono">' + portVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>uptime</dt><dd class="mono">' + upVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>精度</dt><dd class="mono">' + quantVal + '</dd></div>' +
             '<div class="inf-stat"><dt>场景</dt><dd class="mono inf-scenario' + scnCls + '" title="' +
-              escHtml(scn === 'default' ? 'default（= 模型 YAML 当前值）' : '已应用场景 ' + scn) + '">' +
-              escHtml(scn) + '</dd></div>' +
+              scnTitle + '">' + escHtml(scn) + '</dd></div>' +
           '</dl>' +
         '</div>' +
         '<div class="if-card-actions">' + actions + '</div>' +

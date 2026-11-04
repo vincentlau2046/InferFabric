@@ -1,8 +1,9 @@
 """模型池面板：运行真实 model-pools.js，不访问网络（Node VM 模式）。
 
 契约（Task 9，只读 + 开关）：
-- 渲染池列表：池名 / enabled 开关 / revision / 候选与排除原因
-- 双协议候选解释：OpenAI 与 Anthropic 的当前选择视图都展示
+- 渲染池列表：池名 / enabled 开关 / revision / 候选卡
+- 双协议路由态：在役候选卡上标记（mp-cand-active + 调用中 pill）；
+  决策块（「当前选择」行 + 排除:reason 行）已整块删除（2026-11-04）
 - 开关走 POST /admin/model-pools/toggle（服务端原子翻转，携带 expected_revision）
 - 409 冲突 → 提示刷新并重新拉取；成功 → toast + 重新渲染
 """
@@ -73,9 +74,8 @@ _RENDER_MUST_CONTAIN = [
     "prov/cloud-m",
     "openai",
     "anthropic",
-    "no_evidence",          # 排除原因（解释性，非只给结果）
     'type="checkbox"',      # 原生开关（无自制伪 checkbox）
-    'data-mp-edit="fast"',  # 编辑入口（卡片 → 三段式编辑器）
+    'data-mp-params-toggle="fast"',  # 高级（池参数）入口（卡片内展开）
     'data-mp-snippet="fast"',  # 接入片段入口（卡片 → 复制即用代码）
 ]
 
@@ -215,7 +215,7 @@ window.fireKey = async (key, targetId, attrs, tagName) => {
     }
   }
   documentMock.activeElement = t;
-  // 等待监听器返回的 promise（onKeyDown 透传 doMpInlineCancel/doMpEdit
+  // 等待监听器返回的 promise（onKeyDown 透传 doMpInlineCancel/doMpParamsToggle
   // 的 promise — 与 pollTick 返回渲染 promise 同模式，供调用方等待）
   const rs = (docListeners['keydown'] || []).map((fn) => fn({key, target: t}));
   await Promise.all(rs);
@@ -329,9 +329,29 @@ class TestRender:
 
     def test_renders_both_protocol_explanations(self, run_panel):
         out = run_panel(_routes())
-        # OpenAI 有 chosen，Anthropic 全排除且带原因 — 两套视图都要可见
-        assert "loc" in out["html"]
-        assert out["html"].count("no_evidence") >= 2   # 双候选排除原因
+        # 双协议路由态可见性：两协议徽标都渲染（在役态由卡标记承载）
+        assert "openai" in out["html"]
+        assert "anthropic" in out["html"]
+
+    def test_decisions_block_deleted(self, run_panel):
+        # 决策块整块删除（2026-11-04 用户裁决二次）：「当前选择：X」行与
+        # 排除:reason 行都不再渲染 — 路由态由在役候选卡标记
+        # （mp-cand-active + 调用中 pill）+ 头部协议健康灯承载。
+        out = run_panel(_routes())
+        html = out["html"]
+        assert "纳入" not in html             # 纳入行全删
+        assert "排除：" not in html           # 排除行全删（二次裁决）
+        assert "no_evidence" not in html      # decisions 不再有渲染面
+        assert "当前选择：" not in html        # 文字行已删（2026-11-04）
+        assert 'class="mp-decisions"' not in html  # 决策块容器已删
+        # openai chosen=loc → loc 卡高亮 + 调用中 pill；cld 卡无标记
+        loc_m = re.search(r'<div class="mp-cand-card[^"]*"[^>]*'
+                          r'data-mp-cand-card="loc"[^>]*>', html)
+        assert loc_m and "mp-cand-active" in loc_m.group(0), loc_m
+        assert 'data-mp-inuse="loc"' in html   # pill 在 loc 卡行1
+        cld_m = re.search(r'<div class="mp-cand-card[^"]*"[^>]*'
+                          r'data-mp-cand-card="cld"[^>]*>', html)
+        assert cld_m and "mp-cand-active" not in cld_m.group(0), cld_m
 
     def test_disabled_pool_renders_unchecked(self, run_panel):
         pools = json.loads(json.dumps(_POOLS_BODY))
@@ -502,7 +522,7 @@ class TestP1CandidateCards:
         html = out["html"]
         assert 'data-mp-cand-card="loc"' in html
         assert 'class="mp-cand-card' in html
-        # 旧候选表格不再出现在池卡片（编辑器模态内 cp-table 不受影响）
+        # 旧候选表格不再出现在池卡片（编辑模态已退役，cp-table 无承载面）
         assert "候选</th>" not in html
 
     def test_dot_cooling_and_off_states(self, run_panel):
@@ -567,8 +587,7 @@ class TestP1CandidateCards:
 # - 替换候选 = 直接替换并继承优先级（D4：宁可丢回退，不做优先级重排）
 # - 预览：validate 不通过 → 阻止 dry-run 与应用；通过 → dry-run×2 携带编辑态 config
 # - 应用：POST /admin/model-pools {...work, expected_revision}（CAS）
-# - 409 → 冲突 toast + 重新拉取；成功 → 记录 _undo（编辑前 raw）
-# - 回滚：以最新 revision 重新 POST 编辑前配置
+# - 409 → 冲突 toast + 重新拉取（回滚机制已删 — 裁决 4：单动作小影响面）
 # - 从未配置（raw=null）→ 空基底 + 新建池骨架，expected_revision=0
 
 _EDITOR_RAW = {
@@ -702,7 +721,7 @@ class TestTreeGridAlignment:
 
 # ── UI/UX P1 Task 3：A3 错误即导航（常驻 banner + 行动入口）──
 # 契约：
-# - doMpToggle 409/非 409 失败、doMpUndo 失败 →
+# - doMpToggle 409/非 409 失败、inline 应用失败 →
 #   mp-action-banner（原因 + data-mp-banner-action 行动按钮 +
 #   data-mp-banner-dismiss 关闭）；toast 保留（即时反馈）
 # - 成功操作清除 banner（常驻但非永久）
@@ -752,30 +771,13 @@ class TestP1ErrorBanner:
                         actions=[{"fn": "doMpBannerDismiss"}])
         assert "mp-action-banner" not in out["htmlFinal"]
 
-    def test_undo_failure_renders_banner(self, run_panel):
-        # 成功 apply（置 _undo）→ 回滚 409 → banner
-        routes = _editor_routes()
-        routes["POST /admin/model-pools"] = {
-            "statuses": [200, 409],
-            "bodies": [{"status": "updated", "revision": 4},
-                       {"status": "revision_conflict", "current_revision": 9}]}
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-            {"fn": "doMpUndo", "args": []},
-        ]
-        out = run_panel(routes, actions=actions)
-        assert "mp-action-banner" in out["htmlFinal"]
-
 
 # ── UI/UX P1 Task 4：B1 局部渲染 + 本地倒计时 ──
 # 契约：
 # - 结构签名（池名 + 每池候选 id 序列 + enabled + issues 数）不变 → 不重写
 #   mpPools.innerHTML（轮询零闪烁），只走 applyDynamic 按 id 定点更新
 # - applyDynamic 定点更新：mp-lamp-<pool>-<proto>（className）、mp-dot-*、
-#   mp-rt-*（textContent）、mp-chosen-<pool>-<proto>、revision
+#   mp-rt-*（textContent）、mp-cand-<pool>-<id>（在役标记类翻转）、revision
 # - 本地倒计时：1s interval 以 runtime 拉取时刻为锚本地递减 remaining_s，
 #   更新 mp-rt-* 与环形 --p，不发出任何 fetch
 
@@ -805,8 +807,8 @@ class TestP1PartialRender:
         assert "prov/cloud-m" not in out["htmlFinal"]
 
     def test_apply_dynamic_updates_lamp_and_chosen_by_id(self, run_panel):
-        # openai chosen: loc → cld（回退）→ lamp warn + chosen 文本更新，
-        # 且结构未变（不重写 innerHTML）
+        # openai chosen: loc → cld（回退）→ lamp warn + 在役标记摘旧挂新
+        #（loc 卡摘 mp-cand-active、cld 卡挂上），结构未变（不重写 innerHTML）
         status2 = json.loads(json.dumps(_STATUS_BODY))
         status2["pools"]["fast"]["protocols"]["openai"]["chosen"] = "cld"
         routes = _ops_routes()
@@ -817,7 +819,9 @@ class TestP1PartialRender:
         assert out["writeCounts"].get("mpPools") == 1
         dyn = out["dyn"]
         assert dyn["mp-lamp-fast-openai"]["className"] == "mp-lamp mp-lamp-warn"
-        assert "cld" in dyn["mp-chosen-fast-openai"]["textContent"]
+        # 首屏渲染 chosen=loc → loc 卡 active；轮询翻转到 cld → 摘旧挂新
+        assert "mp-cand-active" not in dyn["mp-cand-fast-loc"]["className"]
+        assert "mp-cand-active" in dyn["mp-cand-fast-cld"]["className"]
 
     def test_local_countdown_decrements_without_fetch(self, run_panel):
         out = run_panel(_ops_routes(), poll_ticks=1,
@@ -951,7 +955,7 @@ class TestP1FixPass:
 #   请求 — Task 1 裁决，保既有 GET 计数契约；预热失败 → 禁用 + 提示）
 # - 选中 → 候选卡下方出 mp-inline-diff 条（旧→新 红/绿）+ 自动预览
 #   （validate + dry-run×2 携带替换后 work — 三段式门禁不放松）
-# - 应用：CAS POST（基点=选中时刻 revision）；成功 → 记 _undo + 清条 +
+# - 应用：CAS POST（基点=选中时刻 revision）；成功 → 清条 +
 #   刷新目录；409 → A3 横幅（重新选择）+ 条保留
 # - 预览未通过 → 应用按钮禁用，不 POST
 
@@ -1093,6 +1097,292 @@ class TestP2InlineEdit:
         assert body["expected_revision"] == 3
 
 
+# ── 卡片单动作内联编辑（2026-11-03 用户裁决：模态 → 卡片）──────────────
+# 契约：
+# - 每张候选卡有 [↑][↓][删除] 动作行（首候选 ↑ 禁用 / 末候选 ↓ 禁用）
+# - 候选列表下方有「+ 新增候选…」目录下拉（data-mp-inline-add）
+# - 上移/下移 = 交换相邻候选并交换 priority（承旧 mpEditMove 语义）
+# - 新增 = 链尾 push，priority = maxP+1（承旧 mpEditAddCandidate 语义）
+# - 删除 = splice 移除（validate 拦 0 候选 — 门禁兜底）
+# - 每动作独立走 beginInline 会话：diff 条 + 自动预览 + CAS 应用
+# - move/delete 不需要目录（ruling 2）；add 需要
+
+
+class TestCardInlineOps:
+    def _ops_routes(self, **kw):
+        routes = _editor_routes(**kw)
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        return routes
+
+    def test_card_ops_row_renders_with_edge_disable(self, run_panel):
+        out = run_panel(self._ops_routes())
+        h = out["htmlFinal"]
+        # 两候选各有 up/down/del 动作钮
+        assert h.count('data-mp-cand-op="up"') == 2
+        assert h.count('data-mp-cand-op="down"') == 2
+        assert h.count('data-mp-cand-op="del"') == 2
+        # 首候选（loc，视图序第一）↑ 禁用；末候选 ↓ 禁用
+        m = re.search(r'data-mp-cand-op="up"[^>]*data-mp-cand="loc"', h) \
+            or re.search(r'data-mp-cand-op="up"[^>]*disabled[^>]*>', h)
+        assert m, "up button missing"
+        assert 'disabled' in re.search(
+            r'<button[^>]*data-mp-cand-op="up"[^>]*data-mp-cand="loc"[^>]*>',
+            h).group(0)
+        # 视图末候选 = cld（dang 是 raw-only 悬空候选，不渲染卡片）
+        assert 'disabled' in re.search(
+            r'<button[^>]*data-mp-cand-op="down"[^>]*data-mp-cand="cld"[^>]*>',
+            h).group(0)
+
+    def test_add_row_renders_with_catalog_options(self, run_panel):
+        out = run_panel(self._ops_routes(),
+                        actions=[{"fn": "mpPrimeInline"}])
+        h = out["htmlFinal"]
+        assert 'data-mp-inline-add="fast"' in h
+        assert 'value="cloud:tathr-glm/glm-5"' in h   # 新增用同一目录
+
+    def test_inline_move_down_swaps_priorities(self, run_panel):
+        # loc(P1) ↓ → 与 dang(P2) 交换：loc=P2, dang=P1
+        actions = [
+            {"fn": "doMpInlineMove", "args": ["fast", "loc", "down"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(self._ops_routes(), actions=actions)
+        h = out["htmlFinal"]
+        assert "mp-inline-diff" in h or "已更新" in \
+            [t["message"] for t in out["toasts"]].__str__()
+        body = _last_update_post(out)[-1]["body"]
+        cands = {c["id"]: c["priority"]
+                 for c in body["pools"]["fast"]["candidates"]}
+        assert cands["loc"] == 2
+        assert cands["dang"] == 1
+        assert body["expected_revision"] == 3
+
+    def test_inline_add_appends_at_chain_tail(self, run_panel):
+        # raw 链尾 = dang(P2) → 新候选 priority 3
+        actions = [
+            {"fn": "doMpInlineAdd", "args": ["fast", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(self._ops_routes(), actions=actions)
+        h = out["htmlFinal"]
+        msgs = str([t["message"] for t in out["toasts"]])
+        # 应用成功后 diff 条被清除 → 条/成功 toast 二选一
+        assert "mp-inline-diff" in h or "已更新" in msgs
+        assert "新增候选" in h or "已更新" in msgs
+        body = _last_update_post(out)[-1]["body"]
+        cands = body["pools"]["fast"]["candidates"]
+        added = [c for c in cands if c["id"] not in ("loc", "dang")]
+        assert len(added) == 1
+        assert added[0]["model_name"] == "qwen3-4b"
+        assert added[0]["priority"] == 3    # maxP+1（链尾）
+        assert added[0]["id"].startswith("cand-")
+        assert "dang" in [c["id"] for c in cands]   # raw 基底防丢数据
+
+    def test_inline_delete_removes_candidate(self, run_panel):
+        # 删 loc（视图+raw 双可见；dang 是 raw-only，UI 上无删除入口）
+        actions = [
+            {"fn": "doMpInlineDelete", "args": ["fast", "loc"]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(self._ops_routes(), actions=actions)
+        h = out["htmlFinal"]
+        msgs = str([t["message"] for t in out["toasts"]])
+        assert "mp-inline-diff" in h or "已更新" in msgs
+        assert "删除候选" in h or "已更新" in msgs
+        body = _last_update_post(out)[-1]["body"]
+        ids = [c["id"] for c in body["pools"]["fast"]["candidates"]]
+        assert "loc" not in ids
+        assert "dang" in ids   # raw 基底防丢数据
+        assert body["expected_revision"] == 3
+
+    def test_inline_delete_last_candidate_blocked_by_gate(self, run_panel):
+        # cross-review I1：末候选删除的兜底不是 validate — 后端对 0 候选
+        # 不报 issue（config.py 只静默 enabled=false），validate 仍 valid:true；
+        # 真正拦下的是 dry-run 双协议 chosen=null → previewWork
+        # code=none_chosen「已阻止应用」+ 应用钮禁用（ruling 1 的实际机制）
+        body = _editor_pools_body()
+        body["pools"]["fast"]["candidates"] = [
+            c for c in body["pools"]["fast"]["candidates"]
+            if c["id"] != "dang"]
+        body["raw"]["pools"]["fast"]["candidates"] = [
+            c for c in body["raw"]["pools"]["fast"]["candidates"]
+            if c["id"] != "dang"]
+        routes = self._ops_routes()
+        routes["/admin/model-pools"] = {"status": 200, "body": body}
+        routes["POST /admin/model-pools/validate"] = {
+            "status": 200, "body": {"valid": True, "issues": []}}   # 后端放行
+        routes["POST /admin/model-pools/dry-run"] = {
+            "status": 200,
+            "body": {"chosen": None, "error": None, "decisions": [],
+                     "pool": "fast", "protocol": "openai"}}
+        out = run_panel(routes, actions=[
+            {"fn": "doMpInlineDelete", "args": ["fast", "loc"]}])
+        h = out["htmlFinal"]
+        assert "已阻止应用" in h, "末候选删除必须被 none_chosen 门禁拦下"
+        assert "两个协议均无可用候选" in h, h
+        m = re.search(r'<button[^>]*data-mp-inline-apply="fast\|loc"[^>]*>',
+                      h)
+        assert m and "disabled" in m.group(0), "应用钮必须保持禁用"
+        # 门禁兜底：配置未落盘（无 update POST）
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert not posts, "被拦的会话不得 POST 配置更新"
+
+    def test_validate_http_error_surfaces_real_error_not_fake_invalid(
+            self, run_panel):
+        # 2026-11-04 用户报障：只读预览挡 POST /admin/model-pools/validate
+        # → 403 {"error":"read-only preview…"}（无 valid 字段）。previewWork
+        # 旧实现只读 d.valid（undefined→!valid）→ 误走「校验未通过」+ 空
+        # issues 列表，真实原因（HTTP 403）被完全吞掉。修复：validate 检查
+        # res.ok，非 2xx → code=http_fail，展示真实 HTTP 状态 + 服务器 error
+        # 文本，绝不冒充空「校验未通过」；应用钮保持禁用、不 POST 配置。
+        routes = self._ops_routes()
+        routes["POST /admin/model-pools/validate"] = {
+            "status": 403,
+            "body": {"error": "read-only preview - mutating action blocked"}}
+        actions = [{"fn": "doMpInlineMove", "args": ["fast", "loc", "down"]}]
+        out = run_panel(routes, actions=actions)
+        h = out["htmlFinal"]
+        # 不再误报「校验未通过」（该文案只属于 valid:false + 有 issues）
+        assert "校验未通过" not in h, \
+            "非 2xx 的 validate 不得渲染为空的『校验未通过』: " + h
+        # 展示真实原因：HTTP 状态 + 服务器 error 文本
+        assert "403" in h, h
+        assert "read-only preview" in h, h
+        # 门禁语义不变：应用钮禁用（validated=false）
+        m = re.search(r'<button[^>]*data-mp-inline-apply="fast\|loc"[^>]*>',
+                      h)
+        assert m and "disabled" in m.group(0), "预览失败应用钮必须保持禁用"
+        # 不得落盘（无 update POST）
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert not posts, "预览 HTTP 失败的会话不得 POST 配置更新"
+
+    def test_move_and_delete_work_without_catalog(self, run_panel):
+        # ruling 2：move/delete 不依赖目录就绪（目录拉取失败也不挡）
+        routes = _editor_routes()   # 无 catalog 路由 → 拉取失败
+        # loc 在链首：↑ 是正确静默 no-op；用 ↓（与 dang 交换）
+        actions = [{"fn": "doMpInlineMove", "args": ["fast", "loc", "down"]}]
+        out = run_panel(routes, actions=actions)
+        assert "mp-inline-diff" in out["htmlFinal"]
+        routes2 = _editor_routes()
+        actions2 = [{"fn": "doMpInlineDelete", "args": ["fast", "loc"]}]
+        out2 = run_panel(routes2, actions=actions2)
+        assert "mp-inline-diff" in out2["htmlFinal"]
+
+    def test_add_requires_catalog(self, run_panel):
+        routes = _editor_routes()   # 无 catalog
+        actions = [{"fn": "doMpInlineAdd", "args": ["fast", "local:qwen3-4b"]}]
+        out = run_panel(routes, actions=actions)
+        assert any(t["kind"] == "error" for t in out["toasts"])
+        assert "mp-inline-diff" not in out["htmlFinal"]
+        assert not [c for c in out["calls"]
+                    if c["url"] == "/admin/model-pools"
+                    and c["method"] == "POST"]
+
+
+class TestParamsPanel:
+    """Task 4：池参数 = 卡内『高级』展开（2026-11-03 裁决 2 — 无模态）。
+
+    契约：
+    - 池头/未配置卡头按钮 = data-mp-params-toggle『高级』（编辑模态入口移除）
+    - 展开 → 卡内 .mp-params：max_attempts/deadline_ms 数字框（初值取 raw def）
+      + accept_declared 勾选 + 预览钮；展开态进 structSig（开合即重建）
+    - 预览（doMpInlineParams）→ param 会话（anchor=null → diff 条池底）
+      summary 列变更项 旧→新；应用走同一 CAS 门禁
+    - Esc 二级：收起高级面板（一级仍是行内 diff 条）
+    """
+
+    def _routes(self, **kw):
+        routes = _editor_routes(**kw)
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
+        return routes
+
+    def test_header_button_is_advanced_toggle(self, run_panel):
+        out = run_panel(self._routes())
+        h = out["htmlFinal"]
+        assert 'data-mp-params-toggle="fast"' in h
+        assert ">高级</button>" in h
+        # 池头不再有模态编辑入口（编辑 → 高级）
+        assert 'data-mp-edit="fast"' not in h
+        # Ruling（Task 5）：高级面板只在已配置池 — 池参数属已存在的池，
+        # 未配置池先建池（无 raw 基底，param 会话无从谈起）
+        assert 'data-mp-params-toggle="small"' not in h
+        assert "高级配置" not in h
+
+    def test_toggle_expands_panel_with_prefilled_inputs(self, run_panel):
+        out = run_panel(self._routes(),
+                        actions=[{"fn": "doMpParamsToggle", "args": ["fast"]}])
+        h = out["htmlFinal"]
+        assert 'data-mp-params="fast"' in h          # 面板（区别于 toggle 钮）
+        assert 'data-mp-param="max_attempts"' in h
+        assert 'value="2"' in h                      # raw 初值
+        assert 'data-mp-param="deadline_ms"' in h
+        assert 'value="60000"' in h
+        assert 'data-mp-param="accept_declared"' in h
+        assert 'data-mp-params-preview="fast"' in h
+
+    def test_params_open_state_in_sig_no_flicker(self, run_panel):
+        # 对位 test_timeline_open_state_in_sig_no_flicker（计划 M6）：
+        # 展开 = 开合进 sig → 重建一次；之后轮询数据不变 → mpPools 零整写
+        # （面板输入框是结构，开合必须重建；无关轮询不闪烁）
+        out = run_panel(self._routes(), poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"},
+                        actions=[{"fn": "doMpParamsToggle", "args": ["fast"]}])
+        wc = out["writeCounts"]
+        assert wc.get("mpPools") == 2, wc   # 首屏 + 展开重建；轮询零整写
+        assert 'data-mp-params="fast"' in out["htmlFinal"]
+
+    def test_toggle_off_collapses(self, run_panel):
+        actions = [{"fn": "doMpParamsToggle", "args": ["fast"]}]
+        out = run_panel(self._routes(), actions=actions)
+        assert 'data-mp-params="fast"' in out["htmlFinal"]
+        out2 = run_panel(self._routes(), actions=actions * 2)
+        assert 'data-mp-params="fast"' not in out2["htmlFinal"]
+
+    def test_params_preview_builds_session_and_apply_posts(self, run_panel):
+        actions = [
+            {"fn": "doMpParamsToggle", "args": ["fast"]},
+            # overrides 直驱（harness 元素 mock 无 querySelector —
+            # DOM 读取路径由交互测试真实浏览器覆盖）
+            {"fn": "doMpInlineParams", "args": ["fast", {"deadline_ms": 120000}]},
+        ]
+        out = run_panel(self._routes(), actions=actions)
+        h = out["htmlFinal"]
+        assert "mp-inline-diff" in h
+        assert "池参数" in h and "120000" in h       # summary 列变更项 旧→新
+        out2 = run_panel(self._routes(),
+                         actions=actions + [{"fn": "doMpInlineApply"}])
+        body = _last_update_post(out2)[-1]["body"]
+        fp = body["pools"]["fast"]
+        assert fp["deadline_ms"] == 120000
+        assert fp["max_attempts"] == 2               # 未改字段原样保留
+        assert fp["accept_declared"] is True
+        assert body["expected_revision"] == 3
+
+    def test_params_checkbox_flips(self, run_panel):
+        actions = [
+            {"fn": "doMpParamsToggle", "args": ["fast"]},
+            {"fn": "doMpInlineParams",
+             "args": ["fast", {"accept_declared": False}]},
+            {"fn": "doMpInlineApply"},
+        ]
+        out = run_panel(self._routes(), actions=actions)
+        body = _last_update_post(out)[-1]["body"]
+        assert body["pools"]["fast"]["accept_declared"] is False
+
+    def test_esc_collapses_params_panel(self, run_panel):
+        # Esc 分级：无行内会话时 → 收起高级面板
+        out = run_panel(self._routes(), store_state={
+            "tab_active": "tab-model-pools"}, actions=[
+            {"fn": "doMpParamsToggle", "args": ["fast"]},
+            {"fn": "fireKey", "args": ["Escape"]},
+            {"fn": "_drain"}])   # 收起重建是异步渲染 — 微任务拍后取终态
+        assert 'data-mp-params="fast"' not in out["htmlFinal"]
+
+
 class TestP2Optimistic:
     """B2 乐观 UI + 切换中骨架态：请求瞬间即反馈（灯/骨架），完成回真值。
 
@@ -1166,13 +1456,13 @@ class TestP2Optimistic:
 
 
 class TestP2Keyboard:
-    """B4 键盘流：E 进编辑 / Esc 分级退出；表单控件内不劫持输入。
+    """B4 键盘流：E 展开高级面板 / Esc 分级退出；表单控件内不劫持输入。
 
     契约（harness fireKey — 派发 keydown 到 document 监听）：
-    - E：焦点元素归属 data-mp-card 池 → doMpEdit(pool)；INPUT/SELECT/
-      TEXTAREA 聚焦时忽略（不劫持输入）；仅本 tab 激活时生效
-    - Esc 一级关行内 diff 条（模态不动）；二级关编辑器模态
-    - 未过预览的应用按钮（行内条 + 模态编辑器）disabled + title 原因
+    - E：焦点元素归属 data-mp-card 池 → doMpParamsToggle(pool)；INPUT/
+      SELECT/TEXTAREA 聚焦时忽略（不劫持输入）；仅本 tab 激活时生效
+    - Esc 一级取消行内 diff 条；二级收起高级面板（编辑器模态已退役）
+    - 未过预览的应用按钮（行内条）disabled + title 原因
     """
 
     def _kb_routes(self):
@@ -1182,11 +1472,12 @@ class TestP2Keyboard:
         return routes
 
     def test_key_e_opens_editor_for_focused_pool(self, run_panel):
+        # E = 聚焦池展开/收起『高级』面板（承旧「E 进编辑」语义）
         actions = [{"fn": "fireKey",
                     "args": ["e", "mp-card-fast", {"data-mp-card": "fast"}]}]
         out = run_panel(_routes(), actions=actions,
                         store_state={"tab_active": "tab-model-pools"})
-        assert 'data-mp-editor="fast"' in out["modalHtml"]
+        assert 'data-mp-params="fast"' in out["htmlFinal"]
 
     def test_key_e_ignored_in_form_controls(self, run_panel):
         state = {"tab_active": "tab-model-pools"}
@@ -1197,74 +1488,60 @@ class TestP2Keyboard:
                                  {"fn": "fireKey",
                                   "args": ["e", "mp-any-in", None, "INPUT"]}],
                         store_state=state)
-        assert 'data-mp-editor=' not in out["modalHtml"]
-        # 对照组：非表单控件同键 → 打开（证明忽略是针对性的而非功能缺失）
+        assert 'data-mp-params=' not in out["htmlFinal"]
+        # 对照组：非表单控件同键 → 展开（证明忽略是针对性的而非功能缺失）
         out2 = run_panel(_routes(),
                          actions=[{"fn": "fireKey",
                                    "args": ["e", "mp-card-fast",
                                             {"data-mp-card": "fast"}]}],
                          store_state=state)
-        assert 'data-mp-editor="fast"' in out2["modalHtml"]
+        assert 'data-mp-params="fast"' in out2["htmlFinal"]
 
     def test_esc_closes_inline_bar_first_then_modal(self, run_panel):
+        # Esc 分级：一级关行内 diff 条（高级面板不动）；二级收起高级面板
         routes = self._kb_routes()
         state = {"tab_active": "tab-model-pools"}
         base = [
             {"fn": "doMpInlineSelect",
              "args": ["fast", "loc", "local:qwen3-4b"]},
-            {"fn": "doMpEdit", "args": ["fast"]},
+            {"fn": "doMpParamsToggle", "args": ["fast"]},
         ]
-        # 第一次 Esc：只关行内条（模态不动）
         out1 = run_panel(routes, actions=base + [{"fn": "fireKey",
                                                   "args": ["Escape"]}],
                          store_state=state)
         assert "mp-inline-diff" not in out1["htmlFinal"]
-        assert 'data-mp-editor="fast"' in out1["modalHtml"]
-        # 第二次 Esc：关模态
+        assert 'data-mp-params="fast"' in out1["htmlFinal"]
         out2 = run_panel(routes, actions=base + [
             {"fn": "fireKey", "args": ["Escape"]},
-            {"fn": "fireKey", "args": ["Escape"]}],
+            {"fn": "fireKey", "args": ["Escape"]},
+            {"fn": "_drain"}],   # 二级收起重建异步 — 拍后取终态
             store_state=state)
-        assert 'data-mp-editor=' not in out2["modalHtml"]
-        assert out2["modalHtml"] == ""
+        assert 'data-mp-params="fast"' not in out2["htmlFinal"]
 
     def test_apply_button_disabled_has_reason_title(self, run_panel):
-        state = {"tab_active": "tab-model-pools"}
-        # 模态编辑器：刚打开未预览 → 应用 disabled + title 原因
-        out = run_panel(self._kb_routes(),
-                        actions=[{"fn": "doMpEdit", "args": ["fast"]}],
-                        store_state=state)
-        m = re.search(r'data-mp-act="apply"[^>]*>', out["modalHtml"])
-        assert m and "disabled" in m.group(0)
-        assert m and "预览" in m.group(0)
-        # 行内条：预览失败 → 应用 disabled + title 原因
+        # 行内条：未通过预览 → 应用 disabled + title 原因（模态版已退役）
         routes = self._kb_routes()
         routes["POST /admin/model-pools/dry-run"] = {
             "status": 200,
             "body": {"chosen": None, "error": "no_compatible_target",
                      "decisions": [], "pool": "fast", "protocol": "openai"}}
-        out2 = run_panel(routes,
-                         actions=[{"fn": "doMpInlineSelect",
-                                   "args": ["fast", "loc",
-                                            "local:qwen3-4b"]}],
-                         store_state=state)
-        m2 = re.search(r'data-mp-inline-apply="fast\|loc"[^>]*>',
-                       out2["htmlFinal"])
-        assert m2 and "disabled" in m2.group(0)
-        assert m2 and "预览" in m2.group(0)
+        out = run_panel(routes, actions=[
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]}])
+        m = re.search(r'data-mp-inline-apply="fast\|loc"[^>]*>',
+                      out["htmlFinal"])
+        assert m and "disabled" in m.group(0)
+        assert m and "预览" in m.group(0)
 
 
-class TestCatalogConsumption:
-    """v7.1.2 候选目录：向导/编辑器只消费 /admin/model-pools/catalog。"""
-
-    def test_editor_cloud_options_from_catalog(self, run_panel):
+    def test_inline_cloud_options_from_catalog(self, run_panel):
         routes = _editor_routes()
         routes["/admin/model-pools/catalog"] = {"status": 200,
                                                 "body": _CATALOG_BODY}
-        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
-        # 云候选出现在替换下拉（上一版刮错字段 → 恒空）
-        assert "cloud:tathr-glm/glm-5" in out["modalHtml"]
-        assert "cloud:Qianfan-Token/deepseek-v4.1-flash" in out["modalHtml"]
+        out = run_panel(routes, actions=[{"fn": "mpPrimeInline"}])
+        # 云候选出现在行内替换/新增下拉（上一版刮错字段 → 恒空）
+        assert "cloud:tathr-glm/glm-5" in out["htmlFinal"]
+        assert "cloud:Qianfan-Token/deepseek-v4.1-flash" in out["htmlFinal"]
 
     def test_single_catalog_source_no_legacy_scraping(self, run_panel):
         # 架构契约：目录只来自 catalog 端点 — 不得再刮 /models 与
@@ -1272,20 +1549,11 @@ class TestCatalogConsumption:
         routes = _editor_routes()
         routes["/admin/model-pools/catalog"] = {"status": 200,
                                                 "body": _CATALOG_BODY}
-        actions = [{"fn": "doMpEdit", "args": ["fast"]},
-                   {"fn": "doMpUndo"}]
-        run_panel(routes, actions=actions)   # undo 前置 renderModelPools
-        # 大手术：向导已删 — 面板侧目录消费走 primeInline（未配置卡预热）
-        prime_routes = _zero_pool_routes()
-        prime_routes["/admin/model-pools/catalog"] = {
-            "status": 200, "body": _CATALOG_LOCAL_ONLY_CLOUD}
-        out = run_panel(prime_routes,
-                        actions=[{"fn": "mpPrimeInline"}])
-        for o in (run_panel(routes, actions=actions), out):
-            urls = {c["url"] for c in o["calls"]}
-            assert "/admin/model-pools/catalog" in urls
-            assert "/admin/cloud/providers" not in urls
-            assert "/models" not in urls
+        out = run_panel(routes, actions=[{"fn": "mpPrimeInline"}])
+        urls = {c["url"] for c in out["calls"]}
+        assert "/admin/model-pools/catalog" in urls
+        assert "/admin/cloud/providers" not in urls
+        assert "/models" not in urls
 
     def test_non_routable_alias_never_offered(self, run_panel):
         # routable-only（用户决策）：目录只含 cloud_models（可路由集），
@@ -1293,17 +1561,17 @@ class TestCatalogConsumption:
         routes = _editor_routes()
         routes["/admin/model-pools/catalog"] = {"status": 200,
                                                 "body": _CATALOG_BODY}
-        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
-        assert "failover" not in out["modalHtml"]
+        out = run_panel(routes, actions=[{"fn": "mpPrimeInline"}])
+        assert "failover" not in out["htmlFinal"]
 
     def test_catalog_fetch_failure_degrades_without_blocking(
             self, run_panel):
-        # catalog 端点故障 → 空目录 + 手填提示，页面不崩
+        # catalog 端点故障 → 下拉禁用 + 明示，页面不崩
         routes = _editor_routes()
         routes["/admin/model-pools/catalog"] = {"status": 500, "body": {}}
-        out = run_panel(routes, actions=[{"fn": "doMpEdit", "args": ["fast"]}])
-        assert "mp-editor" in out["modalHtml"]
-        assert "目录不可用" in out["modalHtml"]
+        out = run_panel(routes, actions=[{"fn": "mpPrimeInline"}])
+        assert "目录不可用" in out["htmlFinal"]
+
 
 
 _NEW_CAND = {"id": "newloc", "kind": "local", "model_name": "qwen3-32b",
@@ -1351,140 +1619,6 @@ def _last_update_post(out):
     assert posts, "editor must POST /admin/model-pools"
     return posts
 
-
-class TestEditor:
-    def test_editor_replace_candidate_sends_new_config(self, run_panel):
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        cands = body["pools"]["fast"]["candidates"]
-        ids = [c["id"] for c in cands]
-        assert "newloc" in ids and "loc" not in ids
-        # D4 一键换模：直接替换，继承原优先级
-        new = next(c for c in cands if c["id"] == "newloc")
-        assert new["priority"] == 1
-        assert new["model_name"] == "qwen3-32b"
-        assert body["expected_revision"] == 3
-        # 预览阶段 dry-run×2（openai + anthropic）携带编辑态 config
-        drys = [c for c in out["calls"]
-                if c["url"] == "/admin/model-pools/dry-run"]
-        assert len(drys) == 2
-        assert sorted(c["body"]["protocol"] for c in drys) == \
-            ["anthropic", "openai"]
-        for c in drys:
-            assert c["body"]["pool"] == "fast"
-            assert c["body"]["config"]["pools"]["fast"]["candidates"][0]["id"] \
-                == "newloc"
-
-    def test_editor_preview_blocked_on_issues(self, run_panel):
-        validate = {"valid": False, "issues": ["duplicate candidate id 'x'"]}
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(validate=validate), actions=actions)
-        # 校验未通过 → 不发 dry-run、不发更新
-        assert not [c for c in out["calls"]
-                    if c["url"] == "/admin/model-pools/dry-run"]
-        assert not [c for c in out["calls"]
-                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
-        # 问题在预览区可见
-        assert "duplicate candidate id" in out["previewHtml"]
-        assert any("校验" in t["message"] for t in out["toasts"])
-
-    def test_editor_apply_409_prompts_reload(self, run_panel):
-        routes = _editor_routes(
-            apply_status=409,
-            apply_body={"status": "revision_conflict", "current_revision": 5})
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(routes, actions=actions)
-        assert any("冲突" in t["message"] for t in out["toasts"])
-        # 冲突 → 重新拉取让用户看到最新状态
-        gets = [c for c in out["calls"]
-                if c["url"] == "/admin/model-pools" and c["method"] == "GET"]
-        assert len(gets) >= 2
-
-    def test_editor_undo_reposts_previous_config(self, run_panel):
-        # 时序路由：首屏 GET revision=3；apply 成功后的重取 revision=4
-        pools_bodies = [_editor_pools_body(), _editor_pools_body(revision=4)]
-
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-            {"fn": "doMpUndo", "args": []},
-        ]
-        out = run_panel(_editor_routes(pools_bodies=pools_bodies), actions=actions)
-        posts = _last_update_post(out)
-        assert len(posts) == 2          # apply + undo
-        undo_body = posts[1]["body"]
-        ids = [c["id"] for c in undo_body["pools"]["fast"]["candidates"]]
-        assert "loc" in ids and "newloc" not in ids   # 回滚到编辑前
-        # undo 以重新拉取到的最新 revision 做 CAS（不是 apply 时的旧值）
-        assert undo_body["expected_revision"] == 4
-
-    def test_editor_base_is_raw_not_view(self, run_panel):
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        ids = [c["id"] for c in body["pools"]["fast"]["candidates"]]
-        # raw 基底：视图剔除的悬空候选必须保留（防丢数据）
-        assert "dang" in ids
-        # 视图独有、raw 没有的候选不得经编辑混入
-        assert "cld" not in ids
-
-    def test_editor_apply_pins_open_revision(self, run_panel):
-        # 打开编辑器时 revision=3；随后后台刷新看到 revision=4（他人已更新）
-        pools_bodies = [_editor_pools_body(), _editor_pools_body(revision=4)]
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "renderModelPools", "args": []},   # 模拟后台轮询刷新
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(pools_bodies=pools_bodies), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        # apply 必须用编辑器打开时捕获的 revision；后台刷新推进 _revision
-        # 不得让陈旧工作副本借新 revision 通过 CAS 覆盖他人修改（安全评审）
-        assert body["expected_revision"] == 3
-
-    def test_editor_unconfigured_empty_base(self, run_panel):
-        pools = {"revision": 0, "pools": {}, "configured": False,
-                 "load_error": None, "raw": None}
-        add_cand = {"id": "c1", "kind": "local", "model_name": "qwen-small",
-                    "declared_protocols": ["openai"], "features": []}
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditAddCandidate", "args": [add_cand]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(pools_body=pools), actions=actions)
-        body = _last_update_post(out)[-1]["body"]
-        assert body["schema_version"] == 1
-        cands = body["pools"]["fast"]["candidates"]
-        assert [c["id"] for c in cands] == ["c1"]
-        assert cands[0]["priority"] == 1
-        assert body["expected_revision"] == 0   # 从未配置 → revision 0
 
 
 # ── Task 7：空态初始化向导（从未配置 → 四角色引导创建）──
@@ -1579,132 +1713,26 @@ class TestSnippet:
 # ── 终审修复 pass（评审 f94744b..2e36fdd 后的重要发现，逐条 RED→GREEN）──
 
 
-class TestFixPassEditorGates:
-    """I1 任意变更使预览失效；I2 双协议均无可用候选/HTTP 失败 → 阻止应用。"""
+class TestInlineGateHttp:
+    """dry-run 请求 HTTP 失败 ≠ 预览通过 — 行内门禁不得置 validated
+    （模态版随编辑器退役；行内路径同纪律，previewWork code=error）。"""
 
-    def test_editor_mutation_after_preview_invalidates_and_blocks_apply(
-            self, run_panel):
-        # 预览通过后再改动 → validated 失效 → apply 必须拒绝（spec §3.2）
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        assert not [c for c in out["calls"]
-                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
-        assert any("预览" in t["message"] for t in out["toasts"])
-
-    def test_editor_apply_button_disabled_until_validated(self, run_panel):
-        # 未通过预览时应用按钮禁用（防止误点绕过三段式纪律）
-        actions = [{"fn": "doMpEdit", "args": ["fast"]}]
-        out = run_panel(_editor_routes(), actions=actions)
-        m = re.search(r'data-mp-act="apply"([^>]*)>', out["modalHtml"])
-        assert m, "modal must render apply button"
-        assert "disabled" in m.group(1)
-
-    def test_editor_preview_success_enables_apply_button(self, run_panel):
-        # 池 bug #2（2026-10-28）：预览通过 → 外科点亮应用钮
-        # （$('mpEditApply').removeAttribute，不整模态重绘 — 预览结果必须
-        # 保留）。真实 DOM 行为由浏览器门禁 test_05c 钉住；此处钉逻辑层
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        removes = [o for o in out["attrOps"]
-                   if o["id"] == "mpEditApply" and o["k"] == "disabled"]
-        assert removes, "预览通过后必须移除应用钮 disabled（点亮）"
-        assert any("预览完成" in t["message"] for t in out["toasts"])
-        # 点亮后 apply 真正放行（POST 到达；无「请先点预览」拦截 toast）
-        assert _last_update_post(out)
-        assert not any("请先点" in t["message"] for t in out["toasts"])
-
-    def test_editor_mutation_during_inflight_preview_does_not_rearm(
-            self, run_panel):
-        # PR-21 评审 I-1：预演在途时改动候选（mutator 就地改 _edit，身份
-        # 不变 → 会话令牌不设防）→ 迟到的预演完成把 validated 重新置真，
-        # 用户没见过结果的配置被放行应用 = 三段门禁绕过。行内编辑器同纪律
-        # 见 startInlineSession 会话换代；模态侧用 rev 代次作废迟到续体。
+    def test_inline_dryrun_http_error_blocks_apply(self, run_panel):
         routes = _editor_routes()
-        routes["POST /admin/model-pools/dry-run"] = {
-            "status": 200, "yieldTicks": 20,   # 慢 dry-run → 在途窗口确定存在
-            "body": {"chosen": "newloc", "error": None, "decisions": [],
-                     "pool": "fast", "protocol": "openai"},
-        }
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": [], "noAwait": True},
-            {"fn": "mpEditReplace", "args": ["loc", _NEW_CAND]},  # 在途改动
-            {"fn": "_drain", "args": [300]},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(routes, actions=actions)
-        # 迟到完成作废：不点亮应用钮、apply 被守卫拦下（无 POST、有引导 toast）
-        assert not [o for o in out["attrOps"]
-                    if o["id"] == "mpEditApply" and o["k"] == "disabled"], \
-            "在途改动后的迟到预演完成不得点亮应用钮"
-        assert not [c for c in out["calls"]
-                    if c["url"] == "/admin/model-pools"
-                    and c["method"] == "POST"], \
-            "未重新预演的改动不得被应用（门禁绕过）"
-        assert any("请先点" in t["message"] for t in out["toasts"])
-
-    def test_editor_preview_both_protocols_unavailable_blocks_apply(
-            self, run_panel):
-        # spec §3.2：两协议均无可用候选 → 阻止应用（黄灯单协议缺失仍允许）
-        routes = _editor_routes()
-        routes["POST /admin/model-pools/dry-run"] = {
-            "status": 200,
-            "body": {"chosen": None, "error": "no_compatible_target",
-                     "decisions": [], "pool": "fast", "protocol": "openai"},
-        }
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
-        ]
-        out = run_panel(routes, actions=actions)
-        assert not [c for c in out["calls"]
-                    if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
-        assert "无可用候选" in out["previewHtml"]
-        assert any("候选" in t["message"] for t in out["toasts"])
-
-    def test_editor_preview_dryrun_http_error_blocks_apply(self, run_panel):
-        # dry-run 请求 HTTP 失败 ≠ 预览通过 — 不得置 validated
-        routes = _editor_routes()
+        routes["/admin/model-pools/catalog"] = {"status": 200,
+                                                "body": _CATALOG_BODY}
         routes["POST /admin/model-pools/dry-run"] = {"status": 500, "body": {}}
         actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
+            {"fn": "doMpInlineSelect",
+             "args": ["fast", "loc", "local:qwen3-4b"]},
+            {"fn": "doMpInlineApply"},
         ]
         out = run_panel(routes, actions=actions)
         assert not [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
+        assert "预览请求失败" in out["htmlFinal"]
+        assert "已阻止应用" in out["htmlFinal"]
 
-    def test_stale_apply_completion_preserves_second_session(self, run_panel):
-        # I3 会话令牌：慢 apply 完成时编辑器已被重开 → 陈旧完成不得清空
-        # 第二会话（toast 用捕获的池名；不碰 _edit/_undo）
-        actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": [], "noAwait": True},
-            {"fn": "doMpEdit", "args": ["fast"]},      # 第二编辑会话
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},          # 第二会话必须能正常应用
-        ]
-        out = run_panel(_editor_routes(), actions=actions)
-        posts = [c for c in out["calls"]
-                 if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
-        validates = [c for c in out["calls"]
-                     if c["url"] == "/admin/model-pools/validate"]
-        # 第二会话的预览与应用都必须真实发出（陈旧完成未清空 _edit）
-        assert len(validates) == 2, "second session preview must run"
-        assert len(posts) == 2, "second session apply must reach POST"
-        assert sum("已更新 iff/fast" in t["message"] for t in out["toasts"]) == 2
 
 
 class TestFixPassRuntimePolling:
@@ -1744,7 +1772,7 @@ class TestFixPassRuntimePolling:
 
 # ── UI/UX P2 Task 5：B3 状态过渡 + reduced-motion 收录 ──────────
 # 契约：
-# - .mp-dot/.mp-lamp/.mp-cand-card/.mp-chosen 状态切换（绿/黄/红、
+# - .mp-dot/.mp-lamp/.mp-cand-card/.mp-cand-inuse 状态切换（绿/黄/红、
 #   选中态、劣化态）有 var(--dur)/var(--ease) 过渡，杜绝硬切；
 # - .mp-cand-degraded（冷却中虚线）有过渡声明；
 # - 全部 P2 动效/过渡类出现在 prefers-reduced-motion 降级块内。
@@ -1760,7 +1788,7 @@ def _css_rule(selector):
 
 class TestP2Transitions:
     def test_state_transition_rules_present(self):
-        for sel in (".mp-dot", ".mp-lamp", ".mp-cand-card", ".mp-chosen"):
+        for sel in (".mp-dot", ".mp-lamp", ".mp-cand-card", ".mp-cand-inuse"):
             rule = _css_rule(sel)
             assert "transition:" in rule, sel
             assert "var(--dur)" in rule, sel
@@ -1779,7 +1807,7 @@ class TestP2Transitions:
         for cls in ("mp-busy", "mp-link-flowing"):
             assert cls in joined, cls
         # B3 过渡类 — 显式收录（全局一刀切之外的逐类声明，可审计）
-        for cls in ("mp-dot", "mp-lamp", "mp-cand-card", "mp-chosen",
+        for cls in ("mp-dot", "mp-lamp", "mp-cand-card", "mp-cand-inuse",
                     "mp-cand-degraded"):
             assert cls in joined, cls
 
@@ -2288,6 +2316,8 @@ class TestPersistentCards:
         assert "mp-unconfigured" in html, "未配置卡有徽标类"
         assert html.count("未配置") >= 4, "四卡各带「未配置」徽标"
         assert 'data-mp-config-pool="fast"' in html
+        # 未配置卡无『高级』入口（Task 5 ruling：池参数属已配置池）
+        assert 'data-mp-params-toggle' not in html
         # 预填 = cardDefault 启发式（active 优先）：fast→活跃最小
         # local:qwen-turbo
         i = html.find('data-mp-config-pool="fast"')
@@ -2303,15 +2333,15 @@ class TestPersistentCards:
         assert 'local:qwen-vl' not in segp or \
             'value="local:qwen-vl" selected' not in segp, \
             "premium 不得默认选中不活跃的 VL 模型"
-        # 未配置卡也带「高级配置」直通（openEditor 骨架路径，Task 5 接线）
-        assert 'data-mp-edit="fast"' in html and "高级配置" in html
+        # 未配置卡无『高级』直通（Task 5 ruling：先建池，池参数后置）
+        assert 'data-mp-params-toggle="fast"' not in html
 
     def test_configured_card_keeps_actions(self, run_panel):
         html = self._cards(run_panel,
                            json.loads(json.dumps(self._CARDS_DEFS)),
                            json.loads(json.dumps(self._CARDS_ST)),
                            catalog=self._catalog())
-        assert 'data-mp-edit="small"' in html, "编辑入口保留"
+        assert 'data-mp-params-toggle="small"' in html, "高级入口保留"
         assert 'data-mp-snippet="small"' in html, "接入片段入口保留"
         assert 'data-mp-pool="small"' in html, "启用开关保留"
         assert 'data-mp-inline-replace="small|m1"' in html, "替换为…保留"
@@ -2333,7 +2363,7 @@ class TestPersistentCards:
         html = self._cards(run_panel, {"revision": 0, "pools": {}},
                            catalog=False)
         assert html.count("mp-unconfigured") >= 4, "目录失败四卡仍渲染"
-        assert "目录不可用 — 请用编辑器" in html
+        assert "目录不可用 — 稍后重试" in html
         assert 'disabled' in html
         html2 = self._cards(run_panel, {"revision": 0, "pools": {}},
                             catalog=None)
@@ -2343,7 +2373,7 @@ class TestPersistentCards:
                  "cloudValues": [], "index": {}}
         html3 = self._cards(run_panel, {"revision": 0, "pools": {}},
                             catalog=empty)
-        assert "目录为空 — 请用编辑器" in html3, \
+        assert "目录为空 — 无可建池模型" in html3, \
             "空目录必须是明示禁用态，不是沉默死下拉"
         assert 'disabled' in html3
 
@@ -2476,18 +2506,6 @@ class TestPersistentCards:
         assert 'value="local:qwen-turbo" selected' in sel_seg("small")
         assert 'value="local:qwen-turbo" selected' in sel_seg("classifier")
 
-    def test_unconfigured_advanced_opens_skeleton_editor(self, run_panel):
-        # 高级配置直通：未配置池 → doMpEdit 走骨架（池参数默认值在模态）
-        zero = {"revision": 0, "pools": {}, "configured": False,
-                "load_error": None, "raw": None}
-        routes = self._create_routes(pools_body=zero)
-        out = run_panel(routes, actions=[{"fn": "doMpEdit",
-                                          "args": ["fast"]}])
-        m = out["modalHtml"]
-        assert 'data-mp-editor="fast"' in m
-        assert 'data-mp-param="max_attempts" value="2"' in m
-        assert 'data-mp-param="deadline_ms" value="60000"' in m
-
 
 class TestInlineSessionRace:
     """终审 C1：并发行内会话 — 迟到预演不得写入当前会话。
@@ -2565,7 +2583,7 @@ class TestSingleFormRender:
     def test_fragment_contains_modal_container(self):
         frag = (ROOT / "inferfabric" / "dashboard" / "fragments"
                 / "model-pools.html").read_text(encoding="utf-8")
-        assert 'id="mpModal"' in frag   # 编辑器模态容器存在
+        assert 'id="mpModal"' in frag   # 接入片段模态容器（doMpSnippet 复制钮）
 
     def test_render_unconfigured_four_cards_no_wizard(self, run_panel):
         # 从未配置（零池 defs）→ 树四行全未配置 + 四张未配置卡；
@@ -2598,9 +2616,14 @@ class TestSingleFormRender:
         out = run_panel(self._sc_routes())
         html = out["html"]
         for frag in ('data-mp-inline-replace="small|m1"',
-                     'data-mp-snippet="small"', 'data-mp-edit="small"',
-                     "当前选择：m1", "小模型 — 分类/抽取/批量任务"):
+                     'data-mp-snippet="small"',
+                     'data-mp-params-toggle="small"',
+                     'data-mp-inuse="m1"', "小模型 — 分类/抽取/批量任务"):
             assert frag in html, frag
+        # 2026-11-04：chosen=m1 → m1 卡高亮（在役标记取代文字行）
+        m = re.search(r'<div class="mp-cand-card[^"]*"[^>]*'
+                      r'data-mp-cand-card="m1"[^>]*>', html)
+        assert m and "mp-cand-active" in m.group(0), m
 
     def test_tree_link_state_updates_by_id(self, run_panel):
         # 轮询中 last_attempt 变新鲜 → 树链路态 by-id 翻转（idle→flowing），
@@ -2722,30 +2745,19 @@ class TestCapabilityRetired:
         out = run_panel(_ops_routes())
         assert "能力约束" not in out["html"]
 
-    def test_editor_capability_column_deleted(self, run_panel):
-        actions = [{"fn": "doMpEdit", "args": ["fast"]}]
-        out = run_panel(_editor_routes(), actions=actions)
-        m = out["modalHtml"]
-        assert "<th>能力</th>" not in m            # 能力列已删
-        assert "mp-edit-feat" not in m
-        assert "编辑能力" not in m                  # 入口按钮已删
-        assert "解除约束" not in m
-        assert 'data-mp-feat=' not in m            # 复选框已删
-
-    def test_editor_legacy_features_passthrough(self, run_panel):
+    def test_inline_apply_preserves_legacy_features(self, run_panel):
         # 零手工迁移：遗留 features（raw 里 loc=["tools"]）读时容忍，
-        # 编辑器不增不改，应用时原样透传（清理由后端读时忽略兜底）
+        # 行内会话（无变更 param 会话）应用时原样透传（清理由后端兜底）
         actions = [
-            {"fn": "doMpEdit", "args": ["fast"]},
-            {"fn": "mpEditPreview", "args": []},
-            {"fn": "mpEditApply", "args": []},
+            {"fn": "doMpParamsToggle", "args": ["fast"]},
+            {"fn": "doMpInlineParams", "args": ["fast"]},   # 无变更
+            {"fn": "doMpInlineApply"},
         ]
         out = run_panel(_editor_routes(), actions=actions)
         body = _last_update_post(out)[-1]["body"]
         loc = next(c for c in body["pools"]["fast"]["candidates"]
                    if c["id"] == "loc")
         assert loc["features"] == ["tools"]
-
 
 class TestVisionBadge:
     """候选卡「视觉」小标 = 只读展示，数据源 runtime 端点每候选

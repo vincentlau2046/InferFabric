@@ -930,9 +930,9 @@
       '<div class="cp-table-wrap">' +
       '<table class="if-table mon-tbl">' +
         '<thead><tr><th>时间</th><th>模型</th><th>状态</th>' +
-        '<th>Tokens in/out</th>' +
-        '<th title="Cache Hit Rate（缓存命中率）= tokens_in_cached / tokens_in；OpenAI 系取 prompt_tokens_details.cached_tokens，Anthropic 系取 cache_read_input_tokens，口径统一">缓存命中率</th>' +
-        '<th>TTFT</th><th>耗时</th></tr></thead>' +
+        '<th class="num">Tokens in/out</th>' +
+        '<th class="num" title="Cache Hit Rate（缓存命中率）= tokens_in_cached / tokens_in；OpenAI 系取 prompt_tokens_details.cached_tokens，Anthropic 系取 cache_read_input_tokens，口径统一">缓存命中率</th>' +
+        '<th class="num">TTFT</th><th class="num">耗时</th></tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
       '</table>' +
       '</div>';
@@ -1032,8 +1032,8 @@
     }
     el.innerHTML = '<div class="cp-table-wrap">' +
       '<table class="if-table mon-tbl mon-agent-tbl">' +
-        '<thead><tr><th>客户端</th><th>请求</th><th>成功</th><th>Tokens in/out</th>' +
-        '<th>费用</th><th>TTFT P50</th><th>Top 模型</th><th></th></tr></thead>' +
+        '<thead><tr><th>客户端</th><th class="num">请求</th><th class="num">成功</th><th class="num">Tokens in/out</th>' +
+        '<th class="num">费用</th><th class="num">TTFT P50</th><th>Top 模型</th><th></th></tr></thead>' +
         '<tbody>' + rows + '</tbody></table></div>';
   }
 

@@ -431,9 +431,9 @@ def test_02_select_apply_creates_pool_flips_card_and_tree(page, scratch_base):
         '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
         "e => e.textContent")
     assert leaf == TXT_MODEL, leaf
-    # 已配置卡动作俱在（编辑/接入片段/启用开关 — 配置界面不再消失）
+    # 已配置卡动作俱在（高级/接入片段/启用开关 — 配置界面不再消失）
     card_html = page.eval_on_selector("#mp-card-fast", "e => e.innerHTML")
-    for frag in ('data-mp-edit="fast"', 'data-mp-snippet="fast"',
+    for frag in ('data-mp-params-toggle="fast"', 'data-mp-snippet="fast"',
                  'data-mp-pool="fast"'):
         assert frag in card_html, frag
 
@@ -498,43 +498,66 @@ def test_04_swap_model_updates_tree_leaf(page, scratch_base):
             break
         time.sleep(0.2)
     assert n == 0, "应用后 diff 条未消失（会话未收尾）"
-    # 卡上双协议选择视图：云候选双协议 → 两行均为「当前选择」
-    chosen = page.locator("#mp-card-fast .mp-chosen").all_inner_texts()
-    assert chosen and all("fast-1" in c for c in chosen), chosen
+    # 在役候选卡标记（2026-11-04：「当前选择」文字行删除 → 卡高亮 + pill）：
+    # 云候选双协议被选中 → 新候选卡 mp-cand-active + 调用中 pill 可见
+    active = page.locator("#mp-card-fast .mp-cand-card.mp-cand-active")
+    _poll(page, "#mp-card-fast .mp-cand-card.mp-cand-active",
+          "e => e.getAttribute('data-mp-cand-card')", "fast-1",
+          msg="替换后的候选卡未获得在役标记")
+    assert active.count() == 1, active.count()
+    assert "调用中" in active.locator(".mp-cand-inuse").inner_text()
 
 
-# ── 5. 高级配置 → 三段式编辑器模态 → Esc 关闭（B4 键盘流）──────────
+# ── 5. 卡片动作行 + 高级面板（E 展开 / Esc 收起）+ 模态恒空 ─────────
 
-def test_05_advanced_modal_esc(page, scratch_base):
+def test_05_card_ops_row_and_advanced_panel_esc(page, scratch_base):
+    """7.11 单动作内联重构：编辑模态退役（2026-11-03）。
+
+    ① 已配置候选卡有动作行 .mp-cand-ops（↑↓✕，首↑/末↓ 禁用 affordance）；
+    ② E 键展开卡内高级面板（三参数 + 预览钮）；③ Esc 收起面板；
+    ④ #mpModal 不再承载编辑器内容（只剩接入片段 — 恒空）。"""
     _open_pools_tab(page, scratch_base)
-    page.click('#mp-card-fast [data-mp-edit="fast"]')
-    page.wait_for_selector('#mpModal [data-mp-editor="fast"]')
-    editor_text = page.locator("#mpModal").inner_text()
-    assert "max_attempts" in editor_text and "deadline_ms" in editor_text
+    _prime_catalog(page)
+    # fast 已由 test_02 建池（单候选 → 首候选 ↑ 禁用、末候选 ↓ 禁用）
+    page.wait_for_selector('#mp-card-fast .mp-cand-ops .mp-cand-op')
+    ops = page.eval_on_selector_all(
+        '#mp-card-fast .mp-cand-op',
+        "els => els.map(e => ({op: e.dataset.mpCandOp,"
+        "                      dis: e.disabled}))")
+    assert [o["op"] for o in ops] == ["up", "down", "del"], ops
+    assert ops[0]["dis"] and ops[1]["dis"] and not ops[2]["dis"], ops
+    assert page.locator("#mpModal").inner_text().strip() == ""
+    # E 展开 fast 卡内高级面板（keydown 派发在卡内 → closest 命中池卡）
+    page.eval_on_selector("#mp-card-fast",
+        "el => el.dispatchEvent(new KeyboardEvent('keydown',"
+        " {key: 'e', bubbles: true}))")
+    page.wait_for_selector('[data-mp-params="fast"]')
+    panel = page.locator('[data-mp-params="fast"]').inner_text()
+    assert "max_attempts" in panel and "deadline_ms" in panel \
+        and "accept_declared" in panel and "预览" in panel, panel
+    # Esc 收起面板（一级无行内会话 → 二级收高级）
     page.keyboard.press("Escape")
     deadline = time.monotonic() + 10
     n = -1
     while time.monotonic() < deadline:
-        n = page.eval_on_selector_all("#mpModal [data-mp-editor]",
-                                      "els => els.length")
+        n = page.eval_on_selector_all("[data-mp-params]", "els => els.length")
         if n == 0:
             break
         time.sleep(0.2)
-    assert n == 0, "Esc 未关闭编辑器模态"
+    assert n == 0, "Esc 未收起高级面板"
     assert page.locator("#mpModal").inner_text().strip() == ""
 
 
-# ── 5c. 模态编辑器全路径：预览 → 双协议识别 + 应用钮点亮 → 应用 ─────
+# ── 5c. 卡内替换全路径：diff 条自动预览双协议 + 应用钮点亮 → 应用 ───
 
-def test_05c_modal_preview_enables_apply_and_applies(page, scratch_base):
-    """池 bug #1+#2 的真实浏览器交互钉子（2026-10-28）：
+def test_05c_card_replace_preview_enables_apply_and_applies(page, scratch_base):
+    """池 bug #1 的真实浏览器交互钉子（2026-10-28，7.11 卡内化改写）：
     bug #1 — ninfer 本地模型双协议识别失效（anthropic 预演永远无候选，
-    本地框架原生双协议服务不被认）；
-    bug #2 — 模态预览通过后应用钮仍灰（renderEditor 烘焙进 DOM 的
-    disabled 属性没随 validated=true 重烘）。
-    主路径：premium 建池（在跑 TXT 单候选）→ 开高级编辑器 → 预览 →
-    双协议均「选择 TXT」且应用钮可点 → 应用 → 编辑器收尾 + revision
-    推进（配置真落盘）。"""
+    本地框架原生双协议服务不被认）。
+    主路径：premium 建池（在跑 TXT 单候选）→ 卡内「替换为…」选假云靶 →
+    diff 条锚在候选下 + 自动预览 → 双协议均「选择」且应用钮可点 → 应用 →
+    revision 推进 + diff 条收尾。随后换回本地 TXT（test_08 前置契约：
+    premium = 本地 TXT 单候选落盘）。"""
     _open_pools_tab(page, scratch_base)
     _prime_catalog(page)
     # premium 建池：在跑 TXT 单候选（premium 在 test_03 被拦未配置，干净）
@@ -544,48 +567,208 @@ def test_05c_modal_preview_enables_apply_and_applies(page, scratch_base):
     _poll(page, "#mp-card-premium", "e => e.className", "if-card mp-pool",
           msg="premium 卡未转已配置")
     rev_before = _get_json(scratch_base, "/admin/model-pools")["revision"]
-    # 开高级编辑器 → 预览
-    page.click('#mp-card-premium [data-mp-edit="premium"]')
-    page.wait_for_selector('#mpModal [data-mp-editor="premium"]')
-    page.click('#mpModal [data-mp-act="preview"]')
-    # 预览结果：双协议均有选择（选择行显示候选 id；premium-1 = 本地 TXT）。
-    # bug #1 修复前 anthropic 行是 no_compatible_target
+    # 卡内「替换为…」换假云靶 → diff 条锚在候选下（premium|premium-1）
+    page.locator('select[data-mp-inline-replace="premium|premium-1"]') \
+        .select_option(value=CLOUD_SWAP)
+    # 自动预览：双协议均有选择（bug #1 修复前 anthropic 是 no_…）
     deadline = time.monotonic() + 15
     pv = ""
     while time.monotonic() < deadline:
         pv = page.eval_on_selector_all(
-            "#mpPreview", "els => els.length ? els[0].innerText : ''")
+            '[data-mp-inline-bar="premium|premium-1"] .mp-inline-preview',
+            "els => els.length ? els[0].innerText : ''")
         if "openai → 选择" in pv and "anthropic → 选择" in pv:
             break
         time.sleep(0.2)
     else:
         pytest.fail(f"预览未完成或双协议未识别（期望 openai/anthropic 均有"
-                    f"选择；bug #1 修复前 anthropic 是 no_compatible_target）: {pv!r}")
+                    f"选择）: {pv!r}")
     assert "no_" not in pv and "无可用候选" not in pv, pv
-    # bug #2 修复前：预览通过但应用钮保持 disabled（编辑态没重烘进 DOM）
-    apply_disabled = page.eval_on_selector_all(
-        "#mpModal [data-mp-act='apply']",
-        "els => els.length && els[0].disabled")
-    assert not apply_disabled, "预览通过后应用钮必须点亮"
-    # 应用 → 编辑器收尾（模态清空）+ revision 推进（一次 CAS 写）
-    page.click("#mpModal [data-mp-act='apply']")
+    # 预览通过后应用钮点亮（旧 bug #2 语义 — 现烘焙 disabled 随 validated 重烘）
+    apply_state = page.eval_on_selector_all(
+        '[data-mp-inline-bar="premium|premium-1"] [data-mp-inline-apply]',
+        "els => ({n: els.length, dis: els.length ? els[0].disabled : null})")
+    assert apply_state["n"] == 1, f"应用钮缺失: {apply_state}"
+    assert not apply_state["dis"], "预览通过后应用钮必须点亮"
+    page.click('[data-mp-inline-bar="premium|premium-1"] [data-mp-inline-apply]')
+    # 应用 POST 异步 → 轮询 revision 推进（+1 = 一次 CAS 写真落盘）
+    deadline = time.monotonic() + 15
+    rev_after = rev_before
+    while time.monotonic() < deadline:
+        rev_after = _get_json(scratch_base, "/admin/model-pools")["revision"]
+        if rev_after == rev_before + 1:
+            break
+        time.sleep(0.2)
+    assert rev_after == rev_before + 1, (rev_before, rev_after)
+    # 数据层复核：premium 候选已是云靶
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    c0 = raw["pools"]["premium"]["candidates"][0]
+    assert c0["provider"] == CLOUD_PROVIDER, c0
+    # 会话收尾：diff 条消失
     deadline = time.monotonic() + 15
     n = -1
     while time.monotonic() < deadline:
-        n = page.eval_on_selector_all("#mpModal [data-mp-editor]",
+        n = page.eval_on_selector_all('[data-mp-inline-bar^="premium|"]',
                                       "els => els.length")
         if n == 0:
             break
         time.sleep(0.2)
-    assert n == 0, "应用后编辑器未收尾（模态未清空）"
-    rev_after = _get_json(scratch_base, "/admin/model-pools")["revision"]
-    assert rev_after == rev_before + 1, (rev_before, rev_after)
-    # 数据层复核：应用的仍是本地 TXT 候选（选择行只显示候选 id）
+    assert n == 0, "应用后 diff 条未消失（会话未收尾）"
+    # 换回本地 TXT（test_08 前置契约：premium = 本地 TXT 单候选落盘）
+    page.locator('select[data-mp-inline-replace^="premium|"]') \
+        .select_option(value=f"local:{TXT_MODEL}")
+    _apply_inline_diff(page)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+        if raw["pools"]["premium"]["candidates"][0].get("model_name") \
+                == TXT_MODEL:
+            break
+        time.sleep(0.2)
     raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
     assert raw["pools"]["premium"]["candidates"][0]["model_name"] == TXT_MODEL
-    # 卡保持已配置（应用后的重渲染没把池弄丢）
-    cls = page.eval_on_selector("#mp-card-premium", "e => e.className")
-    assert cls == "if-card mp-pool", cls
+    # 卡类轮询（POST 在途时卡带 mp-busy，busy 清除 = 会话完全收尾）
+    _poll(page, "#mp-card-premium", "e => e.className", "if-card mp-pool",
+          msg="premium 卡未收尾（busy 未清）")
+
+
+# ── 5e. 卡内新增候选：目录下拉 → diff 条落池底 → 应用 → 候选 +1 ─────
+
+def test_05e_card_add_candidate_applies(page, scratch_base):
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # fast 此时单候选（test_04 后 = 云 swap-target）→ 新增 P2
+    n_before = page.eval_on_selector_all(
+        '#mp-card-fast .mp-cand-status', "els => els.length")
+    assert n_before == 1, n_before
+    page.locator('select[data-mp-inline-add="fast"]') \
+        .select_option(value=CLOUD_SWAP)
+    # add = 池级会话（anchor 空）→ diff 条落池底
+    page.wait_for_selector('[data-mp-inline-bar="fast|"]')
+    _apply_inline_diff(page)
+    deadline = time.monotonic() + 15
+    n = -1
+    while time.monotonic() < deadline:
+        n = page.eval_on_selector_all(
+            '#mp-card-fast .mp-cand-status', "els => els.length")
+        if n == 2:
+            break
+        time.sleep(0.2)
+    assert n == 2, f"新增候选未出现（候选数 {n}）"
+    deadline = time.monotonic() + 15
+    cands = []
+    while time.monotonic() < deadline:
+        cands = _get_json(
+            scratch_base, "/admin/model-pools")["raw"]["pools"]["fast"]["candidates"]
+        if len(cands) == 2 and cands[1].get("provider") == CLOUD_PROVIDER:
+            break
+        time.sleep(0.2)
+    assert len(cands) == 2 and cands[1]["priority"] == 2, cands
+    assert cands[1]["provider"] == CLOUD_PROVIDER, cands
+
+
+# ── 5f. 卡内下移：候选卡 [↓] → diff 条锚候选下 → 应用 → 顺序反转 ────
+
+def test_05f_card_move_down_reorders(page, scratch_base):
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # fast 此时两候选（5e 落盘：fast-1=云靶 P1、新候选 P2）
+    tree = page.eval_on_selector_all(
+        '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
+        "els => els.map(e => e.textContent)")
+    assert len(tree) == 2, tree
+    before = page.eval_on_selector_all(
+        '#mp-card-fast .mp-cand-op[data-mp-cand-op="down"]',
+        "els => els.map(e => e.disabled)")
+    # 末候选 ↓ 禁用（affordance），首候选 ↓ 可点
+    assert before[0] is False and before[1] is True, before
+    page.click('#mp-card-fast .mp-cand-op[data-mp-cand-op="down"]')
+    page.wait_for_selector('[data-mp-inline-bar^="fast|"]')
+    _apply_inline_diff(page)
+    deadline = time.monotonic() + 15
+    after = []
+    while time.monotonic() < deadline:
+        after = page.eval_on_selector_all(
+            '.mp-tree-row[data-mp-tree-pool="fast"] .mp-tree-cand',
+            "els => els.map(e => e.textContent)")
+        if len(after) == 2 and after != tree:
+            break
+        time.sleep(0.2)
+    assert after == list(reversed(tree)), (tree, after)
+
+
+# ── 5g. 卡内删除：[✕] → diff 条锚候选下 → 应用 → 候选 -1 ───────────
+
+def test_05g_card_delete_candidate_applies(page, scratch_base):
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    # 删除 5e 新增的候选（5f 下移后它排第一 → 第一个 del 钮；恢复
+    # fast = 单候选 fast-1，保 test_08 的 fast|fast-1 前置）
+    page.locator('#mp-card-fast .mp-cand-op[data-mp-cand-op="del"]') \
+        .first.click()
+    page.wait_for_selector('[data-mp-inline-bar^="fast|"]')
+    bar = page.locator('[data-mp-inline-bar^="fast|"]').inner_text()
+    assert "删除候选" in bar, bar
+    _apply_inline_diff(page)
+    deadline = time.monotonic() + 15
+    n = -1
+    while time.monotonic() < deadline:
+        n = page.eval_on_selector_all(
+            '#mp-card-fast .mp-cand-status', "els => els.length")
+        if n == 1:
+            break
+        time.sleep(0.2)
+    assert n == 1, f"删除未生效（候选数 {n}）"
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+        if len(raw["pools"]["fast"]["candidates"]) == 1:
+            break
+        time.sleep(0.2)
+    assert len(raw["pools"]["fast"]["candidates"]) == 1
+
+
+# ── 5h. 高级面板池参数：改 deadline_ms → 预览 → 应用 → 回读落盘 ─────
+
+def test_05h_pool_params_apply(page, scratch_base):
+    _open_pools_tab(page, scratch_base)
+    _prime_catalog(page)
+    raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+    cur = raw["pools"]["premium"].get("deadline_ms")
+    new_val = (cur or 60000) + 60000
+    # 点头部「高级」钮展开 premium 面板
+    page.click('#mp-card-premium [data-mp-params-toggle="premium"]')
+    page.wait_for_selector('[data-mp-params="premium"]')
+    page.fill('[data-mp-params="premium"] [data-mp-param="deadline_ms"]',
+              str(new_val))
+    # 面板「预览」→ param 会话（池级 diff 条）→ 预览通过 → 应用
+    page.click('[data-mp-params="premium"] [data-mp-params-preview="premium"]')
+    page.wait_for_selector('[data-mp-inline-bar="premium|"]')
+    _apply_inline_diff(page)
+    deadline = time.monotonic() + 15
+    ok = False
+    while time.monotonic() < deadline:
+        try:
+            raw = _get_json(scratch_base, "/admin/model-pools")["raw"]
+            if raw["pools"]["premium"].get("deadline_ms") == new_val:
+                ok = True
+                break
+        except Exception:
+            pass
+        time.sleep(0.2)
+    assert ok, f"deadline_ms 未落盘为 {new_val}: " \
+        f"{_get_json(scratch_base, '/admin/model-pools')['raw']['pools']['premium']}"
+    # 面板回读新值（apply 后 def 刷新 + 重渲染滞后 → 轮询）
+    deadline = time.monotonic() + 15
+    val = ""
+    while time.monotonic() < deadline:
+        val = page.eval_on_selector(
+            '[data-mp-params="premium"] [data-mp-param="deadline_ms"]',
+            "e => e.value")
+        if val and int(val) == new_val:
+            break
+        time.sleep(0.3)
+    assert int(val) == new_val, val
 
 
 def _post_chat(base: str, model: str, extra: dict | None = None):

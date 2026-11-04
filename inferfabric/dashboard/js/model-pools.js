@@ -1,7 +1,9 @@
 /* InferFabric Console — 模型池 TAB（逻辑模型池，只读 + enabled 开关）
- * 面板内容：每池一张卡 — 逻辑名 / enabled 开关（服务端原子翻转）/ 候选表
- * （id、优先级、本地|云、目标、证据态）+ OpenAI 与 Anthropic 两套当前选择视图
- * （chosen 或错误码 + 每候选 included/排除原因，解释性展示非只给结果）。
+ * 面板内容：每池一张卡 — 逻辑名 / enabled 开关（服务端原子翻转）/ 候选卡
+ * （id、优先级、本地|云、目标、证据态；在役候选 = 卡高亮 + 调用中 pill，
+ * 2026-11-04 起取代「当前选择：X」文字行）。决策块（当前选择行 +
+ * 排除:reason 行）已整块删除（2026-11-04 用户裁决）——路由态由
+ * 在役标记 + 头部协议健康灯承载。
  *
  * 数据源（API 冻结）：
  *   - GET  /admin/model-pools          → {revision, pools:{name:{enabled,…,candidates:[…]}}}
@@ -52,6 +54,9 @@
   var _timelineOpen = {};
   // C4：劣化提示关闭态（pool → true；进 structSig；劣化解除时清键重新武装）
   var _degradeDismissed = {};
+  // Task 4：高级（池参数）面板展开态（pool → true；进 structSig —
+  // Ruling 3：面板输入框是结构，开合必须重建，与 C2 时间线同先例）
+  var _paramsOpen = {};
   // C3：活体光带新鲜窗口 — last_attempt.ok 且 age_s < 此值 = 真实数据交换中
   var BEAM_FRESH_S = 30;
 
@@ -245,11 +250,11 @@
     var empty = !!(catalog && !(catalog.localValues || []).length
       && !(catalog.cloudValues || []).length);
     var selInner = empty
-      ? '<option value="">目录为空 — 请用编辑器</option>'
+      ? '<option value="">目录为空 — 无可建池模型</option>'
       : (catalog
           ? '<option value="">选择模型…</option>' + opts
           : (catalog === false
-              ? '<option value="">目录不可用 — 请用编辑器</option>'
+              ? '<option value="">目录不可用 — 稍后重试</option>'
               : '<option value="">选择模型…（加载中）</option>'));
     return '<div class="if-card mp-pool mp-unconfigured" id="mp-card-'
       + esc(name) + '" data-mp-card="' + esc(name) + '">'
@@ -258,10 +263,6 @@
       + '<div class="if-card-hdr">'
       + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
       + '<span class="mp-unconfigured-badge">未配置</span>'
-      + '<span class="mp-toggle-wrap">'
-      + '<button type="button" class="mp-edit-btn" data-mp-edit="'
-      + esc(name) + '">高级配置</button>'
-      + '</span>'
       + '</div>'
       + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
       + '<div class="mp-config-line">'
@@ -298,11 +299,6 @@
     return '<div class="mp-cards" id="mpCards">' + cards.join('') + '</div>';
   }
 
-  // v7.1.0 三段式编辑器（Task 6）：
-  //   _edit = {pool, base, work, catalog} — base=raw 深拷贝（编辑前），
-  //   work=编辑中配置；_undo=最近一次成功 apply 的 base（会话内回滚）
-  var _edit = null;
-  var _undo = null;
   // A3 错误即导航（UI/UX P1 Task 3）：常驻行动横幅 — toast 即时反馈，
   // banner 承担「常驻 + 去哪修」；action = {label, run} 闭包（重试原操作）
   var _actionError = null;
@@ -314,9 +310,12 @@
   // A2 行内 diff 编辑（UI/UX P2 Task 1）：目录缓存（null=未取/不可用，
   // 每次渲染 best-effort 重试；应用成功后置 null 触发重取）+ 行内会话
   var _catalog = null;
-  //   _inline = {pool, candId, spec, base, work, base_revision, validated,
-  //              previewHtml, rev} — spec/rev 进结构签名：换目标或预览
-  //   完成 完成（启用应用按钮）都必须重建
+  //   _inline = {pool, anchor, kind, summary, base, work, base_revision,
+  //              validated, previewHtml, rev}
+  //     kind ∈ replace|add|move|delete|param|create — 单动作内联编辑
+  //     anchor = 受影响候选 id；null = 池级动作（add/param）→ diff 条落池底
+  //     summary = 人读变更标签（替换「旧→新」/ 新增候选 X / 删除候选 X / …）
+  //   anchor|kind|rev 进结构签名：换动作或预览完成（启用应用按钮）都重建
   var _inline = null;
 
   /* ── XSS-safe 转义（与 cloud.js / anomaly.js esc 一致） ── */
@@ -402,30 +401,47 @@
     return o;
   }
 
-  // A2 行内 diff 预览条：旧→新（红/绿）+ 自动预览结果 + 应用/撤销。
+  // 候选显示目标：视图候选带 target；raw 候选按 kind 展开（与 structSig 同源）
+  function candTarget(c) {
+    if (!c) return '';
+    if (c.target) return c.target;
+    return c.kind === 'local' ? (c.model_name || '')
+      : ((c.provider || '') + '/' + (c.model_id || ''));
+  }
+
+  // A2 行内 diff 预览条：人读变更标签 + 自动预览结果 + 应用/撤销。
+  // 替换/建池 → 旧→新（红/绿双编码）；新增/移动/删除/参数 → 摘要标签。
   // validated 经 _inline.rev 进结构签名 — 预览完成 → 重建以启用应用按钮
   function inlineDiffBar(pool, oldCand) {
     var n = _inline;
-    var newC = candFromCatalogValue(n.spec, n.candId, _catalog);
-    var newTarget = newC.kind === 'local' ? newC.model_name
-      : (newC.provider + '/' + newC.model_id);
-    // 旧目标：视图候选带 target；raw 候选（防御）按 kind 展开；
-    // 未配置会话（T5 建池）oldCand=null → 旧侧「（未配置）」
-    var oldTarget = !oldCand ? '（未配置）'
-      : (oldCand.target
-          ? oldCand.target
-          : (oldCand.kind === 'local' ? oldCand.model_name
-             : (oldCand.provider + '/' + oldCand.model_id)));
+    var wpCands = ((((n.work || {}).pools || {})[n.pool] || {}).candidates) || [];
+    function findCand(id) {
+      for (var i = 0; i < wpCands.length; i++) if (wpCands[i].id === id) return wpCands[i];
+      return null;
+    }
+    var label;
+    if (n.kind === 'replace' || n.kind === 'create') {
+      // 新目标 = 工作副本锚点候选；旧目标 = 传入视图候选，建池 →「（未配置）」
+      var newC = n.anchor ? findCand(n.anchor) : wpCands[wpCands.length - 1];
+      var newTarget = candTarget(newC);
+      var oldTarget = (n.kind === 'create' || !oldCand)
+        ? '（未配置）' : candTarget(oldCand);
+      label = '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
+        + '<span class="mp-diff-arrow">→</span>'
+        + '<span class="mp-diff-new mono">' + esc(newTarget) + '</span>';
+    } else {
+      label = '<span class="mp-inline-summary mono">'
+        + esc(n.summary || '') + '</span>';
+    }
+    var anchor = n.anchor || '';
     return '<div class="mp-inline-diff" data-mp-inline-bar="' + esc(pool)
-      + '|' + esc(n.candId) + '">'
-      + '<span class="mp-diff-old mono">' + esc(oldTarget) + '</span>'
-      + '<span class="mp-diff-arrow">→</span>'
-      + '<span class="mp-diff-new mono">' + esc(newTarget) + '</span>'
+      + '|' + esc(anchor) + '">'
+      + label
       + '<span class="mp-inline-preview" id="mp-inline-preview-'
-      + esc(pool) + '-' + esc(n.candId) + '">'
+      + esc(pool) + '-' + esc(anchor || 'pool') + '">'
       + (n.previewHtml || '预览中…') + '</span>'
       + '<button type="button" data-mp-inline-apply="' + esc(pool) + '|'
-      + esc(n.candId) + '"'
+      + esc(anchor) + '"'
       + (n.validated ? '' : ' disabled title="需先通过预览"')
       + '>应用</button>'
       + '<button type="button" data-mp-inline-cancel="1">撤销</button>'
@@ -510,12 +526,27 @@
       : '';
   }
 
-  function candCard(pool, c, rt) {
+  function candCard(pool, c, rt, idx, total, chosenIds) {
     var dot = candDotClass(rt);
     var ev = c.evidence || {};
+    // 三行结构（长度无关对齐；2026-11-03 单动作内联编辑）：
+    //  行1 .mp-cand-idline   — dot + 身份徽标（target/云/P1/协议/视觉），占满整卡宽，
+    //                          与状态解耦，正常卡宽下不换行；
+    //  行2 .mp-cand-status   — 左：运行态 + 延迟心跳 + 冷却环；右：「替换为…」下拉。
+    //  行3 .mp-cand-ops      — [↑][↓][删除] 单动作内联编辑（首↑/末↓ 禁用 affordance）。
+    // 三行均锚定卡片左右边，文字长短只改行内中部，不漂移（与卡片等高法同源）。
+    // 2026-11-04 用户裁决：「当前选择：X」两行文字删除 — 在役模型直接在
+    // 候选卡上区分。chosenIds = 该池各协议 chosen 的 id 集合（池级一次算好，
+    // candCard 只读）；卡片高亮类 + 调用中 pill 由 applyDynamic by-id 翻转
+    //（chosen 不进 structSig — 零闪烁契约不变，同头部灯哲学）。
+    var isChosen = !!(chosenIds && chosenIds[c.id]);
     var html = '<div class="mp-cand-card'
+      + (isChosen ? ' mp-cand-active' : '')
       + ((rt && rt.cooling) ? ' mp-cand-degraded' : '')
-      + '" data-mp-cand-card="' + esc(c.id) + '">'
+      + '" data-mp-cand-card="' + esc(c.id) + '"'
+      + ' id="mp-cand-' + esc(pool) + '-' + esc(c.id) + '"'
+      + (isChosen ? ' title="调用中（当前池路由选中的候选）"' : '') + '>'
+      + '<div class="mp-cand-idline">'
       + '<span class="mp-dot ' + dot + '" id="mp-dot-'
       + esc(pool) + '-' + esc(c.id) + '"></span>'
       + '<span class="mp-cand-main">'
@@ -528,31 +559,54 @@
             + (ev[p] ? esc(ev[p]) : '') + '">' + esc(p) + '</span>';
         }).join('')
       + visionBadge(rt)
+      // 2026-11-04：在役标记 pill — CSS 默认 display:none，仅
+      // .mp-cand-active 卡内显示（chosen 翻转走 applyDynamic 类切换）
+      + '<span class="mp-cand-inuse mono" data-mp-inuse="' + esc(c.id)
+      + '">调用中</span>'
       + '</span>'
+      + '</div>'
+      + '<div class="mp-cand-status">'
+      // C1：延迟心跳迷你图容器常驻（by-id 更新锚点），有数据才出 SVG
       + '<span class="mp-cand-rt mono" id="mp-rt-' + esc(pool) + '-'
       + esc(c.id) + '">' + esc(runtimeBadgeText(rt)) + '</span>'
-      // C1：延迟心跳迷你图容器常驻（by-id 更新锚点），有数据才出 SVG
       + '<span class="mp-spark-wrap" id="mp-spark-' + esc(pool) + '-'
       + esc(c.id) + '">' + sparkSvg(latRing(pool, c.id).slice(-20))
       + '</span>';
-    // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
-    if (rt && rt.cooling) {
-      html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
-        + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
-        + esc(c.id) + '"></span>';
-    }
-    // A2 行内编辑入口：卡内「替换为…」下拉。目录手势惰性预热（Task 1
-    // 裁决）：null=未预热（占位可选，mouseover/focusin 即拉取）；
-    // false=拉取失败（禁用 + 明示）；object=就绪出选项
-    html += '<select class="mp-inline-sel" data-mp-inline-replace="'
-      + esc(pool) + '|' + esc(c.id) + '"'
-      + (_catalog === false ? ' disabled' : '') + '>'
-      + (_catalog
-          ? '<option value="">替换为…</option>' + inlineOptions()
-          : _catalog === false
-            ? '<option value="">目录不可用 — 请用编辑器</option>'
-            : '<option value="">替换为…</option>')
-      + '</select>';
+      // 环是 mp-rt 的兄弟节点（评审 I1）：textContent 定点更新不得删除环
+      if (rt && rt.cooling) {
+        html += '<span class="mp-ring" id="mp-ring-' + esc(pool) + '-'
+          + esc(c.id) + '" data-mp-ring="' + esc(pool) + '|'
+          + esc(c.id) + '"></span>';
+      }
+      // A2 行内编辑入口：行2右端「替换为…」下拉。目录手势惰性预热（Task 1
+      // 裁决）：null=未预热（占位可选，mouseover/focusin 即拉取）；
+      // false=拉取失败（禁用 + 明示）；object=就绪出选项
+      html += '<select class="mp-inline-sel" data-mp-inline-replace="'
+        + esc(pool) + '|' + esc(c.id) + '"'
+        + (_catalog === false ? ' disabled' : '') + '>'
+        + (_catalog
+            ? '<option value="">替换为…</option>' + inlineOptions()
+            : _catalog === false
+              ? '<option value="">目录不可用</option>'
+              : '<option value="">替换为…</option>')
+        + '</select></div>';
+      // 行3：单动作内联编辑（↑上移 / ↓下移 / 删除）。首候选 ↑ 禁用、
+      // 末候选 ↓ 禁用（affordance；handler 内另有边界守卫双保险）
+      var isFirst = idx <= 0;
+      var isLast = idx >= (total || 1) - 1;
+      html += '<div class="mp-cand-ops">'
+        + '<button type="button" class="mp-cand-op" data-mp-cand-op="up"'
+        + ' data-mp-cand="' + esc(c.id) + '" data-mp-pool="' + esc(pool) + '"'
+        + (isFirst ? ' disabled title="已在链首"' : ' title="上移（提高优先级）"')
+        + '>↑</button>'
+        + '<button type="button" class="mp-cand-op" data-mp-cand-op="down"'
+        + ' data-mp-cand="' + esc(c.id) + '" data-mp-pool="' + esc(pool) + '"'
+        + (isLast ? ' disabled title="已在链尾"' : ' title="下移（降低优先级）"')
+        + '>↓</button>'
+        + '<button type="button" class="mp-cand-op mp-cand-op-del"'
+        + ' data-mp-cand-op="del" data-mp-cand="' + esc(c.id) + '"'
+        + ' data-mp-pool="' + esc(pool) + '" title="删除候选">✕</button>'
+        + '</div>';
     html += '</div>';
     return html;
   }
@@ -615,8 +669,8 @@
         }).join('')
       + '</span>'
       + '<span class="mp-toggle-wrap">'
-      + '<button type="button" class="mp-edit-btn" data-mp-edit="' + esc(name)
-      + '">编辑</button>'
+      + '<button type="button" class="mp-edit-btn" data-mp-params-toggle="'
+      + esc(name) + '">高级</button>'
       + '<button type="button" class="mp-edit-btn" data-mp-snippet="' + esc(name)
       + '">接入片段</button>'
       + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
@@ -637,11 +691,18 @@
     var rtById = {};
     (((rt || {}).candidates) || []).forEach(function (rc) { rtById[rc.id] = rc; });
     if (cands.length) {
+      // 2026-11-04：在役候选标记 — 各协议 chosen 的 id 集合（池级一次算好）
+      var protocolsAll = (st && st.protocols) || {};
+      var chosenIds = {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var pv = protocolsAll[proto] || {};
+        if (pv.chosen) chosenIds[pv.chosen] = true;
+      });
       html += '<div class="mp-cands">';
-      cands.forEach(function (c) {
-        html += candCard(name, c, rtById[c.id]);
-        // A2：命中行内编辑会话 → 卡后渲染 diff 预览条
-        if (_inline && _inline.pool === name && _inline.candId === c.id) {
+      cands.forEach(function (c, idx) {
+        html += candCard(name, c, rtById[c.id], idx, cands.length, chosenIds);
+        // A2/A3：行内编辑会话命中锚点候选 → 卡后渲染 diff 预览条
+        if (_inline && _inline.pool === name && _inline.anchor === c.id) {
           html += inlineDiffBar(name, c);
         }
       });
@@ -649,36 +710,51 @@
     } else {
       html += '<p class="mp-empty">无可解析候选（目标悬空或未配置）</p>';
     }
+    // 新增候选：目录四态下拉（与替换下拉同预热语义）；session 在池级
+    // （anchor=null）时 diff 条渲染在本行之后
+    html += '<div class="mp-add-row"><select class="mp-inline-sel"'
+      + ' data-mp-inline-add="' + esc(name) + '"'
+      + (_catalog === false ? ' disabled' : '') + '>'
+      + (_catalog
+          ? '<option value="">+ 新增候选…</option>' + inlineOptions()
+          : _catalog === false
+            ? '<option value="">目录不可用</option>'
+            : '<option value="">+ 新增候选…</option>')
+      + '</select></div>';
+    // A3：池级会话（add/param，anchor=null）→ diff 条渲染在候选列表下方
+    if (_inline && _inline.pool === name && !_inline.anchor) {
+      html += inlineDiffBar(name, null);
+    }
+
+    // Task 4：高级（池参数）面板 — 展开态渲染在 diff 条之后；初值取
+    // 当前视图 def（预览基底仍是 raw，承编辑器语义：视图有损防丢数据）
+    if (_paramsOpen[name]) {
+      html += '<div class="mp-params" data-mp-params="' + esc(name) + '">'
+        + '<label class="mp-param-item">max_attempts'
+        + '<input type="number" class="mp-param-in" data-mp-param="max_attempts" value="'
+        + esc(String(def.max_attempts != null ? def.max_attempts : ''))
+        + '"></label>'
+        + '<label class="mp-param-item">deadline_ms'
+        + '<input type="number" class="mp-param-in" data-mp-param="deadline_ms" value="'
+        + esc(String(def.deadline_ms != null ? def.deadline_ms : ''))
+        + '"></label>'
+        + '<label class="mp-param-item mp-param-check">'
+        + '<input type="checkbox" data-mp-param="accept_declared"'
+        + (def.accept_declared ? ' checked' : '') + '> accept_declared</label>'
+        + '<button type="button" class="mp-edit-btn" data-mp-params-preview="'
+        + esc(name) + '">预览</button>'
+        + '</div>';
+    }
 
     // 悬空目标 / 校验问题
     (def.issues || []).forEach(function (i) {
       html += '<p class="mp-issue">注意：' + esc(i) + '</p>';
     });
 
-    // 双协议当前选择视图：解释性（chosen 或错误 + 每候选排除原因）
-    var protocols = (st && st.protocols) || {};
-    ['openai', 'anthropic'].forEach(function (proto) {
-      var pv = protocols[proto] || {};
-      html += '<div class="mp-proto" data-mp-proto="' + esc(proto) + '">'
-        + '<span class="mp-proto-name mono">' + esc(proto) + '</span>';
-      if (pv.chosen) {
-        html += '<span class="mp-chosen mono" id="mp-chosen-' + esc(name)
-          + '-' + esc(proto) + '">当前选择：' + esc(pv.chosen) + '</span>';
-      } else {
-        html += '<span class="mp-nochosen mono" id="mp-chosen-' + esc(name)
-          + '-' + esc(proto) + '">' + esc(pv.error || '无可用候选') + '</span>';
-      }
-      var decisions = pv.decisions || [];
-      if (decisions.length) {
-        html += '<ul class="mp-decisions">';
-        decisions.forEach(function (d) {
-          html += '<li class="mono"><b>' + esc(d.id) + '</b> — '
-            + (d.included ? '纳入' : '排除：' + esc(d.reason)) + '</li>';
-        });
-        html += '</ul>';
-      }
-      html += '</div>';
-    });
+    // 2026-11-04 用户裁决（二次）：决策块整块删除 —「当前选择」行与
+    // 排除:reason 行都不再渲染（卡上调用中标记 + 头部健康灯已承载全部
+    // 路由态；排除原因是诊断噪音）。structSig 同步摘除 decisions 键：
+    // 无渲染面的数据留在签名里只会在 decisions 变化时引发无谓整块重建。
 
     // C2：故障时间线（池有事件才出 toggle；展开态重建出轴）
     var evs = poolEvents(name);
@@ -700,11 +776,12 @@
 
   /* ── B1 局部渲染（Task 4）：结构签名 + applyDynamic 定点更新 + 本地倒计时 ── */
 
-  // 结构签名（评审 I2/I3/I4 扩展）：池名 + enabled + issues 全文 +
-  // 每候选（id/kind/优先级/目标/声明协议/能力/冷却在否）+ 每协议
-  // （chosen + decisions 全文）+ 冷却在否。运行态展示字段 applyDynamic
-  // 不全更新的（issues/target/decisions/环/降级）一律进签名 → 变化即重建。
-  // 签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁），只走 applyDynamic。
+  // 结构签名（评审 I2/I3 扩展；2026-11-04 收缩）：池名 + enabled + issues
+  // 全文 + 每候选（id/kind/优先级/目标/声明协议/能力/冷却在否）+ 冷却在否
+  // + 高级面板展开态。protocols 整体出签名（决策块删除后无渲染面 —
+  // chosen 由 applyDynamic 类翻转、协议健康由头部灯承载）。运行态展示
+  // 字段 applyDynamic 不全更新的（issues/target/环/降级）一律进签名 →
+  // 变化即重建。签名不变 → 不重写 mpPools.innerHTML（轮询零闪烁）。
   function structSig(def, stPools, rtPools) {
     return Object.keys(def.pools || {}).map(function (n) {
       var p = def.pools[n];
@@ -724,14 +801,11 @@
                     (rt && rt.vision) ? 'v' : '',
                     (rt && rt.cooling) ? 'cool' : 'live'].join('~');
           }).join(',')
-        + ':' + ['openai', 'anthropic'].map(function (proto) {
-            var pv = (stP.protocols || {})[proto] || {};
-            // chosen 不进签名（applyDynamic 定点更新）；decisions 进签名
-            //（评审 I4 — 纳入/排除原因变化必须重建，否则解释停留首屏快照）
-            return proto + '>' + (pv.decisions || []).map(function (d) {
-                  return d.id + (d.included ? '+' : '-') + (d.reason || '');
-                }).join(',');
-          }).join('|');
+        // 2026-11-04：决策块删除后 protocols 不再有渲染面（chosen 由
+        // applyDynamic 类翻转 + 头部灯承载）→ 整个 protocols 键出签名
+        //（decisions 留在签名只会在无渲染面数据变化时引发无谓重建）
+        // Task 4：高级面板展开态进签名（Ruling 3 — 开合是结构）
+        + '|params' + (_paramsOpen[n] ? '1' : '0');
     }).join('#');
   }
 
@@ -762,23 +836,22 @@
   }
 
   // 按 id 定点更新（签名不变的轮询路径）：灯 className / 状态灯 / 运行态文本 /
-  // 当前选择 / revision — 零 innerHTML 重写
+  // 在役候选标记（mp-cand-active 类 + title）/ revision — 零 innerHTML 重写
   function applyDynamic(def, stPools, rtPools) {
     Object.keys(def.pools || {}).forEach(function (n) {
       var poolDef = def.pools[n];
       var protocols = (stPools[n] && stPools[n].protocols) || {};
+      // 2026-11-04：各协议 chosen 的 id 集合（在役标记翻转的数据源）
+      var chosenIds = {};
+      ['openai', 'anthropic'].forEach(function (proto) {
+        var pv = protocols[proto] || {};
+        if (pv.chosen) chosenIds[pv.chosen] = true;
+      });
       ['openai', 'anthropic'].forEach(function (proto) {
         var lamp = $('mp-lamp-' + n + '-' + proto);
         if (lamp) {
           lamp.className = 'mp-lamp '
             + lampForProtocol(poolDef, protocols[proto]);
-        }
-        var pv = protocols[proto] || {};
-        var chosen = $('mp-chosen-' + n + '-' + proto);
-        if (chosen) {
-          chosen.className = pv.chosen ? 'mp-chosen mono' : 'mp-nochosen mono';
-          chosen.textContent = pv.chosen ? ('当前选择：' + pv.chosen)
-            : (pv.error || '无可用候选');
         }
       });
       var rtById = {};
@@ -787,6 +860,16 @@
       });
       (poolDef.candidates || []).forEach(function (c) {
         var rt = rtById[c.id];
+        // 2026-11-04：在役标记翻转（chosen 变化 → 摘旧挂新，by-id 零重写）。
+        // 双协议任一选中即标记（卡上不区分协议 — 头部灯承载协议健康态）
+        var card = $('mp-cand-' + n + '-' + c.id);
+        if (card) {
+          var on = !!chosenIds[c.id];
+          var cls = String(card.className || '').replace(/\s*mp-cand-active\b/g, '');
+          if (on && cls.indexOf('mp-cand-active') < 0) cls += ' mp-cand-active';
+          card.className = cls;
+          card.title = on ? '调用中（当前池路由选中的候选）' : '';
+        }
         var dot = $('mp-dot-' + n + '-' + c.id);
         if (dot) dot.className = 'mp-dot ' + candDotClass(rt);
         // L3：树行候选灯同态 by-id 更新 + 挂掉降暗（候选结构进 sig，
@@ -990,8 +1073,8 @@
           }).join(',')
           + '/' + Object.keys(_degradeDismissed).join(',')
         + '|inline:' + (_inline
-            ? _inline.pool + '|' + _inline.candId + '|' + _inline.spec
-              + '|' + _inline.rev
+            ? _inline.pool + '|' + (_inline.anchor || '') + '|'
+              + _inline.kind + '|' + _inline.rev
             : '')
         + '|'
         + (_actionError
@@ -1189,7 +1272,7 @@
     }
     var cat = await ensureCatalog();
     if (!cat) {
-      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      UI.toast('目录不可用 — 无法替换候选，稍后重试', 'error');
       return;
     }
     var base = _state.def.raw ? deepCopy(_state.def.raw)
@@ -1211,17 +1294,102 @@
     work.pools[pool].candidates[i] = deepCopy(nc);
     // CAS 基点在选中时捕获（与编辑器打开时固定基点同语义 — 后台刷新
     // 推进 revision 不得让陈旧 work 借新基点覆盖他人修改）
-    await startInlineSession(pool, candId, spec, base, work);
+    var summary = candTarget(cands[i]) + ' → ' + candTarget(nc);
+    await beginInline(pool, { kind: 'replace', anchor: candId,
+                              summary: summary }, base, work);
   }
 
-  // A2 会话公共尾段：设 _inline → 重建出 diff 条 → 自动预览（三段式
-  // 门禁）→ 预览结果进签名重建（启用/禁用应用按钮）。
+  // A2 会话公共尾段（泛化版）：设 _inline → 重建出 diff 条 → 自动预览
+  // （三段式门禁）→ 预览结果进签名重建（启用/禁用应用按钮）。
+  // act = {kind, anchor, summary} — 单动作内联描述符（A3 泛化）。
   // 令牌必须在首个 await 前同步捕获：预演在途时用户再选一次会同步接管
   // _inline，若令牌取自渲染恢复之后，旧会话的迟到结果会通过身份校验
   // 写进新会话（validated/previewHtml 与 work 错位 → 门禁被绕过）
-  async function startInlineSession(pool, candId, spec, base, work) {
-    var session = { pool: pool, candId: candId, spec: spec, base: base,
-                    work: work, base_revision: _state.def.revision,
+  // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
+  // 阻止一切；通过 → dry-run×2 携带编辑态 config。
+  // 返回 {validated, code, html, message}；code ∈ ok | invalid | http_fail |
+  // none_chosen | error（调用方决定 toast 文案与容器前缀）。
+  // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
+  // （单协议无候选 = 黄灯，属合法状态，不阻止）
+  async function previewWork(work, pool) {
+    try {
+      var res = await fetch(VALIDATE_URL, {
+        method: 'POST', headers: UI.adminHeaders(),
+        body: JSON.stringify(work),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      // 2026-11-04：validate 非 2xx → 展示真实 HTTP 错误，绝不冒充空「校验未
+      // 通过」。只读预览等中间层挡 POST 时 body 无 valid 字段（{"error":…}），
+      // 旧实现只读 d.valid（undefined→!valid）→ 误走 invalid 分支 + 空
+      // issues 列表，真实原因（HTTP 403）被完全吞掉（用户报障：空「校验未
+      // 通过」误导为配置不合法，实为环境挡写）
+      if (!res.ok) {
+        return {
+          validated: false, code: 'http_fail',
+          html: '<p class="mp-issue">预览请求失败 · HTTP '
+            + esc(res.status)
+            + ((d && d.error) ? ' · ' + esc(d.error) : '')
+            + ' — 已阻止应用</p>',
+        };
+      }
+      if (!d.valid) {
+        return {
+          validated: false, code: 'invalid',
+          html: '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
+            + '<ul class="mp-decisions">'
+            + (d.issues || []).map(function (i) {
+                return '<li class="mono">' + esc(i) + '</li>';
+              }).join('')
+            + '</ul>',
+        };
+      }
+      var outs = [];
+      for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
+        var proto = ['openai', 'anthropic'][k];
+        var r = await fetch(DRYRUN_URL, {
+          method: 'POST', headers: UI.adminHeaders(),
+          body: JSON.stringify({ pool: pool, protocol: proto,
+                                 config: work }),
+        });
+        var b = null;
+        try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
+        outs.push({ proto: proto, ok: r.ok, body: b || {} });
+      }
+      var html = outs.map(function (o) {
+        var b = o.body || {};
+        return '<p class="mono">' + esc(o.proto) + ' → '
+          + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
+             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选')
+                + '</span>'))
+          + '</p>';
+      }).join('');
+      var failed = outs.filter(function (o) { return !o.ok; });
+      if (failed.length) {
+        return { validated: false, code: 'http_fail',
+                 html: html + '<p class="mp-issue">预览请求失败 · HTTP '
+                   + esc(failed.map(function (o) { return o.proto; })
+                         .join('/'))
+                   + ' — 已阻止应用</p>' };
+      }
+      var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
+      if (noneChosen.length === outs.length) {
+        return { validated: false, code: 'none_chosen',
+                 html: html + '<p class="mp-issue">两个协议均无可用候选'
+                   + ' — 已阻止应用</p>' };
+      }
+      return { validated: true, code: 'ok', html: html };
+    } catch (e) {
+      return { validated: false, code: 'error', html: '',
+               message: (e && e.message) || String(e) };
+    }
+  }
+
+  async function beginInline(pool, act, base, work) {
+    var session = { pool: pool, anchor: act.anchor || null,
+                    kind: act.kind || 'replace', summary: act.summary || '',
+                    base: base, work: work,
+                    base_revision: _state.def.revision,
                     validated: false, previewHtml: '', rev: 0 };
     _inline = session;
     await renderModelPools();
@@ -1247,7 +1415,7 @@
     }
     var cat = await ensureCatalog();
     if (!cat) {
-      UI.toast('目录不可用 — 请使用编辑器高级模式', 'error');
+      UI.toast('目录不可用 — 无法创建池，稍后重试', 'error');
       return;
     }
     var base = _state.def.raw ? deepCopy(_state.def.raw)
@@ -1260,7 +1428,175 @@
     var sk = newPoolSkeleton();
     sk.candidates = [deepCopy(c)];
     work.pools[pool] = sk;
-    await startInlineSession(pool, pool + '-1', spec, base, work);
+    await beginInline(pool, { kind: 'create', anchor: pool + '-1',
+                              summary: '' }, base, work);
+  }
+
+  /* ── 卡片单动作内联编辑（2026-11-03 用户裁决：模态 → 卡片）──────────
+   * 新增/上移/下移/删除 各自构建整配置 work → beginInline 门禁（预览→
+   * CAS 应用）。语义承旧模态 mutator（mpEditAddCandidate/mpEditMove/
+   * mpEditRemove）。move/delete 不依赖目录（ruling 2）；add 需要。 */
+
+  // 公共头：raw 深拷贝基底 + 池/候选定位。返回 {base, work, cands, i}
+  // 或 null（已 toast）。raw 缺失（未配置池边缘态）→ 空骨架防御。
+  function inlineWorkBase(pool, candId) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return null;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool]) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    var cands = base.pools[pool].candidates;
+    if (!Array.isArray(cands)) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    var i = cands.findIndex(function (c) { return c.id === candId; });
+    if (i < 0) {
+      UI.toast('候选不存在：' + candId, 'error');
+      return null;
+    }
+    return { base: base, cands: cands, i: i };
+  }
+
+  // 上移/下移：交换相邻候选并交换 priority（承 mpEditMove — 链序与
+  // 优先级一致）；越界静默返回（按钮 affordance 已禁用，双保险）
+  async function doMpInlineMove(pool, candId, dir) {
+    var w = inlineWorkBase(pool, candId);
+    if (!w) return;
+    var j = dir === 'up' ? w.i - 1 : w.i + 1;
+    if (j < 0 || j >= w.cands.length) return;
+    var work = deepCopy(w.base);
+    var cs = work.pools[pool].candidates;
+    var a = cs[w.i], b = cs[j];
+    cs[w.i] = b; cs[j] = a;
+    var p = a.priority; a.priority = b.priority; b.priority = p;
+    var verb = dir === 'up' ? '上移' : '下移';
+    await beginInline(pool, { kind: 'move', anchor: candId,
+      summary: verb + ' ' + candTarget(a) + ' → P' + a.priority },
+      w.base, work);
+  }
+
+  // 删除：splice 移除。末候选可删 — validate 对 0 候选不报 issue（
+  // config.py 只静默 enabled=false）；实际拦下的是 dry-run 双协议
+  // chosen=null → previewWork code=none_chosen「已阻止应用」（ruling 1，
+  // cross-review I1 修正机制描述）
+  async function doMpInlineDelete(pool, candId) {
+    var w = inlineWorkBase(pool, candId);
+    if (!w) return;
+    var work = deepCopy(w.base);
+    var removed = work.pools[pool].candidates.splice(w.i, 1)[0];
+    await beginInline(pool, { kind: 'delete', anchor: candId,
+      summary: '删除候选 ' + candTarget(removed) }, w.base, work);
+  }
+
+  // 新增：目录项 → 链尾 push，priority = maxP+1（承 mpEditAddCandidate）
+  async function doMpInlineAdd(pool, spec) {
+    if (!spec) return;
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var cat = await ensureCatalog();
+    if (!cat) {
+      UI.toast('目录不可用 — 无法新增候选', 'error');
+      return;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool] || !Array.isArray(base.pools[pool].candidates)) {
+      UI.toast('候选不存在：' + pool, 'error');
+      return;
+    }
+    var work = deepCopy(base);
+    var cs = work.pools[pool].candidates;
+    var maxP = cs.reduce(function (m, c) {
+      return Math.max(m, c.priority || 0);
+    }, 0);
+    var id = mpMintCandidateId();
+    var c = candFromCatalogValue(spec, id, _catalog);
+    c.priority = maxP + 1;   // 链尾 = 最低优先级
+    cs.push(c);
+    await beginInline(pool, { kind: 'add', anchor: null,
+      summary: '新增候选 ' + candTarget(c) + ' (P' + c.priority + ')' },
+      base, work);
+  }
+
+  // Task 4：高级面板开合（展开态进 structSig → 开合即重建，Ruling 3）
+  async function doMpParamsToggle(pool) {
+    if (!pool) return;
+    if (_paramsOpen[pool]) delete _paramsOpen[pool];
+    else _paramsOpen[pool] = true;
+    await renderModelPools();
+  }
+
+  // 池级基底（param 会话）：raw 深拷贝 + 池存在性检查（无候选查找 —
+  // 承 inlineWorkBase 头部语义，候选定位是候选级动作专属）
+  function inlinePoolBase(pool) {
+    if (!_state.def) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return null;
+    }
+    var base = _state.def.raw ? deepCopy(_state.def.raw)
+      : { schema_version: 1, pools: {} };
+    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
+    if (!base.pools[pool]) {
+      UI.toast('池不存在：' + pool, 'error');
+      return null;
+    }
+    return base;
+  }
+
+  // Task 4：池参数（高级面板 预览钮）— 读面板输入（或显式 overrides，
+  // 单测直驱路径）→ work 变更 → param 会话（anchor=null → diff 条池底）。
+  // summary 只列变更项 旧→新；数字解析失败/字段未变不写入。
+  // 应用走同一 CAS 门禁（doMpInlineApply）。
+  async function doMpInlineParams(pool, overrides) {
+    var base = inlinePoolBase(pool);
+    if (!base) return;
+    var wp = base.pools[pool];
+    var panel = (typeof document !== 'undefined' && document.querySelector)
+      ? document.querySelector('[data-mp-params="' + pool + '"]') : null;
+    var read = function (name) {
+      if (overrides && Object.prototype.hasOwnProperty.call(overrides, name))
+        return overrides[name];
+      if (panel) {
+        var el = panel.querySelector('[data-mp-param="' + name + '"]');
+        if (el) return name === 'accept_declared' ? !!el.checked : el.value;
+      }
+      return undefined;
+    };
+    var toNum = function (v) {
+      var n = parseInt(v, 10);
+      return isNaN(n) ? undefined : n;
+    };
+    var changes = [];
+    var ma = toNum(read('max_attempts'));
+    if (ma !== undefined && wp.max_attempts !== ma) {
+      changes.push('max_attempts ' + wp.max_attempts + ' → ' + ma);
+      wp.max_attempts = ma;
+    }
+    var dm = toNum(read('deadline_ms'));
+    if (dm !== undefined && wp.deadline_ms !== dm) {
+      changes.push('deadline_ms ' + wp.deadline_ms + ' → ' + dm);
+      wp.deadline_ms = dm;
+    }
+    var ad = read('accept_declared');
+    if (typeof ad === 'boolean' && !!wp.accept_declared !== ad) {
+      changes.push('accept_declared ' + (wp.accept_declared ? 'true' : 'false')
+        + ' → ' + (ad ? 'true' : 'false'));
+      wp.accept_declared = ad;
+    }
+    await beginInline(pool, { kind: 'param', anchor: null,
+      summary: changes.length ? '池参数：' + changes.join('；')
+                              : '池参数：无变更' },
+      base, base);
   }
 
   async function doMpInlineApply() {
@@ -1294,7 +1630,8 @@
         return;
       }
       if (res.ok) {
-        _undo = session.base;
+        // 回滚机制已删（2026-11-03 用户裁决）：单动作小影响面 + 可反向
+        // 操作撤销，独立「回滚上次编辑」不再提供
         _inline = null;
         _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
         clearActionError();
@@ -1412,439 +1749,16 @@
              declared_protocols: protocols };
   }
 
-  // 编辑器渲染：#mpModal（候选链操作 + 池参数 + 预览/应用/回滚）
-  // 7.9.0：能力列已删 — 池 = 纯路由表（模型引用 + 优先级），能力归模型
-  function renderEditor() {
-    var modal = $('mpModal');
-    if (!modal || !_edit) return;
-    var wp = _edit.work.pools[_edit.pool];
-    var rtById = {};
-    ((((_state.runtime || {}).pools || {})[_edit.pool] || {}).candidates || [])
-      .forEach(function (rc) { rtById[rc.id] = rc; });
-
-    var html = '<div class="mp-editor" data-mp-editor="' + esc(_edit.pool) + '">'
-      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(_edit.pool)
-      + '</b><span>编辑候选链（改完先预览，再应用）</span>'
-      + '<button type="button" data-mp-act="close">关闭</button></div>';
-
-    // 候选链：id / 优先级 / 目标 / 运行态 / 操作（替换=行内下拉选中即换）
-    var cands = wp.candidates || [];
-    var opts = function (sel) {
-      var catalog = _edit.catalog || {};
-      var o = '';
-      (catalog.localValues || []).forEach(function (v) {
-        var n = v.slice('local:'.length);
-        o += '<option value="' + esc(v) + '"' + (sel === v ? ' selected' : '')
-          + '>本地 · ' + esc(n) + '</option>';
-      });
-      (catalog.cloudValues || []).forEach(function (v) {
-        var n = v.slice('cloud:'.length);
-        o += '<option value="' + esc(v) + '"' + (sel === v ? ' selected' : '')
-          + '>云 · ' + esc(n) + '</option>';
-      });
-      if (!o) o = '<option value="">（目录不可用 — 请用下方新增候选）</option>';
-      return o;
-    };
-    html += '<div class="cp-table-wrap"><table class="if-table">'
-      + '<thead><tr><th>候选</th><th>优先级</th><th>类型</th><th>目标</th>'
-      + '<th>运行态</th><th>操作</th></tr></thead><tbody>';
-    cands.forEach(function (c, idx) {
-      var target = c.kind === 'local' ? c.model_name
-        : (c.provider + '/' + c.model_id);
-      var sel = c.kind + ':' + target;
-      html += '<tr><td class="mono">' + esc(c.id) + '</td>'
-        + '<td class="mono">' + esc(c.priority) + '</td>'
-        + '<td>' + esc(c.kind === 'local' ? '本地' : '云') + '</td>'
-        + '<td class="mono">' + esc(target) + '</td>'
-        + '<td class="mono">' + esc(runtimeBadgeText(rtById[c.id])) + '</td>'
-        + '<td class="mp-edit-ops">'
-        + '<select data-mp-replace="' + esc(c.id) + '">'
-        + '<option value="">替换为…</option>' + opts(sel) + '</select>'
-        + '<button type="button" data-mp-act="up" data-mp-cand="' + esc(c.id) + '">上移</button>'
-        + '<button type="button" data-mp-act="down" data-mp-cand="' + esc(c.id) + '">下移</button>'
-        + '<button type="button" data-mp-act="del" data-mp-cand="' + esc(c.id) + '">删除</button>'
-        + '</td></tr>';
-    });
-    html += '</tbody></table></div>';
-
-    // 新增候选（目录下拉；空目录时提示手填 YAML）
-    html += '<div class="mp-edit-add"><select data-mp-add="1">'
-      + '<option value="">新增候选…</option>' + opts('') + '</select>'
-      + '<span class="mp-hint">新增的候选排在链尾（优先级最低）</span></div>';
-
-    // 池参数
-    html += '<div class="mp-edit-params">'
-      + '<label>max_attempts <input type="number" data-mp-param="max_attempts" value="'
-      + esc(wp.max_attempts) + '"></label>'
-      + '<label>deadline_ms <input type="number" data-mp-param="deadline_ms" value="'
-      + esc(wp.deadline_ms) + '"></label>'
-      + '<label>accept_declared <input type="checkbox" data-mp-param="accept_declared"'
-      + (wp.accept_declared ? ' checked' : '') + '></label>'
-      + '</div>';
-
-    // 预览区 + 动作按钮
-    html += '<div id="mpPreview" class="mp-preview"></div>'
-      + '<div class="mp-edit-actions">'
-      + '<button type="button" data-mp-act="preview">预览</button>'
-      + '<button type="button" id="mpEditApply" data-mp-act="apply"'
-      + (_edit.validated ? '' : ' disabled title="需先通过预览"')
-      + '>应用</button>'
-      + '<button type="button" data-mp-act="undo"' + (_undo ? '' : ' disabled') + '>回滚上次编辑</button>'
-      + '</div></div>';
-    modal.innerHTML = html;
-  }
-
-  // 关闭编辑器（B4：Esc 二级出口 + 头部关闭钮 — 此前模态无鼠标出口）
-  function mpModalClose() {
-    _edit = null;
-    var modal = $('mpModal');
-    if (modal) modal.innerHTML = '';
-  }
-
-  // 打开编辑器：基底 = raw（视图有损，防丢数据 — spec §4.3）；池不存在 → 新建骨架
-  async function doMpEdit(pool) {
-    if (!_state.def) {
-      UI.toast('配置尚未加载完成，请稍后重试', 'error');
-      return;
-    }
-    var base = _state.def.raw ? deepCopy(_state.def.raw)
-      : { schema_version: 1, pools: {} };
-    if (!base.pools || typeof base.pools !== 'object') base.pools = {};
-    if (!base.pools[pool]) {
-      base.pools[pool] = newPoolSkeleton();   // 池不存在（含从未配置）→ 新建骨架
-    }
-    if (!Array.isArray(base.pools[pool].candidates)) {
-      base.pools[pool].candidates = [];
-    }
-    // CAS 基点在打开时捕获：后台刷新推进 _revision 不得让陈旧工作副本
-    // 借新 revision 通过 CAS 覆盖他人修改（安全评审 — 固定基点，
-    // 他人改动后 apply 只会 409，需重开编辑器取新基底）
-    _edit = { pool: pool, base: base, work: deepCopy(base), catalog: null,
-              base_revision: _state.def.revision, validated: false, rev: 0 };
-    renderEditor();
-    try { _edit.catalog = await fetchCandidateCatalog(); }
-    catch (e) { _edit.catalog = null; }
-    renderEditor();
-  }
-
-  // 候选操作（无 inline onclick；模态内事件委托调用这些函数）
-
-  // 任何编辑操作共用的失效拍子（终审 I1 + PR-21 评审 I-1）：
-  // validated 失效 + rev 代次推进。五个 mutator 都就地改 _edit（身份
-  // 不变 → mpEditPreview 的会话令牌不设防），在途预演的迟到完成只能靠
-  // rev 对不上来作废 — 不作废 = 用户没见过结果的配置被置真放行（门禁绕过）
-  function mpEditInvalidated() {
-    _edit.validated = false;
-    _edit.rev++;
-  }
-
-  function mpEditReplace(candidateId, newCand) {
-    if (!_edit) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var i = cands.findIndex(function (c) { return c.id === candidateId; });
-    if (i < 0) {
-      UI.toast('候选不存在：' + candidateId, 'error');
-      return;
-    }
-    var c = deepCopy(newCand);
-    // D4 一键换模语义：直接替换候选，继承原优先级（不做优先级重排）
-    c.priority = cands[i].priority;
-    cands[i] = c;
-    mpEditInvalidated();   // 任何变更使上次预览失效
-    renderEditor();
-  }
-
-  function mpEditAddCandidate(newCand) {
-    if (!_edit) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var maxP = cands.reduce(function (m, c) { return Math.max(m, c.priority || 0); }, 0);
-    var c = deepCopy(newCand);
-    c.priority = maxP + 1;   // 链尾 = 最低优先级
-    cands.push(c);
-    mpEditInvalidated();
-    renderEditor();
-  }
-
-  function mpEditRemove(candidateId) {
-    if (!_edit) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var i = cands.findIndex(function (c) { return c.id === candidateId; });
-    if (i >= 0) {
-      cands.splice(i, 1);
-      mpEditInvalidated();
-    }
-    renderEditor();
-  }
-
-  function mpEditMove(candidateId, dir) {
-    if (!_edit) return;
-    var cands = _edit.work.pools[_edit.pool].candidates;
-    var i = cands.findIndex(function (c) { return c.id === candidateId; });
-    var j = dir === 'up' ? i - 1 : i + 1;
-    if (i < 0 || j < 0 || j >= cands.length) return;
-    var tmp = cands[i]; cands[i] = cands[j]; cands[j] = tmp;
-    // 交换优先级，保持链序与优先级一致
-    var p = cands[i].priority; cands[i].priority = cands[j].priority; cands[j].priority = p;
-    mpEditInvalidated();
-    renderEditor();
-  }
-
-  function mpEditPoolParam(key, value) {
-    if (!_edit) return;
-    _edit.work.pools[_edit.pool][key] = value;
-    mpEditInvalidated();   // 池参数也是编辑：失效必须重烘按钮态
-    renderEditor();        // （防预览通过后改池参数，应用钮仍亮着旧状态）
-  }
-
-  // 预览核心（模态编辑器与 A2 行内编辑共用）：validate（静态）→ 不通过
-  // 阻止一切；通过 → dry-run×2 携带编辑态 config。
-  // 返回 {validated, code, html, message}；code ∈ ok | invalid | http_fail |
-  // none_chosen | error（调用方决定 toast 文案与容器前缀）。
-  // spec §3.2 门：HTTP 失败或两协议均无可用候选 → 阻止应用
-  // （单协议无候选 = 黄灯，属合法状态，不阻止）
-  async function previewWork(work, pool) {
-    try {
-      var res = await fetch(VALIDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(work),
-      });
-      var d = await res.json();
-      if (!d.valid) {
-        return {
-          validated: false, code: 'invalid',
-          html: '<p class="mp-issue">校验未通过（已阻止预览与应用）：</p>'
-            + '<ul class="mp-decisions">'
-            + (d.issues || []).map(function (i) {
-                return '<li class="mono">' + esc(i) + '</li>';
-              }).join('')
-            + '</ul>',
-        };
-      }
-      var outs = [];
-      for (var k = 0; k < ['openai', 'anthropic'].length; k++) {
-        var proto = ['openai', 'anthropic'][k];
-        var r = await fetch(DRYRUN_URL, {
-          method: 'POST', headers: UI.adminHeaders(),
-          body: JSON.stringify({ pool: pool, protocol: proto,
-                                 config: work }),
-        });
-        var b = null;
-        try { b = await r.json(); } catch (e) { /* 非 JSON 响应体 */ }
-        outs.push({ proto: proto, ok: r.ok, body: b || {} });
-      }
-      var html = outs.map(function (o) {
-        var b = o.body || {};
-        return '<p class="mono">' + esc(o.proto) + ' → '
-          + (b.chosen ? ('选择 <b>' + esc(b.chosen) + '</b>')
-             : ('<span class="mp-nochosen">' + esc(b.error || '无可用候选')
-                + '</span>'))
-          + '</p>';
-      }).join('');
-      var failed = outs.filter(function (o) { return !o.ok; });
-      if (failed.length) {
-        return { validated: false, code: 'http_fail',
-                 html: html + '<p class="mp-issue">预览请求失败 · HTTP '
-                   + esc(failed.map(function (o) { return o.proto; })
-                         .join('/'))
-                   + ' — 已阻止应用</p>' };
-      }
-      var noneChosen = outs.filter(function (o) { return !o.body.chosen; });
-      if (noneChosen.length === outs.length) {
-        return { validated: false, code: 'none_chosen',
-                 html: html + '<p class="mp-issue">两个协议均无可用候选'
-                   + ' — 已阻止应用</p>' };
-      }
-      return { validated: true, code: 'ok', html: html };
-    } catch (e) {
-      return { validated: false, code: 'error', html: '',
-               message: (e && e.message) || String(e) };
-    }
-  }
-
-  // 预览（模态）：结果写入 #mpPreview，toast 按 code 映射。
-  // 会话令牌 + 代次（PR-21 评审 I-1）：await 之后编辑器可能已被关闭/重开
-  // （_edit 身份变化），或预演在途期间被改动/发了新预演（rev 推进）—
-  // 陈旧续体一律放弃，迟到结果不得回写/置 validated/点亮应用钮。
-  async function mpEditPreview() {
-    if (!_edit) return;
-    var session = _edit;
-    _edit.validated = false;   // 每次预览重置；通过才置 true（apply 的前置）
-    _edit.rev++;               // 本代预演；在途改动/新预演都使本代作废
-    var rev = _edit.rev;
-    var out = await previewWork(_edit.work, _edit.pool);
-    if (_edit !== session || _edit.rev !== rev) return;
-    var pv = $('mpPreview');   // await 后重查（在途 renderEditor 可能已换节点）
-    if (out.code === 'error') {
-      UI.toast('预览请求异常：' + out.message, 'error');
-      return;
-    }
-    if (pv) pv.innerHTML = '<p>预览（编辑态，未应用）：</p>' + out.html;
-    if (out.code === 'invalid') {
-      UI.toast('校验未通过 — 请按问题列表修正', 'error');
-      return;
-    }
-    if (out.code === 'http_fail') {
-      UI.toast('预览请求失败 — 已阻止应用', 'error');
-      return;
-    }
-    if (out.code === 'none_chosen') {
-      UI.toast('两个协议均无可用候选 — 已阻止应用', 'error');
-      return;
-    }
-    _edit.validated = true;
-    // 外科手术式点亮：预览结果刚写进 #mpPreview，renderEditor 整模态重绘
-    // 会把它抹掉 — 只重烘应用钮的 disabled/title（池 bug #2：预览通过后
-    // 按钮仍灰，用户无法应用）
-    var applyBtn = $('mpEditApply');
-    if (applyBtn) {
-      applyBtn.removeAttribute('disabled');
-      applyBtn.removeAttribute('title');
-    }
-    UI.toast('预览完成 — 确认无误后点「应用」', 'ok');
-  }
-
-  // 应用：CAS POST；成功 → 记录 _undo；409 → 冲突 toast + 重新拉取。
-  // 三段式纪律：必须先通过预览（validate+dry-run）才能应用。
-  async function mpEditApply() {
-    if (!_edit) return;
-    if (!_edit.validated) {
-      UI.toast('请先点「预览」并通过校验，再应用', 'error');
-      return;
-    }
-    var session = _edit;   // 会话令牌：请求在途时编辑器可能被关闭/重开
-    var poolName = session.pool;
-    var body = deepCopy(session.work);
-    body.expected_revision = session.base_revision;  // 打开时的基点，不被后台刷新推进
-    try {
-      var res = await fetch(UPDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(body),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
-      if (_edit !== session) {
-        // 陈旧完成：请求已发出并生效，但当前编辑器已是另一会话 —
-        // 只提示 + 刷新，绝不触碰 _edit/_undo（终审 I3）
-        if (res.ok) {
-          UI.toast('已更新 iff/' + poolName, 'ok');
-          await renderModelPools();
-        }
-        return;
-      }
-      if (res.ok) {
-        _undo = session.base;
-        _edit = null;
-        var modal = $('mpModal');
-        if (modal) modal.innerHTML = '';
-        UI.toast('已更新 iff/' + poolName, 'ok');
-        await renderModelPools();
-        return;
-      }
-      if (res.status === 409) {
-        // 基点已过期：本工作副本不可再应用（重试仍会 409）— 引导重开编辑器
-        _edit.validated = false;
-        UI.toast('配置已被其他修改更新（冲突）。请关闭编辑器后重新打开，基于最新配置再编辑', 'error');
-        await renderModelPools();
-        return;
-      }
-      UI.toast((d && d.error) || ('更新失败 · HTTP ' + res.status), 'error');
-    } catch (e) {
-      UI.toast('更新请求异常：' + (e && e.message), 'error');
-    }
-  }
-
-  // 回滚：以重新拉取到的最新 revision 重新 POST 编辑前配置
-  async function doMpUndo() {
-    if (!_undo) {
-      UI.toast('没有可回滚的编辑', 'error');
-      return;
-    }
-    var snapshot = _undo;   // 会话令牌：在途期间 _undo 可能已被新编辑替换
-    try {
-      await renderModelPools();   // 先取最新 revision（CAS 基点）
-      if (_undo !== snapshot) return;   // 回滚对象已变 — 放弃本次
-      var body = deepCopy(snapshot);
-      body.expected_revision = _revision;
-      var res = await fetch(UPDATE_URL, {
-        method: 'POST', headers: UI.adminHeaders(),
-        body: JSON.stringify(body),
-      });
-      var d = null;
-      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
-      if (_undo !== snapshot) {
-        if (res.ok) {
-          UI.toast('已回滚到上次编辑前的配置', 'ok');
-          await renderModelPools();
-        }
-        return;
-      }
-      if (res.ok) {
-        _undo = null;
-        clearActionError();
-        UI.toast('已回滚到上次编辑前的配置', 'ok');
-        await renderModelPools();
-        return;
-      }
-      if (res.status === 409) {
-        await setActionError('回滚遇到冲突（配置又有新修改）',
-          '已刷新，请重试',
-          {label: '重试', run: function () { return doMpUndo(); }});
-        UI.toast('回滚遇到冲突（配置又有新修改），已刷新，请重试', 'error');
-        return;
-      }
-      var msg = (d && d.error) || ('回滚失败 · HTTP ' + res.status);
-      UI.toast(msg, 'error');
-      await setActionError(msg, null,
-        {label: '重试', run: function () { return doMpUndo(); }});
-    } catch (e) {
-      UI.toast('回滚请求异常：' + (e && e.message), 'error');
-      await setActionError('回滚请求异常：' + (e && e.message), null,
-        {label: '重试', run: function () { return doMpUndo(); }});
-    }
-  }
-
-  // 模态内事件委托：下拉选中即换/即增；按钮 → 操作函数
-  function onModalChange(ev) {
-    var t = ev.target;
-    if (!t || !t.getAttribute) return;
-    var repId = t.getAttribute('data-mp-replace');
-    if (repId && t.value) {
-      mpEditReplace(repId, candFromCatalogValue(t.value, repId, _edit.catalog));
-      return;
-    }
-    if (t.getAttribute('data-mp-add') && t.value) {
-      var id = mpMintCandidateId();
-      mpEditAddCandidate(candFromCatalogValue(t.value, id, _edit.catalog));
-      return;
-    }
-    var param = t.getAttribute('data-mp-param');
-    if (param) {
-      var v = t.type === 'checkbox' ? !!t.checked : t.value;
-      if (t.type === 'number') v = Number(v);
-      mpEditPoolParam(param, v);
-    }
-  }
-
+  // 接入片段：#mpModal 只承载 doMpSnippet 的复制钮（编辑器已退役 2026-11-03）
   function onModalClick(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
     var cp = t.getAttribute('data-mp-copy');
     if (cp) { doMpSnippetCopy(cp); return; }
-    var act = t.getAttribute('data-mp-act');
-    if (!act) return;
-    var cand = t.getAttribute('data-mp-cand');
-    if (act === 'preview') mpEditPreview();
-    else if (act === 'close') mpModalClose();
-    else if (act === 'apply') mpEditApply();
-    else if (act === 'undo') doMpUndo();
-    else if (act === 'del' && cand) mpEditRemove(cand);
-    else if (act === 'up' && cand) mpEditMove(cand, 'up');
-    else if (act === 'down' && cand) mpEditMove(cand, 'down');
   }
 
   var modal = $('mpModal');
   if (modal && typeof modal.addEventListener === 'function') {
-    modal.addEventListener('change', onModalChange);
     modal.addEventListener('click', onModalClick);
   }
 
@@ -1863,6 +1777,9 @@
       doMpInlineSelect(bar[0], bar[1], t.value);
       return;
     }
+    // 单动作内联：新增候选（目录下拉；空值=占位项，忽略）
+    var addPool = t.getAttribute('data-mp-inline-add');
+    if (addPool && t.value) { doMpInlineAdd(addPool, t.value); return; }
   }
 
   /* ── 接入片段（Task 8）：客户端复制即用代码 ── */
@@ -1958,8 +1875,22 @@
     // A2：行内 diff 条（应用 / 撤销）
     if (t.getAttribute('data-mp-inline-apply')) { doMpInlineApply(); return; }
     if (t.getAttribute('data-mp-inline-cancel')) { doMpInlineCancel(); return; }
-    var edit = t.getAttribute('data-mp-edit');
-    if (edit) { doMpEdit(edit); return; }
+    // 单动作内联：候选卡动作行 [↑][↓][删除]
+    var op = t.getAttribute('data-mp-cand-op');
+    if (op) {
+      var cand = t.getAttribute('data-mp-cand');
+      var pool = t.getAttribute('data-mp-pool');
+      if (op === 'del' && cand && pool) { doMpInlineDelete(pool, cand); return; }
+      if ((op === 'up' || op === 'down') && cand && pool) {
+        doMpInlineMove(pool, cand, op);
+        return;
+      }
+    }
+    // Task 4：高级面板开合 + 面板内预览
+    var pt = t.getAttribute('data-mp-params-toggle');
+    if (pt) { doMpParamsToggle(pt); return; }
+    var pp = t.getAttribute('data-mp-params-preview');
+    if (pp) { doMpInlineParams(pp); return; }
     var snip = t.getAttribute('data-mp-snippet');
     if (snip) { doMpSnippet(snip); return; }
     // C2：故障时间线开合（展开态进 sig → 重建出轴/收起轴）
@@ -2002,7 +1933,13 @@
             .indexOf(t.tagName.toUpperCase()) >= 0) return;
     if (ev.key === 'Escape') {
       if (_inline) return doMpInlineCancel();   // 一级：行内 diff 条
-      if (_edit) { mpModalClose(); return; }    // 二级：编辑器模态
+      // 二级：收起高级面板（展开态进 sig → 收起即重建）
+      var opened = Object.keys(_paramsOpen);
+      if (opened.length) {
+        opened.forEach(function (p) { delete _paramsOpen[p]; });
+        renderModelPools();
+        return;
+      }
       return;
     }
     if ((ev.key === 'e' || ev.key === 'E')
@@ -2012,7 +1949,7 @@
         ? t.closest('[data-mp-card]') : null;
       var pool = (card && typeof card.getAttribute === 'function')
         ? card.getAttribute('data-mp-card') : null;
-      if (pool) return doMpEdit(pool);
+      if (pool) return doMpParamsToggle(pool);   // E = 展开/收起高级面板
     }
   }
 
@@ -2051,23 +1988,22 @@
   window.mpTreeHtml = treeHtml;
   window.mpCardsHtml = cardsHtml;
   window.doMpToggle = doMpToggle;
-  window.doMpEdit = doMpEdit;
-  window.doMpUndo = doMpUndo;
   window.doMpBannerAction = doMpBannerAction;
   window.doMpBannerDismiss = doMpBannerDismiss;
   window.doMpInlineSelect = doMpInlineSelect;
   window.doMpInlineApply = doMpInlineApply;
   window.doMpInlineCancel = doMpInlineCancel;
+  window.doMpInlineMove = doMpInlineMove;
+  window.doMpInlineDelete = doMpInlineDelete;
+  window.doMpInlineAdd = doMpInlineAdd;
+  window.doMpParamsToggle = doMpParamsToggle;
+  window.doMpInlineParams = doMpInlineParams;
   window.doMpConfigSelect = doMpConfigSelect;
   window.doMpTreeDiag = doMpTreeDiag;
   window.mpPrimeInline = primeInline;
   window.doMpTimelineToggle = doMpTimelineToggle;
   window.doMpDegradeView = doMpDegradeView;
   window.doMpDegradeDismiss = doMpDegradeDismiss;
-  window.mpEditReplace = mpEditReplace;
-  window.mpEditAddCandidate = mpEditAddCandidate;
-  window.mpEditPreview = mpEditPreview;
-  window.mpEditApply = mpEditApply;
   window.doMpSnippet = doMpSnippet;
   window.doMpSnippetCopy = doMpSnippetCopy;
 })();

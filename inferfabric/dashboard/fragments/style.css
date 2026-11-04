@@ -9,15 +9,18 @@
 :root {
   color-scheme: dark;
 
-  --c-bg-dark:        #0e1217;
-  --c-surface-dark:   #161c24;
-  --c-surface2-dark:  #1c242e;
-  --c-border-dark:    #2a3340;
+  /* 暖炭黑 dark / 暖瓷白 light（2026-11-03 用户拍板：暖化）。
+     暖中性 = R>G>B 低饱和；ink 刻度随基面一起从冷蓝灰转暖灰，
+     否则「暖基面 + 冷字」会显得脱节。系列色 --series-1 不动（CVD 验证同源）。 */
+  --c-bg-dark:        #16130e;
+  --c-surface-dark:   #1d1a15;
+  --c-surface2-dark:  #272219;
+  --c-border-dark:    #3a332a;
 
-  --c-bg-light:       #f5f6f8;
+  --c-bg-light:       #f5f3ee;
   --c-surface-light:  #ffffff;
-  --c-surface2-light: #f0f2f5;
-  --c-border-light:   #e2e5ea;
+  --c-surface2-light: #efece3;
+  --c-border-light:   #dcd6c9;
 
   /* 图表系列色（CVD 验证通过，Task 4 定稿；与 charts.js PALETTES 同源）。
      仅 --series-1 用于 CSS sparkline（单系列）；多系列色由 charts.js 内联。 */
@@ -73,9 +76,9 @@
   --surface-2:  var(--c-surface2-dark);
   --border:     var(--c-border-dark);
 
-  --ink:        #e6eaf0;
-  --ink-2:      #9aa5b5;
-  --ink-3:      #66707f;
+  --ink:        #ece6dd;
+  --ink-2:      #a99e8c;
+  --ink-3:      #736a5d;
 
   --accent:     #d98e6e;   /* 品牌铜：仅"当前活跃"状态 + 主操作 */
 
@@ -84,9 +87,9 @@
   --crit:       #f85149;
   --info:       #58a6ff;
 
-  --overlay:    rgba(7, 10, 14, 0.72);
-  --skeleton-base: #1f2731;
-  --skeleton-shine: #2a3340;
+  --overlay:    rgba(12, 10, 7, 0.72);
+  --skeleton-base: #292318;
+  --skeleton-shine: #3a332a;
 }
 
 /* ── L2: Semantic 令牌 — LIGHT（仅覆盖 semantic 层） ───────────── */
@@ -97,9 +100,9 @@
   --surface-2:  var(--c-surface2-light);
   --border:     var(--c-border-light);
 
-  --ink:        #1a2029;
-  --ink-2:      #5b6572;
-  --ink-3:      #8a93a3;
+  --ink:        #211c15;
+  --ink-2:      #5f5748;
+  --ink-3:      #8a8172;
 
   --accent:     #b45a3c;
 
@@ -108,9 +111,9 @@
   --crit:       #cf222e;
   --info:       #0969da;
 
-  --overlay:    rgba(31, 41, 55, 0.55);
-  --skeleton-base: #eef1f5;
-  --skeleton-shine: #e2e6ec;
+  --overlay:    rgba(48, 42, 34, 0.5);
+  --skeleton-base: #efece3;
+  --skeleton-shine: #e2ddd0;
 
   /* 图表系列色（light 组，CVD 验证通过；与 charts.js PALETTES 同源） */
   --series-1: #2563eb;
@@ -392,9 +395,11 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .col-3  { grid-column: span 3; }
 
 /* ── GPU 遥测带（telemetry rail — 主角元素） ─────────────────── */
+/* 遥测带：5 段等宽列（此前 1.4/1/0.8/0.8/0.8 不等宽 = 段界参差）。
+   每段同构：label / value / bar（bar 恒在，5 段都有量级条 → 视觉节奏一致）。 */
 .if-telemetry {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.8fr 0.8fr 0.8fr;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   background: var(--border);
   border: 1px solid var(--border);
@@ -404,7 +409,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .tr-seg {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--sp-1);
   padding: var(--sp-1) var(--sp-2);
   background: var(--surface);
   min-width: 0;
@@ -419,8 +424,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ink);
   display: flex;
   align-items: baseline;
-  gap: 4px;
+  gap: var(--sp-1);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .tr-value b { font-size: var(--fs-lg); }
 .tr-unit { font-size: var(--fs-table); color: var(--ink-2); font-weight: 400; }
@@ -473,6 +479,22 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   padding-top: var(--sp-1);
   border-top: 1px solid var(--border);
 }
+
+/* ── 网格行内并排卡片：等高 + 操作行钉底（长度无关对齐）───────────
+ * 根因：.if-card 为 height:auto（不填满被 stretch 的网格单元），且操作行紧随
+ * 内容、无锚点 → 卡片高度与操作行 Y 都由内容长度驱动，文字一变即漂移。
+ * 治本（一种方式，全局生效）：
+ *   ① .if-grid > [class*="col-"] > .if-card { height:100% }
+ *      单元是网格项（默认 stretch 至行高，确定）→ 卡片填满 → 同行等高、底边对齐。
+ *   ② .if-card > .if-card-actions { margin-top:auto }
+ *      操作行吸收中部弹性空间 → 按钮行恒钉卡底。
+ *   内容只占「头部之下、操作行之上」的中部带；文字长短只改变这条带的高矮，
+ *   头部(顶)与操作行(底)锚定容器两条边 → 永不因文字长短漂移。
+ *   对齐由结构保证，不依赖内容长度恰好合适。
+ * 安全性：所有 .if-card 均为所属 col 单元的唯一子元素；操作行恒为卡片最后子元素。 */
+.if-grid > [class*="col-"] > .if-card { height: 100%; }
+.if-card > .if-card-actions { margin-top: auto; }
+
 .if-card-link {
   font-size: var(--fs-table);
   color: var(--info);
@@ -484,7 +506,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .kpi {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--sp-0);
   padding: var(--sp-1) var(--sp-2);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -546,7 +568,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .if-table th,
 .if-table td {
-  padding: 7px var(--sp-1);
+  padding: var(--sp-1) var(--sp-1);
   text-align: left;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -753,7 +775,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   .switch-spinner { animation: none; border-top-color: var(--accent); }
   .mp-busy::after { animation: none; opacity: .45; }   /* B2：静态半透明 */
   /* B3：状态过渡逐类显式关停（全局一刀切之外的审计性收录） */
-  .mp-dot, .mp-lamp, .mp-cand-card, .mp-chosen, .mp-nochosen,
+  .mp-dot, .mp-lamp, .mp-cand-card, .mp-cand-inuse,
   .mp-cand-degraded { transition: none; }
   /* C3：光带停止流动（静态实色）；C4：高亮呼吸停止（静态描边） */
   .mp-beam-flow { animation: none;
@@ -912,7 +934,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   gap: var(--sp-1);
   padding-bottom: var(--sp-1);
   border-bottom: 1px solid var(--border);
-  margin-bottom: 10px;
+  margin-bottom: var(--sp-2);
 }
 .mon-power-hero-val {
   font-size: var(--fs-lg);
@@ -980,21 +1002,28 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 操作行钉底：同组/跨组卡片等高（grid stretch）时，操作按钮基线对齐。
+   此前无此规则 → body 内容多少决定按钮 Y 位置 → 同排按钮参差。 */
+.inf-card .if-card-actions { margin-top: auto; }
 
-/* 卡片内统计列表（dt/dd 横排，不换行——保证同组卡片高度对齐） */
+/* 卡片内统计列表：固定 4 车道网格（端口/uptime/精度/场景）。
+   所有模型卡恒 4 槽（缺失显式 "—" 占位）→ 跨卡、跨组同车道对齐。
+   此前 flex + 变槽数 → 列宽随行参差、卡片高度不齐。 */
 .inf-stats {
-  display: flex;
-  flex-wrap: nowrap;
-  gap: var(--sp-1) var(--sp-2);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-1);
   margin: 0;
-  overflow: hidden;
 }
-.inf-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.inf-stat { display: flex; flex-direction: column; gap: var(--sp-0); min-width: 0; }
 .inf-stat dt { font-size: var(--fs-table); color: var(--ink-3); margin: 0; }
 .inf-stat dd {
   margin: 0;
   font-size: var(--fs-table);
   color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 场景徽标（D5：default = 模型 YAML 当前值，灰显；非 default 场景琥珀色） */
@@ -1406,6 +1435,39 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ink-3);
   white-space: nowrap;
 }
+/* 严重度摘要条：4 等宽 tile（分布焦点 + 一键过滤）。
+   与遥测带/模型卡同一套 4-lane 网格 + 4 的倍数节奏。 */
+.anom-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+}
+.anom-sum {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-0);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font: inherit;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.anom-sum:hover { background: var(--surface); }
+.anom-sum-n { font-size: var(--fs-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.anom-sum-l { font-size: var(--fs-table); color: var(--ink-3); }
+.anom-sum.sev-crit { border-left-color: var(--crit); }
+.anom-sum.sev-crit .anom-sum-n { color: var(--crit); }
+.anom-sum.sev-err  { border-left-color: var(--crit); }
+.anom-sum.sev-err  .anom-sum-n { color: var(--crit); }
+.anom-sum.sev-warn { border-left-color: var(--warn); }
+.anom-sum.sev-warn .anom-sum-n { color: var(--warn); }
+.anom-sum.sev-info { border-left-color: var(--info); }
+.anom-sum.sev-info .anom-sum-n { color: var(--info); }
 /* 严重度：图标 + 文字标签双编码（spec §7：不得仅用颜色表达状态） */
 .anom-sev { display: inline-flex; align-items: center; gap: 4px; font-size: var(--fs-table); }
 .anom-sev svg { width: 12px; height: 12px; flex-shrink: 0; }
@@ -1455,7 +1517,7 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 .mon-lat-chip.on .dot{opacity:1}
 
 /* ── v6.5 客户端 Agent 卡 ── */
-.if-agent-body{display:grid;grid-template-columns:minmax(0,60fr) minmax(0,40fr);gap:16px;align-items:start}
+.if-agent-body{display:grid;grid-template-columns:minmax(0,60fr) minmax(0,40fr);gap:var(--sp-3);align-items:start}
 .if-agent-left{min-width:0}
 .if-agent-right{min-width:0}
 /* 卡头下方 slim 工具条：scope 段控 + 未识别 badge + 管理（对齐延迟卡 chips 行先例） */
@@ -1509,20 +1571,12 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   padding: 14px 16px; margin-top: 12px; }
 .mp-editor-hdr { display: flex; gap: 10px; align-items: baseline;
   margin-bottom: 10px; }
-.mp-edit-ops { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.mp-edit-ops button, .mp-edit-actions button {
+.mp-editor button {
   padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--border); background: transparent;
   color: var(--ink);
 }
-.mp-edit-actions { margin-top: 12px; display: flex; gap: 8px; }
-.mp-edit-actions button[disabled] { opacity: .4; cursor: default; }
-.mp-edit-add { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
-.mp-edit-params { margin-top: 10px; display: flex; gap: 16px; flex-wrap: wrap;
-  font-size: 12px; color: var(--ink-2); }
-.mp-edit-params input[type="number"] { width: 90px; }
 .mp-hint { font-size: 12px; color: var(--ink-2); }
-.mp-preview { margin-top: 12px; }
 .mp-snippet-title { margin: 10px 0 4px; font-size: 13px;
   color: var(--ink-2); }
 .mp-snippet { background: rgba(0, 0, 0, .25); border-radius: 8px;
@@ -1533,20 +1587,65 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
    cool=冷却/隔离（暗态，卡边框虚线 = unroutable 区分）；probe=半开探测。 */
 .mp-cands { display: flex; flex-direction: column; gap: var(--sp-1);
   margin: var(--sp-1) 0; }
+/* 候选体检卡（两行结构，长度无关对齐）：
+   行1 .mp-cand-idline   — dot + 身份徽标，占满整卡宽，与状态解耦；
+   行2 .mp-cand-status   — 左：运行态 + 心跳 + 冷却环，右：「替换为…」下拉。
+   两行锚定卡片左右边，文字长短只改行内中部，不漂移（与卡片等高法同源）。
+   行2 左端缩进 = dot 宽(10px)+间距，使运行态文字与行1目标名左对齐。 */
 .mp-cand-card {
-  display: flex; align-items: center; gap: var(--sp-2);
+  display: flex; flex-direction: column; gap: 6px;
   padding: 10px var(--sp-2); background: var(--surface-2, #1c242e);
   border: 1px solid var(--border); border-radius: 10px;
   transition: border-color var(--dur) var(--ease),
               opacity var(--dur) var(--ease);
 }
+.mp-cand-idline { display: flex; align-items: center; gap: var(--sp-1);
+  min-width: 0; }
+.mp-cand-status { display: flex; align-items: center; gap: var(--sp-1);
+  padding-left: calc(10px + var(--sp-1)); min-width: 0; }
+
+/* ── 卡片单动作内联（2026-11-03 裁决：编辑模态 → 卡片）──────────────
+   行3 .mp-cand-ops   — [↑][↓][✕] 紧凑图标钮，靠左；首/尾候选对应方向
+   钮 disabled（affordance）。面板 .mp-params = 头部『高级』展开的
+   池参数区；.mp-add-row = 候选链下方的新增候选下拉行。 */
+.mp-cand-ops { display: flex; gap: 4px; align-items: center;
+  padding-left: calc(10px + var(--sp-1)); }
+.mp-cand-op {
+  width: 24px; height: 22px; padding: 0; font-size: 12px; line-height: 1;
+  flex: none;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: transparent; color: var(--ink-2); cursor: pointer;
+  transition: border-color var(--dur) var(--ease),
+              color var(--dur) var(--ease);
+}
+.mp-cand-op:hover { border-color: var(--accent); color: var(--ink); }
+.mp-cand-op:disabled { opacity: .3; cursor: default; }
+.mp-cand-op:disabled:hover { border-color: var(--border); color: var(--ink-2); }
+.mp-cand-op-del:hover { border-color: var(--warn); color: var(--warn); }
+/* 删除键钉最右：与 ↑↓ 移动组拉开整段距离（破坏性操作视觉分离，2026-11-04
+   用户裁决）。DOM 序不变（up/down/del），仅 ✕ margin-left:auto 吸收行内空隙
+   → 与第二行「替换为…」下拉的右端对齐呼应。 */
+.mp-cand-op-del { margin-left: auto; }
+.mp-add-row { margin-top: var(--sp-1); }
+.mp-inline-summary { font-size: 12px; color: var(--ink); }
+.mp-params { display: flex; gap: var(--sp-2); align-items: center;
+  flex-wrap: wrap; margin-top: var(--sp-1); padding: var(--sp-1) var(--sp-2);
+  border: 1px dashed var(--border); border-radius: 10px;
+  font-size: 12px; color: var(--ink-2); }
+.mp-param-item { display: flex; gap: 6px; align-items: center; }
+.mp-param-in { width: 90px; }
+.mp-param-check input { vertical-align: middle; }
 .mp-cand-degraded { border-style: dashed; opacity: .85;
   transition: opacity var(--dur) var(--ease); }
 .mp-cand-main { display: flex; align-items: center; gap: var(--sp-1);
-  flex: 1; min-width: 0; flex-wrap: wrap; }
-.mp-cand-target { font-size: var(--fs-table); }
+  flex: 1; min-width: 0; }
+/* 长度无关对齐（全局方法）：候选行高恒定 — 长模型名截断省略，绝不换行
+   撑高（长名曾让同行候选行 +N 行 → 后续 ops 行漂移 376px，实测） */
+.mp-cand-target { font-size: var(--fs-table); min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
 .mp-cand-kind, .mp-cand-pri {
   font-size: 11px; color: var(--ink-2);
+  flex: none; white-space: nowrap;
 }
 .mp-cand-kind { border: 1px solid var(--border);
   border-radius: var(--radius-pill); padding: 1px 8px; }
@@ -1554,25 +1653,41 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   font-size: 11px; font-family: var(--font-mono); color: #64d2ff;
   border: 1px solid rgba(100, 210, 255, .35);
   border-radius: var(--radius-pill); padding: 1px 8px;
+  flex: none; white-space: nowrap;
 }
-.mp-chosen { color: #30d158;
-  transition: color var(--dur) var(--ease); }
-.mp-nochosen { color: var(--ink-2);
-  transition: color var(--dur) var(--ease); }
+/* 2026-11-04 用户裁决：「当前选择：X」文字行删除 — 在役候选直接在卡上
+   区分：.mp-cand-active 描边高亮 + 行1「调用中」pill。pill 默认隐藏，
+   仅 active 卡内显示；类翻转由 applyDynamic by-id 完成（chosen 不进
+   structSig — 零 innerHTML 重写，同头部灯哲学）。双协议任一选中即标记。 */
+.mp-cand-active { border-color: var(--ok); }
+.mp-cand-inuse {
+  display: none;
+  font-size: 11px; color: var(--ok);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+  flex: none; white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+.mp-cand-active .mp-cand-inuse { display: inline-block; }
+/* mp-nochosen 仍被 dry-run 预演文本使用（previewWork — 卡上「当前选择」
+   行已删，此规则仅为预演条兜底弱化色） */
+.mp-nochosen { color: var(--ink-2); }
 .mp-feat {
   font-size: 11px; color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: var(--radius-pill); padding: 1px 8px;
+  flex: none; white-space: nowrap;
 }
 /* 7.9.0 视觉小标：模型声明 vision（本地 model_type=vl / 云 supports_vision）
    — 绿色系与协议徽标区分，只读展示（声明入口在模型侧） */
 .mp-feat-vision { color: #30d158;
   border-color: color-mix(in srgb, #30d158 35%, transparent); }
+/* 行2 状态簇：运行态文本 + 心跳迷你图（左对齐，与冷却环同列） */
 .mp-cand-rt { font-size: var(--fs-table); color: var(--ink-2);
-  display: flex; align-items: center; gap: var(--sp-1); }
+  display: flex; align-items: center; gap: var(--sp-1); flex: none; }
 /* C1 延迟心跳迷你图：容器常驻（空时塌缩），SVG 定点更新不闪 */
 .mp-spark-wrap { display: inline-flex; align-items: center;
-  margin-left: auto; flex: none; }
+  flex: none; }
 .mp-spark { display: block; }
 /* C2 故障时间线：横向 4px 轴线 + 事件点着色，hover 用原生 title */
 .mp-tl-row { display: flex; flex-direction: column; align-items: flex-start;
@@ -1632,12 +1747,15 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ink-2); flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 共享下拉基础样式；钉右端只作用于行2「替换为…」下拉（attribute 选择器），
+   不波及未配置卡 .mp-config-sel（那里下拉应紧跟箭头，M2 cross-review） */
 .mp-inline-sel {
-  margin-top: var(--sp-1); font-size: var(--fs-table);
+  font-size: var(--fs-table);
   color: var(--ink); background: var(--surface-2);
   border: 1px dashed var(--border); border-radius: 6px;
-  padding: 2px 8px; max-width: 100%;
+  padding: 2px 8px; flex: none; max-width: 100%;
 }
+.mp-inline-sel[data-mp-inline-replace] { margin-left: auto; }
 .mp-inline-sel:disabled { opacity: .55; }
 .mp-highlight { animation: mp-highlight-pulse 1.6s var(--ease) 2;
   outline: 2px solid color-mix(in srgb, #ffd60a 70%, transparent);
@@ -1767,6 +1885,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   color: var(--ink-2); background: var(--surface-2);
 }
 .mp-tree-state-flowing { color: var(--ok); border-color: var(--ok); }
+/* 同 cooldown 先例：亮主题 --ok(#1a7f37) 在 surface-2(#efece3) 上仅
+   4.3:1 — 亮主题单独加深 #176d2f（5.44:1；dark 6.2:1 本就达标） */
+[data-theme="light"] .mp-tree-state-flowing { color: #176d2f; }
 /* 终审 I5：cooldown 徽标是文本 — 亮主题 --warn(#9a6700) 在 surface-2 上
    仅 4.34:1，亮主题单独加深（dark 6.2:1 本就达标） */
 .mp-tree-state-cooldown { color: var(--warn); border-color: var(--warn); }

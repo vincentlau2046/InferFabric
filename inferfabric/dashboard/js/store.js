@@ -400,22 +400,19 @@ function updateThemeIcon() {
 }
 window.toggleTheme = toggleTheme;
 
-// Initialize theme from localStorage or system preference
+// Initialize theme from localStorage. 用户偏好浅色（2026-11-03 拍板）：
+// light 为默认。显式 saved==='dark' 仍尊重；无显式选择时不再跟随 OS，
+// 直接 light。:root 语义色仍按 dark 定义（[data-theme] 覆盖），default 只是
+// 首屏落点。
 (function initTheme() {
   const saved = localStorage.getItem('iff_theme');
-  var th = 'dark';
-  if (saved === 'light') {
-    document.documentElement.setAttribute('data-theme', 'light');
-    th = 'light';
-  } else if (saved === 'dark') {
-    document.documentElement.removeAttribute('data-theme');   // dark = :root 默认
+  var th = 'light';
+  if (saved === 'dark') {
+    document.documentElement.removeAttribute('data-theme');   // → dark (:root 默认)
     th = 'dark';
-  } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
-    document.documentElement.setAttribute('data-theme', 'light');
-    th = 'light';
   } else {
-    document.documentElement.removeAttribute('data-theme');   // dark 默认
-    th = 'dark';
+    document.documentElement.setAttribute('data-theme', 'light');
+    th = 'light';
   }
   store.set('theme', th);                       // 初值：charts.js 订阅时即时回放
   updateThemeIcon();

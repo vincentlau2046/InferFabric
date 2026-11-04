@@ -108,12 +108,23 @@
 
     var pwr = $('trPwr');
     if (pwr) pwr.textContent = (util.power == null || util.power === '—') ? '—' : UI.fmtNum(Math.round(util.power));
+    // 遥测带 5 段统一量级条：功耗/温度/时钟按本机额定上限（5090D）折算
+    setFill('trPwrFill', numPct(util.power, 575));
 
     var temp = $('trTemp');
     if (temp) temp.textContent = (util.temp == null || util.temp === '') ? '—' : UI.fmtNum(Math.round(util.temp));
+    setFill('trTempFill', numPct(util.temp, 90));
 
     var clk = $('trClock');
     if (clk) clk.textContent = fmtClock(util.clock);
+    setFill('trClockFill', numPct(util.clock, 3110));
+  }
+
+  /* 数值 → 量级百分比（0–100 钳制）；非数字（—/null）→ 0。 */
+  function numPct(v, denom) {
+    var n = Number(v);
+    if (!isFinite(n) || n <= 0 || !denom) return 0;
+    return Math.max(0, Math.min(100, (n / denom) * 100));
   }
 
   /* ── 2. 活跃模型卡 ── */
