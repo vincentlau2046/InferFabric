@@ -2,13 +2,17 @@
 
 > **为 NVIDIA RTX 5090 等 Blackwell 系列显卡的本地 AI 工作站设计——把单卡 GPU 变成一台统一推理服务器：推理平台 + 统一 Gateway，模型即插件，本地+云端统一，一个 API 管所有。**
 >
-> NVIDIA Blackwell（RTX 5090 / 5090D · NVFP4）· 推理平台 + 统一 Gateway · 模型即插件 · 三态 GPU 状态机 · 8 引擎适配器 · macOS Dashboard · 9 云端预设 · 双协议路由
+> NVIDIA Blackwell（RTX 5090 / 5090D · NVFP4）· 推理平台 + 统一 Gateway · 模型即插件 · 三态 GPU 状态机 · 9 引擎适配器 · macOS Dashboard · 9 云端预设 · 双协议路由
+>
+> **产品主页**：[atlaswork.cn/inferfabric](https://www.atlaswork.cn/inferfabric/) · InferFabric 是 [AtlasWork](https://www.atlaswork.cn/)（Atlas 全栈 AI 工作站）产品家族的**本地推理底座**
 
 ---
 
 ## 定位
 
 **InferFabric 是专为 NVIDIA RTX 5090 等 Blackwell 系列显卡的本地 AI 工作站设计的推理平台与统一 Gateway 平台。**
+
+> **产品家族**：InferFabric 是 [AtlasWork · Atlas 全栈 AI 工作站](https://www.atlaswork.cn/)（`atlaswork.cn`）的**本地推理底座**。Atlas 平台自下而上打通算力、推理、技能、引擎与产品——产品（AtlasCode / AtlasOffice / AtlasComic）共享 AtlasHarness 引擎，向下由 **InferFabric 统一供给本地推理**。产品主页：[atlaswork.cn/inferfabric](https://www.atlaswork.cn/inferfabric/)。
 
 这里的 Gateway 是有状态网关——不同于无状态转发代理，它管理模型进程生命周期（启动/停止/切换/睡眠/唤醒），不是 vLLM 包装器（多引擎适配器抽象），也不只是本地推理工具（统一管理本地+云端+多模态）。它把你的 GPU 从零散的推理环境变成一个**可编程的统一推理服务**，OpenAI + Anthropic 双协议统一入口 `:8999`。
 
@@ -754,4 +758,4 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 
 ---
 
-[InferFabric](https://github.com/vincentlau2046/InferFabric) · MIT License
+**[InferFabric](https://github.com/vincentlau2046/InferFabric)** · [产品主页 atlaswork.cn/inferfabric](https://www.atlaswork.cn/inferfabric/) · [AtlasWork 全栈 AI 工作站](https://www.atlaswork.cn/) · MIT License
