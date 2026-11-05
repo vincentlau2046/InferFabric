@@ -1,7 +1,7 @@
 """
 inferfabric/model_lifecycle.py — Model lifecycle management (extracted from manager.py v4.0).
 
-Responsible for: starting/stopping models (vLLM/ComfyUI/Ollama/OllamaCpp),
+Responsible for: starting/stopping models (vLLM/ComfyUI/Ollama/LlamaCpp),
 deployment flow, shared service add, sleep/wake, independent model management.
 """
 
@@ -296,7 +296,7 @@ class ModelLifecycle:
         默认只停 needs_gpu 服务（_switch_to_idle/_deploy_model 用——
         gpu_role=none 服务不影响 GPU，予以保留）。
         include_none=True 时也停 gpu_role=none 服务（force_reset 用——
-        替代手动 ollama_cpp/asr 停止循环）。
+        替代手动 llama_cpp/asr 停止循环）。
         """
         svcs = services or list(self.state.get_active_services())
         for svc_name in svcs:

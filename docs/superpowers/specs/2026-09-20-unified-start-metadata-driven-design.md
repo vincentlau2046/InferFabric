@@ -144,7 +144,7 @@ already the canonical source that stop uses).
 ### Unchanged
 
 - `_start_model` dispatch (model_lifecycle.py:50-65) — already symmetric.
-- comfyui / tts / asr / ollama_cpp / ollama `adapter.start` bodies + facade
+- comfyui / tts / asr / llama_cpp / ollama `adapter.start` bodies + facade
   signatures — single deployment, no docker branch to miss.
 - `ModelConfig.container_name` / `resolved_deployment` properties — already
   canonical (from the stop effort).

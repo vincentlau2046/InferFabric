@@ -343,9 +343,9 @@ def cmd_pull(args):
         else:
             print(f"❌ Pull failed with code {result.returncode}")
             sys.exit(1)
-    elif model.is_ollama_cpp:
+    elif model.is_llama_cpp:
         from pathlib import Path
-        model_path = Path(model.ollama_cpp.model_path).expanduser()
+        model_path = Path(model.llama_cpp.model_path).expanduser()
         if model_path.exists():
             print(f"✅ Model already downloaded: {model_path}")
         else:

@@ -157,7 +157,7 @@ def _make_pm(calls: list, cache: ResponseCache, port=8001) -> SimpleNamespace:
     """构造 handle_chat 非流式本地路径所需的最小 pm 桩。"""
     model_obj = SimpleNamespace(
         name="qwen", served_name="qwen-served", type="vllm",
-        is_ollama=False, is_ollama_cpp=False, port=port,
+        is_ollama=False, is_llama_cpp=False, port=port,
     )
     pm = SimpleNamespace()
     pm.auth = SimpleNamespace(enabled=False, key_name=lambda h: "anonymous")

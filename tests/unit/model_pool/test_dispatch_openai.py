@@ -150,8 +150,8 @@ class FakeHandler:
 
 def _local_model(name="qwen-small", served="qwen-small", port=8101, type_="vllm"):
     return SimpleNamespace(name=name, served_name=served, port=port, type=type_,
-                           is_ollama=False, is_ollama_cpp=False, ollama=None,
-                           ollama_cpp=None, replicas=None)
+                           is_ollama=False, is_llama_cpp=False, ollama=None,
+                           llama_cpp=None, replicas=None)
 
 
 def _raw_config():

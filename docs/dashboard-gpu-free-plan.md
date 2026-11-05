@@ -37,9 +37,9 @@ JS:  const excl = models.filter(m=>m.mode==='exclusive');       (L970)
 |---|---|---|
 | `exclusive` | qwen36-27b, qwen36-27b-vl, gemma4-26b | vllm |
 | `shared` | qwen35-9b, comfyui | vllm / comfyui |
-| `none` | llama3-1b, phi3-mini, qwen25-omni-3b | ollama_cpp |
+| `none` | llama3-1b, phi3-mini, qwen25-omni-3b | llama_cpp |
 
-`none` 类三个均为 `ollama_cpp` 框架（CPU/轻量推理，不占独占 GPU 锁），与「GPU-FREE」语义一致。
+`none` 类三个均为 `llama_cpp` 框架（CPU/轻量推理，不占独占 GPU 锁），与「GPU-FREE」语义一致。
 
 ### 1.4 现有渲染逻辑关键点（影响新增栏）
 
@@ -136,7 +136,7 @@ JS:  const excl = models.filter(m=>m.mode==='exclusive');       (L970)
 1. 启动 dashboard，打开「模型推理」TAB。
 2. 预期三栏自上而下：独占模型（3 卡，红 badge「独占」）、共享服务（2 卡，绿 badge「共享」）、GPU-FREE（3 卡，橙 badge「GPU-FREE」）。
 3. 每栏图标：🔒 红 / 🔓 绿 / 🔓 橙。
-4. 卡片内框架标签：GPU-FREE 三卡应显示 `📦 ollama.cpp`（L999–1000 `fwIcons`/`fwLabels` 已支持 `ollama_cpp`）。
+4. 卡片内框架标签：GPU-FREE 三卡应显示 `📦 llama.cpp`（L999–1000 `fwIcons`/`fwLabels` 已支持 `llama_cpp`）。
 5. 卡片按钮：idle 状态显示「启动」按钮（L995）；active 显示「释放」（无休眠，因 `isVllm=false`）。
 
 ### 4.2 空栏占位处理
@@ -160,7 +160,7 @@ JS:  const excl = models.filter(m=>m.mode==='exclusive');       (L970)
 
 ### 4.3 交互回归
 
-- 点击 GPU-FREE 卡片「启动」→ 走 `/switch` → 后端部署 ollama_cpp 模型（CPU/轻量），不触 GPU 锁切换。验证 dashboard 状态栏 `gpu_mode` 保持 `idle`（因 `is_cpu_only` 服务不计入 gpu_mode，manager.py L181）。
+- 点击 GPU-FREE 卡片「启动」→ 走 `/switch` → 后端部署 llama_cpp 模型（CPU/轻量），不触 GPU 锁切换。验证 dashboard 状态栏 `gpu_mode` 保持 `idle`（因 `is_cpu_only` 服务不计入 gpu_mode，manager.py L181）。
 - 「释放」按钮 → `isExcl=false`（L989，因 `m.mode==='none'`）→ `/stop` 分支 → 停止后若无其他活跃服务则转 idle（L1042–1045）。
 
 ### 4.4 自动化检查

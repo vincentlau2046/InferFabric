@@ -7,7 +7,7 @@ unit/state/test_idle_switch.py — idle 切换保留 gpu:none 服务测试
   - 全 GPU 服务时 active_services 清空
   - 多个 gpu:none 服务全部保留
   - 未知服务跳过（防御性）
-  - stop_ollama_cpp 不对 gpu:none 服务调用（源码验证）
+  - stop_llama_cpp 不对 gpu:none 服务调用（源码验证）
   - 所有 GPU-bound 服务经 _stop_model_process 停止（不内联 docker，Task 2.1）
 """
 import json
@@ -57,7 +57,7 @@ def _make_lifecycle_with_active(names):
         model.name = name
         model.type = mtype
         for flag in ("is_vllm", "is_sglang", "is_comfyui", "is_ninfer",
-                     "is_ollama_cpp", "is_tts_server", "is_asr_server"):
+                     "is_llama_cpp", "is_tts_server", "is_asr_server"):
             setattr(model, flag, False)
         setattr(model, f"is_{mtype}", True)
         model.is_gpu_none = False
@@ -139,10 +139,10 @@ class TestSwitchToIdlePreservesGpuNone:
         assert json.loads(result) == []
 
 
-class TestSwitchToIdleNoStopOllamaCpp:
-    """Verify the deleted code path: stop_ollama_cpp is NOT called for gpu_role:none."""
+class TestSwitchToIdleNoStopLlamaCpp:
+    """Verify the deleted code path: stop_llama_cpp is NOT called for gpu_role:none."""
 
-    def test_no_stop_ollama_cpp_for_gpu_none(self):
+    def test_no_stop_llama_cpp_for_gpu_none(self):
         """The gpu_role:none stop loop has been deleted.
         Verify by checking the source code directly."""
         import ast
@@ -158,9 +158,9 @@ class TestSwitchToIdleNoStopOllamaCpp:
                 method_lines = method_lines = method_source[node.lineno-1:node.end_lineno]
                 method_text = "\n".join(method_lines)
 
-                # stop_ollama_cpp should NOT appear in _switch_to_idle
-                assert "stop_ollama_cpp" not in method_text, \
-                    "stop_ollama_cpp found in _switch_to_idle() — gpu_role:none loop not removed!"
+                # stop_llama_cpp should NOT appear in _switch_to_idle
+                assert "stop_llama_cpp" not in method_text, \
+                    "stop_llama_cpp found in _switch_to_idle() — gpu_role:none loop not removed!"
                 break
         else:
             pytest.fail("_switch_to_idle method not found")

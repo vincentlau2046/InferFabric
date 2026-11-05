@@ -16,7 +16,7 @@
 |------|------|------|------|
 | `name` | ✅ | string | 模型唯一标识符，同时也是文件名（不含扩展名） |
 | `description` | ✅ | string | 模型描述，显示在 `iff models` 输出中 |
-| `type` | ✅ | string | 模型类型: `vllm` / `sglang` / `ninfer` / `comfyui` / `ollama_cpp` / `ollama_daemon` / `tts_server` / `asr_server` / `alias_map` |
+| `type` | ✅ | string | 模型类型: `vllm` / `sglang` / `ninfer` / `comfyui` / `llama_cpp` / `ollama_daemon` / `tts_server` / `asr_server` / `alias_map` |
 | `gpu_role` | ✅ | string | GPU 角色: `exclusive` / `shared` / `none` |
 | `model_type` | 否 | string | 模型类别: `llm` / `vl` / `embedding` / `aigc` |
 | `modality` | 否 | string | 输入输出模态: `text` / `text-vision` / `multimodal` / `embedding` / `aigc` |
@@ -81,12 +81,12 @@
 |------|------|------|------|
 | `ollama_daemon.port` | ✅ | int | Ollama API 端口 |
 
-#### ollama_cpp
-用于 Ollama.cpp 直接推理（CPU/GPU）。
+#### llama_cpp
+用于 Llama.cpp 直接推理（CPU/GPU）。
 
 | 字段 | 必填 | 类型 | 说明 |
 |------|------|------|------|
-| `ollama_cpp.port` | ✅ | int | OpenAI-compatible API 端口 |
+| `llama_cpp.port` | ✅ | int | OpenAI-compatible API 端口 |
 
 #### tts_server
 用于 TTS 语音合成服务（OpenAI-compatible `/v1/audio/speech`）。
@@ -138,8 +138,8 @@
 | 8880 | `tts-qwen3.yaml` | — | tts_server | shared | Qwen3-TTS 1.7B 语音合成 |
 | 8881 | `asr-sensevoice.yaml` | — | asr_server | shared | ASR SenseVoice-Small 中文语音识别 |
 | 11434 | `ollama-daemon.yaml` | — | ollama_daemon | — | Ollama 守护进程 |
-| 11441 | `bge-m3.yaml` | — | ollama_cpp | none | BGE-M3 Q4_K_M 嵌入（CPU） |
-| 11442 | `bge-reranker-v2-m3.yaml` | — | ollama_cpp | none | BGE-Reranker-v2-m3 Q8_0 重排序（CPU） |
+| 11441 | `bge-m3.yaml` | — | llama_cpp | none | BGE-M3 Q4_K_M 嵌入（CPU） |
+| 11442 | `bge-reranker-v2-m3.yaml` | — | llama_cpp | none | BGE-Reranker-v2-m3 Q8_0 重排序（CPU） |
 
 **注释**：
 - `model_affinity.yaml` 为云模型路由配置，不占用端口。

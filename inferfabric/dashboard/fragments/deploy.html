@@ -18,7 +18,7 @@
             <label class="if-field-label" for="depType">引擎类型</label>
             <select class="if-field-select" id="depType">
               <option value="vllm">vLLM</option>
-              <option value="ollama_cpp">Ollama (GGUF)</option>
+              <option value="llama_cpp">llama.cpp</option>
             </select>
           </div>
           <p class="if-field-hint">后端自动生成 YAML 并分配端口与显存。其他引擎（SGLang / NInfer / Ollama 服务）请在 models.d/ 手动编写 YAML 后用 switch 加载。</p>
@@ -47,10 +47,10 @@
             <select class="if-field-select" id="pullFw">
               <option value="ollama">ollama</option>
               <option value="vllm">vllm</option>
-              <option value="ollama_cpp">ollama_cpp</option>
+              <option value="llama_cpp">llama_cpp</option>
             </select>
           </div>
-          <p class="if-field-hint">仅 ollama 框架支持拉取；vllm / ollama_cpp 需手动下载。</p>
+          <p class="if-field-hint">仅 ollama 框架支持拉取；vllm / llama_cpp 需手动下载。</p>
         </div>
         <div class="if-card-actions">
           <button type="button" class="btn btn-sec btn-sm" data-action="pull">拉取</button>

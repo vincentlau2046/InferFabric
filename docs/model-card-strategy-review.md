@@ -73,7 +73,7 @@ The 2–13B band captures the "sweet spot" for shared GPU: small enough to coexi
 
 1. **`phi3-mini`** (3.8B Q4_0): Clearly falls in the 2–13B band. Should be `shared`, but this is currently blocked by **Issue B** (see §3.2) — `_shared_add_service()` doesn't handle `ollama` type models.
 
-2. **`qwen25-omni-3b`** (3B Q8_0, `ollama_cpp`): This is an interesting edge case. At 3B Q8_0 it's ~3 GB if fully GPU-loaded, but its `gpu_layers: 0` means it currently runs entirely on CPU. If the operator wants GPU acceleration, they'd change `gpu_layers > 0` and should set `gpu_role: shared`. Until then, `none` is correct.
+2. **`qwen25-omni-3b`** (3B Q8_0, `llama_cpp`): This is an interesting edge case. At 3B Q8_0 it's ~3 GB if fully GPU-loaded, but its `gpu_layers: 0` means it currently runs entirely on CPU. If the operator wants GPU acceleration, they'd change `gpu_layers > 0` and should set `gpu_role: shared`. Until then, `none` is correct.
 
 ---
 
@@ -104,7 +104,7 @@ This should be implemented regardless of the threshold policy, since some models
 
 ---
 
-### Issue B: `_shared_add_service()` missing `ollama`/`ollama_cpp` branches
+### Issue B: `_shared_add_service()` missing `ollama`/`llama_cpp` branches
 
 **Code:** `manager.py:625-628` — only handles `is_vllm` and `is_comfyui`.
 
@@ -112,14 +112,14 @@ This should be implemented regardless of the threshold policy, since some models
 
 If `phi3-mini` is changed to `gpu_role: shared`, then `switch(phi3-mini)` would reach `_shared_add_service()` at line 367, fall through both `if` branches, produce an empty `results` dict, and silently return success with no process actually started.
 
-**Impact of `qwen25-omni-3b` as shared:** Same issue — it's `ollama_cpp` type, not handled by `_shared_add_service()`.
+**Impact of `qwen25-omni-3b` as shared:** Same issue — it's `llama_cpp` type, not handled by `_shared_add_service()`.
 
 **Fix recommendation:** High priority. Two approaches:
 
 **Option 1 — Add branches (simpler, more explicit):**
 ```python
-elif model.is_ollama_cpp:
-    results[model.name] = self._proc.start_ollama_cpp(model.ollama_cpp)
+elif model.is_llama_cpp:
+    results[model.name] = self._proc.start_llama_cpp(model.llama_cpp)
 elif model.is_ollama:
     # Ollama models use the daemon; shared mode means
     # load into daemon and track via pull/push lifecycle
@@ -141,7 +141,7 @@ Where `_start_model()` dispatches by `model.type`. This avoids duplicating the t
 | Item | Priority | Effort | Reason |
 |------|----------|--------|--------|
 | **Fix `switch()` for `gpu_role: none`** | **P0** | Small | Breaks today for CPU-only model switches |
-| **Fix `_shared_add_service()` for ollama/ollama_cpp** | **P0** | Small | Will break immediately if phi3-mini moves to shared |
+| **Fix `_shared_add_service()` for ollama/llama_cpp** | **P0** | Small | Will break immediately if phi3-mini moves to shared |
 | **Update `phi3-mini` → `gpu_role: shared`** | **P1** | Trivial | Aligns with 2–13B shared policy |
 | **Document 1–2B "operator's choice" zone** | **P2** | Documentation | Clarifies threshold for edge cases |
 | **Consider `_start_model()` centralization** | **P2** | Medium | Prevents future branch-forgetting bugs |

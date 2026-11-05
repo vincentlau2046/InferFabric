@@ -322,7 +322,7 @@ Co-Authored-By: Claude Code <noreply@anthropic.com>"
 - `type == "sglang"` → docker（SGLangConfig.build_docker_cmd 是默认路径，conda_env 默认空）
 - `type == "vllm"` → conda（VLLMConfig.conda_env 必填，当前无 docker 路径）；**未来 YAML 写 `deployment: docker` 覆盖为 docker**
 - `type in ("comfyui","tts_server","asr_server")` → conda
-- `type == "ollama_cpp"` → process
+- `type == "llama_cpp"` → process
 - `type == "ollama_daemon"` → process
 
 - [ ] **Step 1: 写失败测试——deployment 推导覆盖所有引擎**
@@ -339,7 +339,7 @@ def test_deployment_derived_from_engine_type():
         "comfyui": "conda",
         "tts_server": "conda",
         "asr_server": "conda",
-        "ollama_cpp": "process",
+        "llama_cpp": "process",
         "ollama_daemon": "process",
     }
     for etype, expected in cases.items():
@@ -384,7 +384,7 @@ Expected: FAIL（`ModelConfig` 无 `deployment` 字段 / `resolved_deployment` �
             return "docker"
         if self.type in ("vllm", "comfyui", "tts_server", "asr_server"):
             return "conda"
-        if self.type in ("ollama_cpp", "ollama_daemon"):
+        if self.type in ("llama_cpp", "ollama_daemon"):
             return "process"
         return "process"
 ```

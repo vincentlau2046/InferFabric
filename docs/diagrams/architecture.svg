@@ -81,7 +81,7 @@
     <rect x="50" y="375" width="480" height="175" rx="14" fill="#fff" stroke="#3b82f6" stroke-width="2"/>
     <rect x="50" y="375" width="480" height="32" rx="14" fill="url(#localG)"/>
     <rect x="50" y="393" width="480" height="14" fill="url(#localG)"/>
-    <text x="290" y="395" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">💻 本地模型 (vLLM / ollama.cpp)</text>
+    <text x="290" y="395" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">💻 本地模型 (vLLM / llama.cpp)</text>
 
     <!-- Local model cards -->
     <rect x="68" y="420" width="140" height="56" rx="8" fill="#f0f4ff" stroke="#bfd6ff" stroke-width="1"/>
@@ -106,7 +106,7 @@
     <circle cx="85" cy="500" r="5" fill="#eab308"/>
     <text x="97" y="504" font-size="10" font-weight="600" fill="#854d0e">bge-m3 / reranker</text>
     <text x="75" y="521" font-size="9" fill="#6b7280">共享 :11441/11442</text>
-    <text x="75" y="534" font-size="9" fill="#6b7280">ollama.cpp gpu_role:none</text>
+    <text x="75" y="534" font-size="9" fill="#6b7280">llama.cpp gpu_role:none</text>
 
     <rect x="222" y="485" width="140" height="56" rx="8" fill="#fdf2ed" stroke="#eed1c2" stroke-width="1"/>
     <circle cx="239" cy="500" r="5" fill="#eab308"/>

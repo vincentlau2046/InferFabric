@@ -330,8 +330,8 @@ class OllamaModelConfig:
 
 
 @dataclass
-class OllamaCppConfig:
-    """Ollama.cpp / llama.cpp 独立推理进程."""
+class LlamaCppConfig:
+    """Llama.cpp / llama.cpp 独立推理进程."""
     model_path: str     # GGUF 文件路径
     port: int = 11435
     threads: int = 8
@@ -384,7 +384,7 @@ class PortPool:
     documents the convention for administrators.
     """
     EMBEDDING_START = 11440
-    # Future ranges: OLLAMA_CPP_START = 11430, etc.
+    # Future ranges: LLAMA_CPP_START = 11430, etc.
 
 
 # Modality derived from model_type; used when YAML omits explicit modality.
@@ -410,11 +410,11 @@ class ModelConfig:
       name:        Unique identifier (must match YAML filename stem)
       description: Human-readable description
       gpu_role:   'exclusive' (GPU fully locked) | 'shared' (coexists with other shared services) | 'none' (CPU-only)
-      type:        'vllm' | 'comfyui' | 'ollama' | 'ollama_cpp' | 'ollama_daemon'
+      type:        'vllm' | 'comfyui' | 'ollama' | 'llama_cpp' | 'ollama_daemon'
       vllm:        VLLMConfig if type='vllm'
       comfyui:     ComfyUIConfig if type='comfyui'
       ollama:      OllamaModelConfig if type='ollama'
-      ollama_cpp:  OllamaCppConfig if type='ollama_cpp'
+      llama_cpp:  LlamaCppConfig if type='llama_cpp'
       ollama_daemon: OllamaDaemonConfig if type='ollama_daemon'
       model_type:  'llm' | 'vl' | 'omni' | 'ocr' | 'aigc' | 'embedding' | 'rerank' | 'infra' — capability classification
       quantization: quantization format string (e.g. 'NVFP4', 'GPTQ-4bit', 'Q8_0')
@@ -435,13 +435,13 @@ class ModelConfig:
             return self.modality
         return MODEL_TYPE_TO_MODALITY.get(self.model_type, "text")
 
-    type: str = "vllm"  # 'vllm' | 'sglang' | 'comfyui' | 'ollama' | 'ollama_cpp' | 'ollama_daemon' | 'tts_server' | 'asr_server'
+    type: str = "vllm"  # 'vllm' | 'sglang' | 'comfyui' | 'ollama' | 'llama_cpp' | 'ollama_daemon' | 'tts_server' | 'asr_server'
     deployment: str = ""  # '' (auto-derive) | 'docker' | 'conda' | 'process' — 部署方式显式声明
     vllm: Optional[VLLMConfig] = None
     sglang: Optional[SGLangConfig] = None
     comfyui: Optional[ComfyUIConfig] = None
     ollama: Optional[OllamaModelConfig] = None
-    ollama_cpp: Optional[OllamaCppConfig] = None
+    llama_cpp: Optional[LlamaCppConfig] = None
     ollama_daemon: Optional[OllamaDaemonConfig] = None
     ninfer: Optional[NInferConfig] = None
     tts: Optional[TTSConfig] = None
@@ -510,8 +510,8 @@ class ModelConfig:
             return self.ollama_daemon.port
         if self.ollama:
             return 11434  # Ollama daemon fixed port
-        if self.ollama_cpp:
-            return self.ollama_cpp.port
+        if self.llama_cpp:
+            return self.llama_cpp.port
         if self.comfyui:
             return self.comfyui.port
         if self.ninfer:
@@ -527,7 +527,7 @@ class ModelConfig:
             return self.sglang.served_name
         if self.ollama:
             return self.ollama.model_ref
-        if self.ollama_cpp:
+        if self.llama_cpp:
             return self.name
         if self.ninfer:
             return self.ninfer.served_name or self.name
@@ -536,7 +536,7 @@ class ModelConfig:
     # type → ModelConfig 字段名（tts_server/asr_server 例外，字段是 tts/asr）
     _ENGINE_ATTR = {
         "vllm": "vllm", "sglang": "sglang", "comfyui": "comfyui",
-        "ollama": "ollama", "ollama_cpp": "ollama_cpp", "ollama_daemon": "ollama_daemon",
+        "ollama": "ollama", "llama_cpp": "llama_cpp", "ollama_daemon": "ollama_daemon",
         "ninfer": "ninfer", "tts_server": "tts", "asr_server": "asr",
     }
 
@@ -586,7 +586,7 @@ class ModelConfig:
             return "docker"
         if self.type in ("vllm", "comfyui", "tts_server", "asr_server"):
             return "conda"
-        if self.type in ("ollama_cpp", "ollama_daemon"):
+        if self.type in ("llama_cpp", "ollama_daemon"):
             return "process"
         return "process"
 
@@ -615,8 +615,8 @@ class ModelConfig:
         return self.type == "ollama" and self.ollama is not None
 
     @property
-    def is_ollama_cpp(self) -> bool:
-        return self.type == "ollama_cpp" and self.ollama_cpp is not None
+    def is_llama_cpp(self) -> bool:
+        return self.type == "llama_cpp" and self.llama_cpp is not None
 
     @property
     def is_tts_server(self) -> bool:
@@ -651,8 +651,8 @@ class ModelConfig:
             return _url(self.ollama_daemon, self.ollama_daemon.port)
         if self.ollama:
             return f"http://localhost:11434/api/tags"
-        if self.ollama_cpp:
-            return _url(self.ollama_cpp, self.ollama_cpp.port)
+        if self.llama_cpp:
+            return _url(self.llama_cpp, self.llama_cpp.port)
         return f"http://localhost:{self.port}/health"
 
     @property
@@ -769,10 +769,10 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
         if raw.get("ollama"):
             ollama_cfg = OllamaModelConfig(**raw["ollama"])
 
-        # Parse ollama_cpp config if present
-        ollama_cpp_cfg = None
-        if raw.get("ollama_cpp"):
-            ollama_cpp_cfg = OllamaCppConfig(**raw["ollama_cpp"])
+        # Parse llama_cpp config if present
+        llama_cpp_cfg = None
+        if raw.get("llama_cpp"):
+            llama_cpp_cfg = LlamaCppConfig(**raw["llama_cpp"])
 
         # Parse ollama_daemon config if present
         ollama_daemon_cfg = None
@@ -841,14 +841,14 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             if ollama_fields:
                 ollama_cfg = OllamaModelConfig(**ollama_fields)
 
-        # For type=ollama_cpp, parse top-level ollama_cpp fields
-        if model_type == "ollama_cpp" and not ollama_cpp_cfg:
+        # For type=llama_cpp, parse top-level llama_cpp fields
+        if model_type == "llama_cpp" and not llama_cpp_cfg:
             cpp_fields = {}
             for f in ("model_path", "port", "threads", "context_size", "gpu_layers"):
                 if f in raw:
                     cpp_fields[f] = raw[f]
             if cpp_fields:
-                ollama_cpp_cfg = OllamaCppConfig(**cpp_fields)
+                llama_cpp_cfg = LlamaCppConfig(**cpp_fields)
 
         # For type=ollama_daemon, parse top-level ollama_daemon fields
         if model_type == "ollama_daemon" and not ollama_daemon_cfg:
@@ -884,7 +884,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             sglang=sglang_cfg,
             comfyui=comfy_cfg,
             ollama=ollama_cfg,
-            ollama_cpp=ollama_cpp_cfg,
+            llama_cpp=llama_cpp_cfg,
             ollama_daemon=ollama_daemon_cfg,
             tts=tts_cfg,
             asr=asr_cfg,

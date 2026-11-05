@@ -18,7 +18,7 @@
           ┌───────────────────┼───────────────────┐
           │                   │                   │
     ┌─────▼─────┐    ┌───────▼───────┐    ┌──────▼──────┐
-    │  vLLM     │    │  Ollama       │    │ Ollama.cpp  │
+    │  vLLM     │    │  Ollama       │    │ Llama.cpp  │
     │ :8000/01  │    │  :11434       │    │ :11435+     │
     │ exclusive │    │  shared       │    │ CPU/shared  │
     │ GPU 24GB  │    │  GPU/CPU      │    │ GGUF only   │
@@ -37,23 +37,23 @@
 
 | 组件 | 状态 | Commit |
 |---|---|---|
-| **Config 扩展** — 4 种后端类型 (vllm/comfyui/ollama/ollama_cpp) | ✅ | `1cf2a8e` |
+| **Config 扩展** — 4 种后端类型 (vllm/comfyui/ollama/llama_cpp) | ✅ | `1cf2a8e` |
 | **Proxy 通用化** — get_target_port/_wait_healthy/_handle_chat/_v1_models | ✅ | `1cf2a8e` |
 | **Ollama YAML** — llama3-1b, phi3-mini, ollama-daemon | ✅ | `3f27ade` |
-| **Ollama.cpp YAML** — gemma-cpu + process_manager 启停 | ✅ | `3f27ade` |
+| **Llama.cpp YAML** — gemma-cpu + process_manager 启停 | ✅ | `3f27ade` |
 | **CLI 扩展** — pull / list-downloaded 命令 | ✅ | `3f27ade` |
 | **模型别名** — fast/powerful/cheap/code/balanced → 具体模型 | ✅ | `b6d2319` |
 | **P0/P1 回归测试** — 23/23 全部通过 | ✅ | — |
 | **Dashboard 本地模型发现** — GET /local-models, POST /deploy, UI | ✅ | `c6d2f19` |
 | **Ollama 安装** — v0.17.5 运行中 | ✅ | — |
 | **Ollama 模型拉取** — llama3.2:1b (1.3GB), phi3:mini (2.2GB) | ✅ | — |
-| **Ollama.cpp 编译** — llama-server v9820 from gitee mirror | ✅ | — |
+| **Llama.cpp 编译** — llama-server v9820 from gitee mirror | ✅ | — |
 | **GGUF 模型下载** — gemma-2-9b-it-Q8_0.gguf (9.8GB) | ✅ | — |
 | **全链路端到端测试** — 8 模型 switch + chat | ✅ | `2b90b4a` |
 
 ## 四后端矩阵
 
-| | vLLM | Ollama | Ollama.cpp | ComfyUI |
+| | vLLM | Ollama | Llama.cpp | ComfyUI |
 |---|---|---|---|---|
 | **端口** | 8000/8001/8002 | 11434 | 11435+ | 8188 |
 | **GPU模式** | exclusive/shared | shared | CPU/shared | shared |
@@ -75,7 +75,7 @@ models.d/
 ├── ollama-daemon.yaml   # Ollama 基础设施
 ├── llama3-8b.yaml       # Ollama shared, llama3.1:8b
 ├── phi3-mini.yaml       # Ollama shared, phi3:mini
-├── gemma-cpu.yaml       # Ollama.cpp CPU, 16 threads
+├── gemma-cpu.yaml       # Llama.cpp CPU, 16 threads
 └── aliases.yaml         # 角色映射
 ```
 
@@ -126,7 +126,7 @@ Dashboard UI:
 | 路径 | 检测条件 | 分类 |
 |---|---|---|
 | `~/models/<dir>/config.json` | 有 config.json | `vllm` |
-| `~/models/<dir>/*.gguf` | 有 .gguf 文件 | `ollama_cpp_gguf` |
+| `~/models/<dir>/*.gguf` | 有 .gguf 文件 | `llama_cpp_gguf` |
 | `~/ComfyUI/models/checkpoints/*.safetensors` | .safetensors | `comfyui_checkpoint` |
 | `~/ComfyUI/models/loras/*.safetensors` | .safetensors | `comfyui_lora` |
 
@@ -179,7 +179,7 @@ curl http://localhost:8999/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"hi"}]}'
 
-# === Ollama.cpp (可选 — CPU推理场景) ===
+# === Llama.cpp (可选 — CPU推理场景) ===
 # 1. 编译
 git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp && mkdir build && cd build && cmake .. && make -j llama-server
@@ -200,7 +200,7 @@ iff status
 | Anthropic 协议 | ❌ 不做 | 四后端都不原生支持，Proxy 层翻译维护成本高 |
 | 模型下载 | 独立 `pull` 命令 | 网络下载不应阻塞 switch() |
 | Ollama 生命周期 | 监控，不托管 | daemon 有复杂内部逻辑，PGID 不够 |
-| Ollama.cpp 生命周期 | 托管，独立进程 | 一模型一进程，和 vLLM 一致 |
+| Llama.cpp 生命周期 | 托管，独立进程 | 一模型一进程，和 vLLM 一致 |
 | CPU 模型 | `cpu_only` 标签 | 完全跳过 GPU 状态机 |
 | Proxy 路由 | alias → served_name → port | 角色透明，后端透明 |
 | CC-Switch 借鉴 | 别名 + 格式转换 | React/TS 代码不可直拷，提取设计模式 |

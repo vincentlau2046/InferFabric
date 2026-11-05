@@ -102,7 +102,7 @@ def load_model_specs() -> list[ModelSpec]:
         if mt in SKIP_MODEL_TYPES or name in SKIP_MODELS:
             continue
         vllm = d.get("vllm", {}) or {}
-        oc = d.get("ollama_cpp", {}) or {}
+        oc = d.get("llama_cpp", {}) or {}
         max_len = vllm.get("max_model_len", 0) or oc.get("context_size", 0)
         max_seqs = vllm.get("max_num_seqs", 1)
         gpu_util = vllm.get("gpu_memory_utilization", 0)

@@ -1,10 +1,10 @@
 name: bge-reranker-v2-m3
-description: "BGE-Reranker-v2-m3 Q8_0 — Ollama.cpp CPU reranking (XLM-RoBERTa cross-encoder)"
-type: ollama_cpp
+description: "BGE-Reranker-v2-m3 Q8_0 — Llama.cpp CPU reranking (XLM-RoBERTa cross-encoder)"
+type: llama_cpp
 gpu_role: none
 model_type: rerank
 quantization: Q8_0
-ollama_cpp:
+llama_cpp:
   model_path: ~/models/gguf/bge-reranker-v2-m3-Q8_0/bge-reranker-v2-m3-Q8_0.gguf
   port: 11442
   threads: 8

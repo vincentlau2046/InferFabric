@@ -588,7 +588,7 @@ class TestTtsServerDefensive:
             description="tts_server type but no tts block",
             type="tts_server",
         )
-        # served_name goes through: vllm? no → ollama? no → ollama_cpp? no → return self.name
+        # served_name goes through: vllm? no → ollama? no → llama_cpp? no → return self.name
         assert m.served_name == "broken-tts"
 
     def test_load_models_missing_tts_block_raises_on_switch(self):

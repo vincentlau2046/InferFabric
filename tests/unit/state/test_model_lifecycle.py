@@ -52,7 +52,7 @@ def _make_lifecycle(active_services=None):
     model.is_sglang = False
     model.is_comfyui = False
     model.is_ninfer = False
-    model.is_ollama_cpp = False
+    model.is_llama_cpp = False
     model.is_tts_server = False
     model.is_asr_server = False
     model.gpu_role = "exclusive"
@@ -89,7 +89,7 @@ def _make_shared_lifecycle():
     model.is_sglang = False
     model.is_comfyui = False
     model.is_ninfer = False
-    model.is_ollama_cpp = False
+    model.is_llama_cpp = False
     model.is_tts_server = False
     model.is_asr_server = False
     model.gpu_role = "shared"
@@ -126,7 +126,7 @@ def _make_lifecycle_with_active_exclusive(name):
     model.is_sglang = False
     model.is_comfyui = False
     model.is_ninfer = False
-    model.is_ollama_cpp = False
+    model.is_llama_cpp = False
     model.is_tts_server = False
     model.is_asr_server = False
     model.needs_gpu = True
@@ -163,7 +163,7 @@ def _make_lifecycle_with_active_shared(name):
     model.is_sglang = False
     model.is_comfyui = False
     model.is_ninfer = False
-    model.is_ollama_cpp = False
+    model.is_llama_cpp = False
     model.is_tts_server = False
     model.is_asr_server = False
     model.needs_gpu = False
@@ -433,7 +433,7 @@ def _make_lifecycle_mixed():
 
     - "qwen2" (vllm, shared): needs_gpu=True
     - "nomic-embed" (vllm, shared): needs_gpu=True
-    - "bge-m3" (ollama_cpp): needs_gpu=False, is_gpu_none=True
+    - "bge-m3" (llama_cpp): needs_gpu=False, is_gpu_none=True
     """
     state = MagicMock()
     state.get_active_services.return_value = ["qwen2", "nomic-embed", "bge-m3"]
@@ -451,7 +451,7 @@ def _make_lifecycle_mixed():
     models = {
         "qwen2": _mk("qwen2", "vllm", needs_gpu=True, gpu_none=False),
         "nomic-embed": _mk("nomic-embed", "vllm", needs_gpu=True, gpu_none=False),
-        "bge-m3": _mk("bge-m3", "ollama_cpp", needs_gpu=False, gpu_none=True),
+        "bge-m3": _mk("bge-m3", "llama_cpp", needs_gpu=False, gpu_none=True),
     }
 
     return ModelLifecycle(state, MagicMock(), MagicMock(), MagicMock(), MagicMock(), models)

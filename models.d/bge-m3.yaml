@@ -1,10 +1,10 @@
 name: bge-m3
-description: "BGE-M3 Q4_K_M — Ollama.cpp CPU embedding (multi-function, multi-lingual)"
-type: ollama_cpp
+description: "BGE-M3 Q4_K_M — Llama.cpp CPU embedding (multi-function, multi-lingual)"
+type: llama_cpp
 gpu_role: none
 model_type: embedding
 quantization: Q4_K_M
-ollama_cpp:
+llama_cpp:
   model_path: ~/models/gguf/bge-m3-Q4_K_M/bge-m3-Q4_K_M.gguf
   port: 11441
   threads: 8

@@ -775,7 +775,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             model_ports = {}
             for svc in active:
                 m = pm.mgr.get_model(svc)
-                # Only query vLLM services (not ollama_cpp embedding models)
+                # Only query vLLM services (not llama_cpp embedding models)
                 if m and m.port and m.type == "vllm":
                     model_ports[svc] = m.port
             if model_ports:

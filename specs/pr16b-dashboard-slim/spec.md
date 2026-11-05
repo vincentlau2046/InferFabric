@@ -1,7 +1,7 @@
 # PR-16b: Dashboard 瘦身
 
 ## 已完成
-- `model_discovery.py`: 删 discovered 项的 path/files 字段（vllm/ollama/ollama_cpp/comfyui）
+- `model_discovery.py`: 删 discovered 项的 path/files 字段（vllm/ollama/llama_cpp/comfyui）
 - 前端 payload 减少 ~40% (无 path 字符串 + files 数组)
 - dashboard.py 内嵌 JS 无 path/files 引用 → 零影响
 

@@ -25,12 +25,12 @@ def get_adapter(engine_type: str) -> EngineAdapter:
 from inferfabric.engine_adapter.sglang import SGLangAdapter
 from inferfabric.engine_adapter.vllm import VLLMAdapter
 from inferfabric.engine_adapter.ollama import OllamaAdapter, OllamaDaemonAdapter
-from inferfabric.engine_adapter.ollama_cpp import OllamaCppAdapter
+from inferfabric.engine_adapter.llama_cpp import LlamaCppAdapter
 from inferfabric.engine_adapter.comfyui import ComfyUIAdapter
 from inferfabric.engine_adapter.tts import TTSAdapter
 from inferfabric.engine_adapter.asr import ASRAdapter
 from inferfabric.engine_adapter.ninfer import NInferAdapter  # noqa: F401 — registers itself at import time
 
 __all__ = ["EngineAdapter", "get_adapter", "register",
-           "SGLangAdapter", "VLLMAdapter", "OllamaCppAdapter",
+           "SGLangAdapter", "VLLMAdapter", "LlamaCppAdapter",
            "OllamaAdapter", "OllamaDaemonAdapter", "NInferAdapter"]

@@ -21,7 +21,7 @@
 | 单卡多模型 | 三态 GPU 状态机（idle/exclusive/shared），自动切换，永不 OOM | 手动停旧启新，或一个模型占死 GPU |
 | API 入口 | OpenAI + Anthropic 双协议同一端口 `:8999` | 每个引擎一个端口、一种格式 |
 | 模型定义 | 一个 YAML = 一个模型（零代码） | 写启动脚本、配 conda env |
-| 推理引擎 | 9 种适配器：vLLM/NInfer/SGLang/Ollama/Ollama.cpp/ComfyUI/TTS/ASR/OllamaDaemon | 一种引擎一套工具链 |
+| 推理引擎 | 9 种适配器：vLLM/NInfer/SGLang/Ollama/Llama.cpp/ComfyUI/TTS/ASR/OllamaDaemon | 一种引擎一套工具链 |
 | 云端代理 | 9 个预设 + 自动发现 + 同一 API 路由 | 每个云商一套 SDK/Key 管理 |
 | 治理 | 重试/熔断/缓存/限流/超时/负载均衡/异常采集/全链路日志 | 无（直连引擎） |
 | 管理界面 | macOS 风格 Dashboard（监控/切换/部署/OpenAPI 阅览） | 终端 curl 或 YAML 编辑 |
@@ -36,7 +36,7 @@
 
 **InferFabric solves this**:
 - **Model switching without OOM** — Three-state GPU (idle/exclusive/shared) with safe transitions and health checks
-- **One API, any model** — Every model—local vLLM/NInfer, local ollama.cpp, or cloud OpenAI/Anthropic—is accessed through the same `/v1/chat/completions` or `/v1/messages` endpoint
+- **One API, any model** — Every model—local vLLM/NInfer, local llama.cpp, or cloud OpenAI/Anthropic—is accessed through the same `/v1/chat/completions` or `/v1/messages` endpoint
 - **API keys never in plaintext** — `${ENV_VAR}` auto-conversion, secrets stored in `chmod 600` file
 - **Dashboard, not YAML editing** — macOS sidebar dashboard for model switching, monitoring, chat testing, and cloud provider management
 - **Dual-mode proxy** — Threaded (stdlib, default) or async (aiohttp, `--async`), both with zero forwarding-core change
@@ -84,7 +84,7 @@
 | `ninfer` | `ninfer.py` | Docker container | NInfer 优化推理（NVFP4） |
 | `sglang` | `sglang.py` | Docker/conda | SGLang 推理（RadixAttention） |
 | `ollama` | `ollama.py` | HTTP to Ollama daemon | Ollama 模型 |
-| `ollama_cpp` | `ollama_cpp.py` | subprocess (GGUF) | CPU 嵌入/重排序 |
+| `llama_cpp` | `llama_cpp.py` | subprocess (GGUF) | CPU 嵌入/重排序 |
 | `comfyui` | `comfyui.py` | conda env + subprocess | 图像生成 |
 | `tts_server` | `tts.py` | conda env + subprocess | TTS 语音合成 |
 | `asr_server` | `asr.py` | subprocess | ASR 语音识别 |
@@ -252,12 +252,12 @@ ollama:
 
 > Ollama 需要先启动 `ollama_daemon` 基础设施服务。
 
-#### Ollama.cpp
+#### Llama.cpp
 
 ```yaml
-type: ollama_cpp
+type: llama_cpp
 gpu_role: none                  # CPU-only
-ollama_cpp:
+llama_cpp:
   model_path: ~/models/gguf/model.gguf  # GGUF 文件路径
   port: 11441
   threads: 8
@@ -661,8 +661,8 @@ python3 -m inferfabric.proxy.handler --async
 | 8880 | tts-qwen3 | TTS | shared |
 | 8881 | asr-sensevoice | ASR | shared |
 | 11434 | ollama-daemon | Ollama | none |
-| 11441 | bge-m3 | Ollama.cpp | none |
-| 11442 | bge-reranker-v2-m3 | Ollama.cpp | none |
+| 11441 | bge-m3 | Llama.cpp | none |
+| 11442 | bge-reranker-v2-m3 | Llama.cpp | none |
 | **8999** | **Proxy** | **HTTP** | **—** |
 
 ---
@@ -700,6 +700,7 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **v7.10.5** | **2026-11-05** | **命名修正：`ollama_cpp` 引擎统一更名为 `llama_cpp`（底层实为 llama.cpp 的 llama-server，与 Ollama 无关）** — 该引擎自 v5.0 起误标为 `ollama_cpp`，但其启动的进程是 `~/llama-cpp/build{,-cuda}/bin/llama-server`（OpenAI 兼容 API，GGUF 权重），与仓库里真正的 Ollama（`ollama_daemon` / `run_ollama` / `OllamaModelConfig`）是两套东西。本次彻底重命名（用户裁决「彻底改名」）：engine type `ollama_cpp`→`llama_cpp`、YAML 配置块 `ollama_cpp:`→`llama_cpp:`、类 `OllamaCppConfig`/`OllamaCppAdapter`/`OllamaCppProcessManager`→`LlamaCpp*`、方法 `start_ollama_cpp`/`stop_ollama_cpp`/`is_ollama_cpp`→`llama_cpp`、属性 `ModelConfig.ollama_cpp`→`llama_cpp`、文件 `engine_adapter/ollama_cpp.py`+`process_manager/ollama_cpp.py`→`llama_cpp.py`（git mv 保历史）、文档 `docs/ollama-cpp-routing-plan.md`→`llama-cpp-routing-plan.md`、表述 `ollama.cpp`/`Ollama.cpp`→`llama.cpp`、dashboard 显示标签 `Ollama (GGUF)`/`OllamaCpp`→`llama.cpp`；同步更新 73 个文件（含历史基准快照/审计/specs 里的 `framework: ollama_cpp` 字样一并正名）。真实 Ollama token（`ollama_daemon`/`run_ollama`/`OLLAMA_NUM_GPU`/`type: ollama`）不含 `cpp`，替换零误伤。无兼容别名——客户端按模型名（`bge-m3`/`bge-reranker-v2-m3`）路由、从不依赖 type 字符串，type 亦不入库。门禁：unit 1865 全绿 + integration 118 全绿 + `import inferfabric` 冒烟 + 活配置 `load_models()` 验证（bge-m3/bge-reranker type=llama_cpp 解析正确、ollama-daemon 仍为 ollama_daemon）。 |
 | v4.0 | 2026-06 | Model plugin architecture, three-state GPU |
 | v4.6 | 2026-07 | Cloud discovery, provider management, Dashboard |
 | v5.4.0 | 2026-08 | macOS Dashboard: sidebar, chat, 12 SVG icons, dark mode |

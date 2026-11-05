@@ -214,7 +214,7 @@ class TestGpuStateMachineCleanupDeadServices:
         model = MagicMock()
         model.type = "vllm"
         model.is_comfyui = False
-        model.is_ollama_cpp = False
+        model.is_llama_cpp = False
         model.is_asr_server = False
 
         gs = _make_gs(state=state, models={"alive-model": model})

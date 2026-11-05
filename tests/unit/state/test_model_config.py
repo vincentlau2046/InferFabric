@@ -166,7 +166,7 @@ def test_deployment_derived_from_engine_type():
         "comfyui": "conda",
         "tts_server": "conda",
         "asr_server": "conda",
-        "ollama_cpp": "process",
+        "llama_cpp": "process",
         "ollama_daemon": "process",
     }
     for etype, expected in cases.items():

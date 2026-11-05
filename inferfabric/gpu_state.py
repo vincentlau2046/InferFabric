@@ -340,7 +340,7 @@ class GpuStateMachine:
 
         优雅停止所有 active 服务已提升到 ModelManager.force_reset()，经
         ModelLifecycle._stop_all_active(include_none=True) 统一 metadata-driven
-        路径完成（覆盖 vllm/tts/asr/sglang/ollama_cpp/comfyui 全部引擎）。
+        路径完成（覆盖 vllm/tts/asr/sglang/llama_cpp/comfyui 全部引擎）。
         本方法只做 kill + clear：force_kill_all 作为 SIGKILL 兜底安全网，
         清掉优雅停止漏掉的任何进程。
         """

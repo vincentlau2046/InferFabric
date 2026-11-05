@@ -16,7 +16,7 @@
 
 **架构语义：** `gpu_role: none` 的模型不改变 `self._gpu_mode`。它们可以任意 GPU 模式下并存运行。
 
-### 1.2 `_shared_add_service()` 缺少 `ollama` / `ollama_cpp` 分支
+### 1.2 `_shared_add_service()` 缺少 `ollama` / `llama_cpp` 分支
 
 manager.py:625-628 只处理 `is_vllm` 和 `is_comfyui`。如果 `phi3-mini` 改为 `shared`，调用 `_shared_add_service(phi3_mini)` 时 `results` 为空，模型不会启动。
 
@@ -129,8 +129,8 @@ def _start_model(self, model: ModelConfig) -> dict:
         return {"status": "ok", "message": "Ollama daemon external — verify with 'ollama serve'"}
     elif model.is_ollama:
         return self._start_ollama_model(model)
-    elif model.is_ollama_cpp:
-        return self._proc.start_ollama_cpp(model.ollama_cpp)
+    elif model.is_llama_cpp:
+        return self._proc.start_llama_cpp(model.llama_cpp)
     else:
         return {"status": "error", "message": f"Unknown model type: {model.type}"}
 
@@ -244,10 +244,10 @@ def run_ollama(self, model_ref: str, keep_alive: str = "5m") -> dict:
 |------|----------|----------|
 | `type: ollama` + `gpu_role: shared` | 共享 Ollama Daemon | InferFabric 只触发 `ollama run`，模型由 daemon 生命周期管理 |
 | `type: ollama` + `gpu_role: none` | 共享 Ollama Daemon | 同上，但 daemon 的 GPU 占用不影响 InferFabric 状态机 |
-| `type: ollama_cpp` + `gpu_role: shared` | 独立进程（llama-server） | InferFabric 完整管理生命周期（start/stop by port） |
-| `type: ollama_cpp` + `gpu_role: none` | 独立进程 | 同上 |
+| `type: llama_cpp` + `gpu_role: shared` | 独立进程（llama-server） | InferFabric 完整管理生命周期（start/stop by port） |
+| `type: llama_cpp` + `gpu_role: none` | 独立进程 | 同上 |
 
-**关键区别：** `ollama` 类型的 shared 模型之间共享同一个 daemon 进程（端口 11434），但 `ollama_cpp` 的 shared 模型各自独立进程。
+**关键区别：** `ollama` 类型的 shared 模型之间共享同一个 daemon 进程（端口 11434），但 `llama_cpp` 的 shared 模型各自独立进程。
 
 **VRAM 协调：** Ollama daemon 内部自动管理模型加载/卸载（`keep_alive` 策略）。当多个 `type: ollama` shared 模型并存时，daemon 自行决定哪些模型驻留 GPU、哪些卸载。InferFabric 的 `typical_vram_pct` 检查仍是有效的——它代表 daemon 可能需要的峰值 VRAM。
 
@@ -372,8 +372,8 @@ def validate_transition(from_mode: GPUMode, to_mode: GPUMode) -> bool:
 | `_switch_cpu_only()` | **新增** | CPU-only 模型的独立切换路径 |
 | `_start_model()` | **新增** | 中心化 type 分发，消除重复 |
 | `_start_ollama_model()` | **新增** | Ollama 模型启动逻辑 |
-| `_shared_add_service()` | 委托 `_start_model()` | 支持 ollama/ollama_cpp，消除重复 |
-| `_deploy_model()` | 委托 `_start_model()` | 同步支持 ollama/ollama_cpp，消除重复 |
+| `_shared_add_service()` | 委托 `_start_model()` | 支持 ollama/llama_cpp，消除重复 |
+| `_deploy_model()` | 委托 `_start_model()` | 同步支持 ollama/llama_cpp，消除重复 |
 
 ### 6.2 保持不变的方法
 

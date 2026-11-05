@@ -11,7 +11,7 @@
 
 | Dimension | Values | Meaning |
 |-----------|--------|---------|
-| `type` | `vllm`, `ollama`, `ollama_cpp`, `comfyui`, `ollama_daemon` | **推理后端** — 请求转发目标 |
+| `type` | `vllm`, `ollama`, `llama_cpp`, `comfyui`, `ollama_daemon` | **推理后端** — 请求转发目标 |
 | `gpu_role` | `exclusive`, `shared`, `none` | **GPU 资源角色** — 调度策略 |
 
 **Verdict:** 语义上真正正交。`type` 回答"请求去哪", `gpu_role` 回答"占不占 GPU"。三者组合空间是 5 x 3 = 15，当前仅使用 7 个组合。
@@ -23,18 +23,18 @@
 | `vllm` | Qwen3.6-27B, Qwen3.6-27B-VL, Gemma4-26B | Qwen3.5-9B | — |
 | `comfyui` | — | ComfyUI | — |
 | `ollama` | — | — | llama3-1b, phi3-mini |
-| `ollama_cpp` | — | — | qwen25-omni-3b |
+| `llama_cpp` | — | — | qwen25-omni-3b |
 | `ollama_daemon` | — | — | ollama-daemon |
 
 ### 1.3 The Hidden Coupling
 
-**Present assumption:** `type in (ollama, ollama_cpp) -> gpu_role == none`
+**Present assumption:** `type in (ollama, llama_cpp) -> gpu_role == none`
 
 This is implicit, not enforced. Code evidence:
 
 - **config.py L373:** Default `gpu_role = "none"`. No validation that `type: ollama` requires `gpu_role: none`.
 - **manager.py L181:** `is_cpu_only` filter for GPU state machine works by accident — it happens that all non-CPU models are `vllm` or `comfyui`.
-- **proxy.py L502:** `model_obj.is_ollama or model_obj.is_ollama_cpp` groups both as "ollama-family -> use /api/chat". This is correct for routing but couples type to endpoint, not gpu_role.
+- **proxy.py L502:** `model_obj.is_ollama or model_obj.is_llama_cpp` groups both as "ollama-family -> use /api/chat". This is correct for routing but couples type to endpoint, not gpu_role.
 
 **Risk:** Low today, medium long-term. If someone adds `type: ollama + gpu_role: shared` without realizing the implications, nothing prevents it at the YAML level — but the manager doesn't handle it in `_deploy_model`, `_shared_add_service`, or `stop_service`.
 
@@ -45,7 +45,7 @@ This is implicit, not enforced. Code evidence:
 ### 2.1 Current Routing Logic (proxy.py L498-510)
 
 ```
-if is_ollama or is_ollama_cpp -> /api/chat (Ollama native)
+if is_ollama or is_llama_cpp -> /api/chat (Ollama native)
 else -> /v1/chat/completions (vLLM)
 ```
 
@@ -148,13 +148,13 @@ On a 48GB GPU (RTX 6000 Ada), a 9B GPTQ-4bit model uses ~5GB — `shared` makes 
 - Default `gpu_role` by model scale as proposed
 - Override based on `typical_vram_pct` calculation: if `sum(typical_vram_pct for all shared) > 80`, bump to `exclusive`
 
-#### Caveat 2: ollama.cpp `gpu_layers` Creates a Split-GPU Scenario
+#### Caveat 2: llama.cpp `gpu_layers` Creates a Split-GPU Scenario
 
-`ollama_cpp.gpu_layers` allows partial GPU offload (e.g. 20 layers on GPU, rest on CPU). This means an `ollama_cpp` model can have `gpu_role: shared` where it only uses ~30% VRAM but still needs GPU compute.
+`llama_cpp.gpu_layers` allows partial GPU offload (e.g. 20 layers on GPU, rest on CPU). This means an `llama_cpp` model can have `gpu_role: shared` where it only uses ~30% VRAM but still needs GPU compute.
 
-The current `is_cpu_only` check at manager.py L181 would exclude it if `gpu_role: none`, but if you set `gpu_role: shared` for a partial-GPU ollama.cpp model, it would participate in state machine transitions — which is correct because it does hold VRAM.
+The current `is_cpu_only` check at manager.py L181 would exclude it if `gpu_role: none`, but if you set `gpu_role: shared` for a partial-GPU llama.cpp model, it would participate in state machine transitions — which is correct because it does hold VRAM.
 
-**Verdict on ollama.cpp + shared:** This is actually the easiest case. ollama.cpp runs as an independent process (like vLLM), so VRAM usage is independent and measurable. The only difference is that you need to track the `gpu_layers` -> VRAM mapping, which `typical_vram_pct` already covers.
+**Verdict on llama.cpp + shared:** This is actually the easiest case. llama.cpp runs as an independent process (like vLLM), so VRAM usage is independent and measurable. The only difference is that you need to track the `gpu_layers` -> VRAM mapping, which `typical_vram_pct` already covers.
 
 ### 4.3 Refined Strategy Table
 
@@ -162,7 +162,7 @@ The current `is_cpu_only` check at manager.py L181 would exclude it if `gpu_role
 |-----------|-----------|-----------|-----------|
 | < 3B quantized | Any | `none` | CPU sufficient, no VRAM needed |
 | 3-7B quantized | vLLM | `shared` | ~4-8GB VRAM, shares well |
-| 3-7B quantized | ollama_cpp | `shared` (with `gpu_layers > 0`) | Partial GPU offload |
+| 3-7B quantized | llama_cpp | `shared` (with `gpu_layers > 0`) | Partial GPU offload |
 | 7-13B quantized | vLLM | `shared` | ~6-12GB VRAM, shares well on 48GB |
 | 7-13B quantized | ollama (daemon) | `shared` — **but** consider `gpu_scope: process` | See section 3.3 |
 | > 27B | Any GPU | `exclusive` | Dominates VRAM |
@@ -196,9 +196,9 @@ elif model.is_comfyui:
     results[model.name] = self._proc.start_comfyui(...)
 ```
 
-Missing `is_ollama` and `is_ollama_cpp` branches. If you switch to an `ollama_cpp` model in shared mode, `_shared_add_service` silently produces no results and the model never starts.
+Missing `is_ollama` and `is_llama_cpp` branches. If you switch to an `llama_cpp` model in shared mode, `_shared_add_service` silently produces no results and the model never starts.
 
-**Fix:** Add branches for `is_ollama` and `is_ollama_cpp` to `_shared_add_service`, or centralize the deployment logic to avoid this duplication.
+**Fix:** Add branches for `is_ollama` and `is_llama_cpp` to `_shared_add_service`, or centralize the deployment logic to avoid this duplication.
 
 ### 5.3 `stop_service()` Calls `wait_gpu_free()` for All `needs_gpu` Models
 
@@ -219,7 +219,7 @@ For `ollama` type models, `wait_gpu_free()` is misleading — the Ollama daemon 
 | 1. Orthogonality sufficient? | **Yes, semantic gap exists but is manageable** | Document the gap; no code change needed for current models |
 | 2. Proxy routing needs refactoring? | **No — already correctly decoupled** | `type -> endpoint`, `gpu_role -> scheduling` is correct separation |
 | 3. GPU state machine affected by ollama? | **Yes — `switch()` breaks for `gpu_role: none` targets** | Add `none` handling to switch logic; consider `manages_gpu` flag for future ollama+GPU models |
-| 4. Model card strategy sound? | **Yes, with hardware-aware caveats** | Use `typical_vram_pct` for overrides; watch ollama daemon vs ollama.cpp distinction |
+| 4. Model card strategy sound? | **Yes, with hardware-aware caveats** | Use `typical_vram_pct` for overrides; watch ollama daemon vs llama.cpp distinction |
 
 ### Critical Fix (Blocks Future `gpu_role: none` Switching)
 

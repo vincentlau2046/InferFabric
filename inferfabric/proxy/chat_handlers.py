@@ -23,7 +23,7 @@ _ENGINE_API_PATHS = {
     "ninfer":    "/v1/chat/completions",
     "vllm":      "/v1/chat/completions",
     "sglang":    "/v1/chat/completions",
-    "ollama_cpp":"/v1/chat/completions",
+    "llama_cpp":"/v1/chat/completions",
 }
 
 
@@ -75,8 +75,8 @@ def handle_ollama_native(handler, pm, data, target_port, model_obj):
         ollama_req["options"]["num_predict"] = data["max_tokens"]
     if model_obj.ollama and model_obj.ollama.keep_alive:
         ollama_req["keep_alive"] = model_obj.ollama.keep_alive
-    if model_obj.ollama_cpp and model_obj.ollama_cpp.gpu_layers != 0:
-        ollama_req["options"]["num_gpu"] = model_obj.ollama_cpp.gpu_layers
+    if model_obj.llama_cpp and model_obj.llama_cpp.gpu_layers != 0:
+        ollama_req["options"]["num_gpu"] = model_obj.llama_cpp.gpu_layers
 
     body = json.dumps(ollama_req).encode("utf-8")
 
@@ -382,10 +382,10 @@ def handle_chat(handler, pm, data):
         model_obj = pm.mgr.get_model(service_name)
         if model_obj and model_obj.served_name:
             data["model"] = model_obj.served_name
-        if model_obj and (model_obj.is_ollama or model_obj.is_ollama_cpp):
+        if model_obj and (model_obj.is_ollama or model_obj.is_llama_cpp):
             ollama_model_obj = model_obj
 
-    if ollama_model_obj and (ollama_model_obj.is_ollama or ollama_model_obj.is_ollama_cpp):
+    if ollama_model_obj and (ollama_model_obj.is_ollama or ollama_model_obj.is_llama_cpp):
         handle_ollama_native(handler, pm, data, target_port, ollama_model_obj)
         return
 

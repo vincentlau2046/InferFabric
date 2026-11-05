@@ -1,5 +1,5 @@
 
-"""OllamaCppAdapter — llama-server (CPU) adapter.
+"""LlamaCppAdapter — llama-server (CPU) adapter.
 Health: /health returns {"status":"ok"}  |  Metrics: not exposed
 """
 from __future__ import annotations
@@ -10,47 +10,47 @@ from inferfabric.health import check_http_status
 if TYPE_CHECKING:
     from inferfabric.config import ModelConfig
 
-class OllamaCppAdapter(EngineAdapter):
+class LlamaCppAdapter(EngineAdapter):
     def __init__(self, process_manager=None):
         self._proc = process_manager
 
     @property
     def engine_type(self) -> str:
-        return "ollama_cpp"
+        return "llama_cpp"
 
     def check_health(self, model: ModelConfig) -> str:
-        if not model.ollama_cpp:
+        if not model.llama_cpp:
             return "?"
-        return check_http_status(f"http://localhost:{model.ollama_cpp.port}/health")
+        return check_http_status(f"http://localhost:{model.llama_cpp.port}/health")
 
     def get_context_window(self, model: ModelConfig) -> int | None:
-        if not model.ollama_cpp:
+        if not model.llama_cpp:
             return None
-        return model.ollama_cpp.context_size
+        return model.llama_cpp.context_size
 
     def validate_config(self, model: ModelConfig) -> list[str]:
         issues = []
-        if not model.ollama_cpp:
-            return ["Missing ollama_cpp config block"]
-        if not model.ollama_cpp.model_path:
-            issues.append("ollama_cpp.model_path is empty")
-        if model.ollama_cpp.port <= 0:
-            issues.append(f"Invalid ollama_cpp.port: {model.ollama_cpp.port}")
+        if not model.llama_cpp:
+            return ["Missing llama_cpp config block"]
+        if not model.llama_cpp.model_path:
+            issues.append("llama_cpp.model_path is empty")
+        if model.llama_cpp.port <= 0:
+            issues.append(f"Invalid llama_cpp.port: {model.llama_cpp.port}")
         return issues
 
     def start(self, model: ModelConfig) -> dict:
-        """Start ollama_cpp via ProcessManager delegation."""
+        """Start llama_cpp via ProcessManager delegation."""
         if self._proc is None:
             raise RuntimeError("ProcessManager not set — call inject ._proc on the adapter instance first")
-        cfg = getattr(model, 'ollama_cpp')
-        return self._proc.start_ollama_cpp(cfg)
+        cfg = getattr(model, 'llama_cpp')
+        return self._proc.start_llama_cpp(cfg)
 
     def stop(self, model: ModelConfig) -> dict:
-        """Stop ollama_cpp via ProcessManager delegation."""
+        """Stop llama_cpp via ProcessManager delegation."""
         if self._proc is None:
             raise RuntimeError("ProcessManager not set")
-        cfg = getattr(model, 'ollama_cpp')
-        return self._proc.stop_ollama_cpp(port=cfg.port)
+        cfg = getattr(model, 'llama_cpp')
+        return self._proc.stop_llama_cpp(port=cfg.port)
 
     def is_alive(self, model: ModelConfig) -> bool:
         return self.check_health(model) == "\u2705"
@@ -63,9 +63,9 @@ class OllamaCppAdapter(EngineAdapter):
 
 
     def get_port(self, model: ModelConfig) -> int | None:
-        return model.ollama_cpp.port if model.ollama_cpp else None
+        return model.llama_cpp.port if model.llama_cpp else None
 
     def get_pid_state_key(self) -> str | None:
         return None
 
-register("ollama_cpp", OllamaCppAdapter)
+register("llama_cpp", LlamaCppAdapter)

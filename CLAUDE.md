@@ -73,7 +73,7 @@ YAML in models.d/
        ▼  dispatch by model.type
    EngineAdapter (engine_adapter/*.py)
        │  — vllm.py, sglang.py, ninfer.py, ollama.py,
-       │    ollama_cpp.py, comfyui.py, tts.py, asr.py
+       │    llama_cpp.py, comfyui.py, tts.py, asr.py
        ▼
    ProcessManager (process_manager/*.py)
        │  starts/stops actual subprocesses (vLLM, Docker, etc.)
@@ -81,7 +81,7 @@ YAML in models.d/
    vLLM / SGLang / NInfer / Ollama / …
 ```
 
-Every `type` (vllm/sglang/ninfer/ollama/ollama_cpp/comfyui/tts/asr) maps to an `EngineAdapter` registered via `engine_adapter/__init__.py` `register()`. The adapter handles start/stop/health-check/validate/sleep for that engine; `process_manager/facade.py` (ProcessManager) dispatches to the per-engine subprocess launchers.
+Every `type` (vllm/sglang/ninfer/ollama/llama_cpp/comfyui/tts/asr) maps to an `EngineAdapter` registered via `engine_adapter/__init__.py` `register()`. The adapter handles start/stop/health-check/validate/sleep for that engine; `process_manager/facade.py` (ProcessManager) dispatches to the per-engine subprocess launchers.
 
 ### Dual-Protocol Routing & Proxy Chain
 

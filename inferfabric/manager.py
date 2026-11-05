@@ -178,8 +178,8 @@ class ModelManager:
                     'enable_lmcache': s.enable_lmcache,
                     'served_name': s.served_name,
                 }
-            if m.type in ('ollama_cpp', 'ollama') and m.ollama_cpp:
-                o = m.ollama_cpp
+            if m.type in ('llama_cpp', 'ollama') and m.llama_cpp:
+                o = m.llama_cpp
                 return {
                     'threads': o.threads,
                     'context_size': o.context_size,
@@ -560,7 +560,7 @@ class ModelManager:
 
         Task 2.4（关闭 R6 窗口）：先经统一 metadata-driven 路径
         （ModelLifecycle._stop_all_active，adapter 按 deployment 分派）优雅停止
-        所有 active 服务——包括 gpu_role=none 服务（ollama_cpp/asr）。
+        所有 active 服务——包括 gpu_role=none 服务（llama_cpp/asr）。
         随后 GpuStateMachine.force_reset 降级为 kill+clear-only，
         force_kill_all 作为 SIGKILL 兜底安全网。
         """
@@ -630,7 +630,7 @@ class ModelManager:
                 return {"status": "error", "message": "ollama command not found on PATH"}
             except subprocess.TimeoutExpired:
                 return {"status": "error", "message": "ollama pull timed out after 1800s"}
-        elif framework in ("vllm", "ollama_cpp"):
+        elif framework in ("vllm", "llama_cpp"):
             return {"status": "error", "message": f"{framework} pull not supported yet — download manually"}
         else:
             return {"status": "error", "message": f"Unknown framework: {framework}"}

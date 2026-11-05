@@ -65,7 +65,7 @@
 
 ## 未测试
 
-- **qwen25-omni-3b**: ollama_cpp 模型，proxy 不支持 ollama chat 路由
+- **qwen25-omni-3b**: llama_cpp 模型，proxy 不支持 ollama chat 路由
 - **gemma-4-31B**: 部分并发测试因 proxy 切换冲突 (503/409) 中断
 - **长上下文 (>10% max_model_len)**: 受测试时间限制未覆盖
 - **多模态输入 (图片)**: 仅测文本，VL 图片性能待后续补充

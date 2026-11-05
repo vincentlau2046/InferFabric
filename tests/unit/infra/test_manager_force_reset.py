@@ -3,7 +3,7 @@ unit/infra/test_manager_force_reset.py — Task 2.4: manager-level force_reset h
 
 ModelManager.force_reset 把「停所有 active 服务」的编排提升到协调层（coordinator）：
   1. ModelLifecycle._stop_all_active(include_none=True) — 统一 metadata-driven
-     优雅停止（关闭 R6 窗口：vllm/tts/asr/sglang/ollama_cpp/comfyui 不再直接
+     优雅停止（关闭 R6 窗口：vllm/tts/asr/sglang/llama_cpp/comfyui 不再直接
      落到 SIGKILL，全部先经 adapter 优雅停）
   2. GpuStateMachine.force_reset — 降级为 kill+clear-only（force_kill_all 仍是
      SIGKILL 兜底安全网）

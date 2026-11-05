@@ -5,7 +5,7 @@
 ## 0. 现状核查（实测 2026-07-22）
 
 - IFF proxy（:8999）健康：{"status":"ok","gpu_mode":"exclusive"}
-- 当前活跃服务：qwen38-27b-abliterated（vLLM :8002，NVFP4，max_model_len=131072）+ bge-m3（ollama.cpp :11441）
+- 当前活跃服务：qwen38-27b-abliterated（vLLM :8002，NVFP4，max_model_len=131072）+ bge-m3（llama.cpp :11441）
 - 聊天自测通过：POST /v1/chat/completions（model=qwen38-27b-abliterated，用户消息 "？"）→ 200；
   由于 max_tokens=32，finish_reason=length，模型只生成了 reasoning 片段
 - DSH Web GUI（http://127.0.0.1:3080）当前由预构建 launcher 服务（apps/cli/lib/bin.js --profile web --port 3080）；

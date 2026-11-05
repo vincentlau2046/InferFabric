@@ -37,7 +37,7 @@ docker ps -q --filter name=iff-ninfer --filter name=ninfer- --filter name=sglang
 
 # Step 2b: Kill other GPU-holding processes
 echo "[2b/6] Killing other GPU processes..."
-pkill -9 -f "llama-server" 2>/dev/null || true          # ollama.cpp (CUDA build)
+pkill -9 -f "llama-server" 2>/dev/null || true          # llama.cpp (CUDA build)
 pkill -9 -f "python.*inferfabric.*tts" 2>/dev/null || true
 pkill -9 -f "python.*inferfabric.*asr" 2>/dev/null || true
 pkill -9 -f "ollama" 2>/dev/null || true                 # ollama daemon

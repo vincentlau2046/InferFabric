@@ -132,7 +132,7 @@
 ### 审查结论
 
 - **主路径是元数据驱动的**：核心启动参数（port、conda_env、served_name、model_type、gpu_role、max_model_len、gpu_memory_utilization 等）全部由 `models.d/*.yaml` 声明，`config.py:523-735` 的 `load_models()` 是单一加载入口，带 `name == 文件名` 校验（`config.py:548-552`）。
-- **413 上下文守卫已元数据驱动**（commit 4dc92c0/40d231c）：`forwarder.py:371-415` 的 `check_context_window()` 读取 `ModelConfig.max_context_len`（`config.py:431-443` 多态分发 `vllm.max_model_len` / `sglang.context_length` / `ollama_cpp.context_size`），超限 413 拒绝且不重试（`forwarder.py:453-465` 对上游 500 "maximum context length" 也统一转 413）。
+- **413 上下文守卫已元数据驱动**（commit 4dc92c0/40d231c）：`forwarder.py:371-415` 的 `check_context_window()` 读取 `ModelConfig.max_context_len`（`config.py:431-443` 多态分发 `vllm.max_model_len` / `sglang.context_length` / `llama_cpp.context_size`），超限 413 拒绝且不重试（`forwarder.py:453-465` 对上游 500 "maximum context length" 也统一转 413）。
 - **VRAM 预算守卫也是元数据驱动**：`model_lifecycle.py:90-108` 读 `peak_vram_mb` 元数据（`config.py:729` 从 YAML 解析）。
 - 但仍存在多处**未读元数据、直接硬编码**的位置，按严重程度排列如下。
 
@@ -162,7 +162,7 @@
 
 ### 已做对的（元数据驱动，值得保留）
 
-- `config.py:431-443` `ModelConfig.max_context_len` 多态分发（`vllm.max_model_len` / `sglang.context_length` / `ollama_cpp.context_size`）
+- `config.py:431-443` `ModelConfig.max_context_len` 多态分发（`vllm.max_model_len` / `sglang.context_length` / `llama_cpp.context_size`）
 - `config.py:396-428` `ModelConfig.port` / `served_name` 多态接口
 - `config.py:523-735` `load_models()` 元数据加载单一入口 + `name==文件名` 校验（548-552）
 - `config.py:88-111` `VLLMConfig.build_cmd()` 端口/模型路径/env 均读元数据；`extra_env` 保护键校验（`config.py:567-578`）
@@ -204,7 +204,7 @@
 
 ### 已做对的（元数据驱动，值得保留）
 
-- `config.py:431-443` `ModelConfig.max_context_len` 多态分发（`vllm.max_model_len` / `sglang.context_length` / `ollama_cpp.context_size`）
+- `config.py:431-443` `ModelConfig.max_context_len` 多态分发（`vllm.max_model_len` / `sglang.context_length` / `llama_cpp.context_size`）
 - `config.py:396-428` `ModelConfig.port` / `served_name` 多态接口
 - `config.py:523-735` `load_models()` 元数据加载单一入口
 - `config.py:88-111` / `config.py:145-173` `build_cmd()`（vllm/sglang）全结构化元数据

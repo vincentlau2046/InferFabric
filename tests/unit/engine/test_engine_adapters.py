@@ -22,7 +22,7 @@ class TestAdapterRegistry:
         from inferfabric.engine_adapter import _adapters
 
         expected = {"vllm", "ollama", "sglang", "comfyui", "tts_server",
-                    "asr_server", "ollama_cpp"}
+                    "asr_server", "llama_cpp"}
         for name in expected:
             assert name in _adapters, f"Missing adapter: {name}"
 
@@ -31,7 +31,7 @@ class TestAdapterRegistry:
         from inferfabric.engine_adapter import get_adapter
 
         for engine_type in ["vllm", "ollama", "sglang", "comfyui",
-                            "tts_server", "asr_server", "ollama_cpp"]:
+                            "tts_server", "asr_server", "llama_cpp"]:
             adapter = get_adapter(engine_type)
             assert adapter is not None, f"get_adapter('{engine_type}') returned None"
 
@@ -413,18 +413,18 @@ class TestVLLMConfigDockerCmd:
             cfg.build_docker_cmd("vllm-t")
 
 
-class TestOllamaCppAdapter:
-    """Ollama-CPP 适配器"""
+class TestLlamaCppAdapter:
+    """Llama.cpp 适配器"""
 
     def test_engine_type(self):
         from inferfabric.engine_adapter import get_adapter
-        adapter = get_adapter("ollama_cpp")
-        assert adapter.engine_type == "ollama_cpp"
+        adapter = get_adapter("llama_cpp")
+        assert adapter.engine_type == "llama_cpp"
 
     def test_get_pid_state_key(self):
         from inferfabric.engine_adapter import get_adapter
-        adapter = get_adapter("ollama_cpp")
-        # ollama_cpp 有自己的 PID state key 或 None
+        adapter = get_adapter("llama_cpp")
+        # llama_cpp 有自己的 PID state key 或 None
         key = adapter.get_pid_state_key()
         assert key is None or isinstance(key, str)
 

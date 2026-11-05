@@ -176,7 +176,7 @@ paths:
       summary: OpenAI-compatible embeddings
       description: |
         Generate embeddings for text input. Auto-starts the embedding model if not running.
-        Requires a configured embedding model (e.g., `bge-m3` via ollama.cpp).
+        Requires a configured embedding model (e.g., `bge-m3` via llama.cpp).
       operationId: createEmbedding
       requestBody:
         required: true
@@ -208,7 +208,7 @@ paths:
       summary: Re-rank documents
       description: |
         Re-rank a list of documents against a query. Auto-starts the rerank model if not running.
-        Requires a configured rerank model (e.g., `bge-reranker` via ollama.cpp).
+        Requires a configured rerank model (e.g., `bge-reranker` via llama.cpp).
       operationId: rerank
       requestBody:
         required: true

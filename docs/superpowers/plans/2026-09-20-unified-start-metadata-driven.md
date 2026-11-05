@@ -696,7 +696,7 @@ Expected: FAIL — `AttributeError: 'ProcessManager' object has no attribute 'st
         self._comfyui = ComfyUIProcessManager(state, log_dir)
         self._tts = TTSProcessManager(state, log_dir)
         self._asr = ASRProcessManager(state, log_dir)
-        self._ollama = OllamaCppProcessManager(state, log_dir)
+        self._ollama = LlamaCppProcessManager(state, log_dir)
         self._ninfer = NInferProcessManager(state, log_dir)
 ```
 

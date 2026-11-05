@@ -27,7 +27,7 @@ def get_model_type(model: dict) -> str:
 def discover_local_models(models_dir: Path) -> dict:
     """Scan ~/models/, ~/ComfyUI/models/, and Ollama for unconfigured models.
 
-    Returns models grouped by framework: vllm, ollama, ollama_cpp, comfyui.
+    Returns models grouped by framework: vllm, ollama, llama_cpp, comfyui.
     Each model has a 'framework' field for frontend grouping.
 
     Args:
@@ -78,16 +78,16 @@ def discover_local_models(models_dir: Path) -> dict:
             if gguf_files:
                 skip = False
                 for m in models.values():
-                    if (hasattr(m, "is_ollama_cpp") and m.is_ollama_cpp
-                            and hasattr(m, "ollama_cpp") and m.ollama_cpp):
-                        mp = str(Path(m.ollama_cpp.model_path).expanduser().parent)
+                    if (hasattr(m, "is_llama_cpp") and m.is_llama_cpp
+                            and hasattr(m, "llama_cpp") and m.llama_cpp):
+                        mp = str(Path(m.llama_cpp.model_path).expanduser().parent)
                         if str(scan_dir) == mp or str(scan_dir).startswith(mp + "/"):
                             skip = True
                             break
                 if not skip:
                     size_mb = sum(f.stat().st_size for f in gguf_files) // (1024 * 1024)
                     discovered.append({
-                        "name": scan_dir.name, "type": "ollama_cpp", "framework": "ollama_cpp", "size_mb": size_mb,
+                        "name": scan_dir.name, "type": "llama_cpp", "framework": "llama_cpp", "size_mb": size_mb,
                     })
 
     # ── Ollama pulled models (ollama list) ──
@@ -143,7 +143,7 @@ def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: d
 
     Args:
         name: Model name.
-        model_type: Type string (e.g. "vllm", "ollama_cpp").
+        model_type: Type string (e.g. "vllm", "llama_cpp").
         models_dir: Path to models YAML directory.
         existing_models: Dict of currently loaded models (for port scanning).
         switch_fn: Callable(name) -> dict — the ModelManager.switch() method.
@@ -177,13 +177,13 @@ vllm:
   max_num_seqs: 4
   kv_cache_dtype: auto
 """
-    elif model_type.startswith("ollama_cpp"):
+    elif model_type.startswith("llama_cpp"):
         port = max([p for p in used_ports if p >= 11435] + [11434]) + 1
         yaml_content = f"""name: {name}
-description: "{name} (auto-deployed, ollama.cpp)"
-type: ollama_cpp
+description: "{name} (auto-deployed, llama.cpp)"
+type: llama_cpp
 gpu_role: none
-ollama_cpp:
+llama_cpp:
   model_path: ~/models/{name}/
   port: {port}
   threads: 16

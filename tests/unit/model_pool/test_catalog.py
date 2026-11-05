@@ -50,7 +50,7 @@ class TestLocalCatalog:
     def test_llm_only_non_chat_filtered(self):
         pm = CatalogPM(model_dicts=[
             _llm("qwen-small"),
-            {"name": "bge-m3", "model_type": "embedding", "type": "ollama_cpp",
+            {"name": "bge-m3", "model_type": "embedding", "type": "llama_cpp",
              "active": True, "modality": "text", "context_window": None},
             {"name": "cosyvoice", "model_type": "tts", "type": "tts",
              "active": False, "modality": "audio", "context_window": None},

@@ -90,4 +90,4 @@
 - qwen36-27b-vl: vLLM EngineCore crash (NOT IFF regression)
 - qwen35-9b, qwen36-35b: switch failures (may be cascading from 27b crash)
 - RateLimiterV2 handler integration (logic complete, not wired into handler.py)
-- ollama.cpp stability under GPU contention (bge-m3 + exclusive model)
+- llama.cpp stability under GPU contention (bge-m3 + exclusive model)

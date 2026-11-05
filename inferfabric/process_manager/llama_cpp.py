@@ -1,5 +1,5 @@
 """
-inferfabric/process_manager/ollama_cpp.py — Ollama.cpp lifecycle sub-manager.
+inferfabric/process_manager/llama_cpp.py — Llama.cpp lifecycle sub-manager.
 """
 
 import os
@@ -17,16 +17,16 @@ from inferfabric.process_manager.base import BaseProcessManager
 log = logging.getLogger("inferfabric")
 
 
-class OllamaCppProcessManager(BaseProcessManager):
-    """Ollama.cpp / llama-server process lifecycle: start, stop."""
+class LlamaCppProcessManager(BaseProcessManager):
+    """Llama.cpp / llama-server process lifecycle: start, stop."""
 
-    def start_ollama_cpp(self, cfg: "OllamaCppConfig", model_type: str = "") -> dict:
-        """Start Ollama.cpp / llama.cpp server for a specific model.
+    def start_llama_cpp(self, cfg: "LlamaCppConfig", model_type: str = "") -> dict:
+        """Start Llama.cpp / llama.cpp server for a specific model.
 
         Each model gets its own process with process group isolation.
         Uses llama-server binary (OpenAI-compatible API).
         """
-        from inferfabric.config import OllamaCppConfig
+        from inferfabric.config import LlamaCppConfig
         model_path = Path(cfg.model_path).expanduser().resolve()
         if not model_path.exists():
             return {"status": "error", "message": f"GGUF model not found: {model_path}"}
@@ -74,8 +74,8 @@ class OllamaCppProcessManager(BaseProcessManager):
         if cfg.extra_flags:
             cmd.extend(shlex.split(cfg.extra_flags))
 
-        log.info("Starting ollama.cpp: %s", " ".join(cmd[:6]) + "...")
-        log_file = self._log_dir / f"ollama_cpp_{cfg.port}.log"
+        log.info("Starting llama.cpp: %s", " ".join(cmd[:6]) + "...")
+        log_file = self._log_dir / f"llama_cpp_{cfg.port}.log"
         log_file.write_text("")
 
         env = dict(os.environ)
@@ -89,14 +89,14 @@ class OllamaCppProcessManager(BaseProcessManager):
                                    env=env, start_new_session=True)
         except Exception as e:
             log_fh.close()
-            return {"status": "error", "message": f"ollama.cpp Popen failed: {e}"}
+            return {"status": "error", "message": f"llama.cpp Popen failed: {e}"}
         finally:
             log_fh.close()
 
         pgid = proc.pid
-        pid_file = self._log_dir / f"ollama_cpp_{cfg.port}.pid"
+        pid_file = self._log_dir / f"llama_cpp_{cfg.port}.pid"
         pid_file.write_text(str(pgid))
-        log.info("ollama.cpp started: PID=%d, port=%d", pgid, cfg.port)
+        log.info("llama.cpp started: PID=%d, port=%d", pgid, cfg.port)
 
         # Quick failure detection
         for _ in range(6):
@@ -106,24 +106,24 @@ class OllamaCppProcessManager(BaseProcessManager):
                     err = log_file.read_text()[-2000:]
                 except Exception:
                     err = "read log failed"
-                log.error("ollama.cpp exited immediately (ret=%d): %s", ret, err[-500:])
+                log.error("llama.cpp exited immediately (ret=%d): %s", ret, err[-500:])
                 pid_file.unlink(missing_ok=True)
-                return {"status": "error", "message": f"ollama.cpp exited with code {ret}", "log": str(log_file)}
+                return {"status": "error", "message": f"llama.cpp exited with code {ret}", "log": str(log_file)}
             time.sleep(0.5)
 
         healthy = wait_http(f"http://localhost:{cfg.port}/health", timeout=120)
         if healthy:
             return {"status": "healthy", "port": cfg.port, "pid": proc.pid}
         else:
-            self.stop_ollama_cpp(cfg.port)
-            return {"status": "timeout", "message": "ollama.cpp didn't become healthy within 2 minutes"}
+            self.stop_llama_cpp(cfg.port)
+            return {"status": "timeout", "message": "llama.cpp didn't become healthy within 2 minutes"}
 
-    def stop_ollama_cpp(self, port: Optional[int] = None):
-        """Stop ollama.cpp via port-based cleanup."""
+    def stop_llama_cpp(self, port: Optional[int] = None):
+        """Stop llama.cpp via port-based cleanup."""
         if port:
             self._pkill_by_port(port)
         # Clean up PID file
-        for pf in self._log_dir.glob("ollama_cpp_*.pid"):
+        for pf in self._log_dir.glob("llama_cpp_*.pid"):
             pf.unlink(missing_ok=True)
 
     def run_ollama(self, model_ref: str, keep_alive: str = "5m", num_gpu: int = -1) -> dict:
@@ -153,5 +153,5 @@ class OllamaCppProcessManager(BaseProcessManager):
             "message": f"ollama run failed: {result.stderr.strip() or result.stdout.strip()}",
         }
 
-    # ─── Ollama.cpp ──────────────────────────────────────────────
+    # ─── Llama.cpp ──────────────────────────────────────────────
 

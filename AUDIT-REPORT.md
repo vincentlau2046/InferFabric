@@ -98,7 +98,7 @@ CLI (cli.py / __main__.py)
 | P2-2 | `prometheus.py:176` 与 `proxy/metrics.py:184` | `gen_counters[port] = (cur_ts, gen_counter)` 会存 `None`；下次调用 `int(None)` 抛 TypeError。`compute` 未包 try/except，metrics 端点会 500/无响应 |
 | P2-3 | `token_stats.py:130,168,225` vs `185-186` | `query()` 用 UTC+8 做日聚合分桶，`query_db()` 用 UTC——同一系统内"今天"的边界差 8 小时 |
 | P2-4 | `process_manager/base.py` `_pkill_by_port` | pkill 回退模式是 vLLM 专用（`vllm.*:{port}`、`VLLM::EngineCore`），却被所有端口类型复用，非 vLLM 端口的回退清理基本无效 |
-| P2-5 | `process_manager/ollama_cpp.py:129` | `run_ollama` 超时 60s，对大模型加载偏短（对比 `manager.pull_model` 用 1800s，manager.py:474） |
+| P2-5 | `process_manager/llama_cpp.py:129` | `run_ollama` 超时 60s，对大模型加载偏短（对比 `manager.pull_model` 用 1800s，manager.py:474） |
 | P2-6 | `cloud_discovery.py:636` | `pattern.match(mid)` 是前缀匹配，易过度匹配（如模式 "gpt-4" 匹配 "gpt-4-turbo"）；语义上应 `fullmatch` 或 `search` |
 | P2-7 | `metrics_aggregator.py:226-232` | `AggregatorThread.run()` 用阻塞 `queue.get()`，无 stop 事件，线程无法干净退出（仅靠 daemon 在进程退出时被杀） |
 | P2-8 | `proxy/request_logger.py:147-156` | `close()` 先置 `_enabled=False` 再 join flush 线程；关窗内并发的 `log()` 调用被静默丢弃 |

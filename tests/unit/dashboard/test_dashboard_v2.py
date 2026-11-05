@@ -1128,14 +1128,14 @@ def test_deploy_structure():
         'id="deployProgress"',   # 长任务进度态容器
     ):
         assert el in html, "missing deploy contract id: %s" % el
-    # 引擎类型选项契约（R14：仅 auto_deploy 支持的类型 vllm + ollama_cpp；
+    # 引擎类型选项契约（R14：仅 auto_deploy 支持的类型 vllm + llama_cpp；
     # sglang/ninfer/ollama 服务不被 auto_deploy 支持，提供即误导——会返回 200+error）
     frag = (_DASHBOARD_DIR / "fragments" / "deploy.html").read_text(encoding="utf-8")
-    for opt in ('value="vllm"', 'value="ollama_cpp"'):
+    for opt in ('value="vllm"', 'value="llama_cpp"'):
         assert opt in frag, "missing auto-deployable engine option: %s" % opt
     for bad in ('value="sglang"', 'value="ninfer"'):
         assert bad not in frag, (
-            "deploy.html offers %r — auto_deploy rejects it (R14: only vllm/ollama_cpp)" % bad
+            "deploy.html offers %r — auto_deploy rejects it (R14: only vllm/llama_cpp)" % bad
         )
 
 

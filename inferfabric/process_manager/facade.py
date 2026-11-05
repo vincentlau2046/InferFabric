@@ -23,7 +23,7 @@ from inferfabric.process_manager.sglang import SGLangProcessManager
 from inferfabric.process_manager.comfyui import ComfyUIProcessManager
 from inferfabric.process_manager.tts import TTSProcessManager
 from inferfabric.process_manager.asr import ASRProcessManager
-from inferfabric.process_manager.ollama_cpp import OllamaCppProcessManager
+from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
 from inferfabric.process_manager.ninfer import NInferProcessManager
 
 log = logging.getLogger("inferfabric")
@@ -44,7 +44,7 @@ class ProcessManager(BaseProcessManager):
         self._comfyui = ComfyUIProcessManager(state, log_dir)
         self._tts = TTSProcessManager(state, log_dir)
         self._asr = ASRProcessManager(state, log_dir)
-        self._ollama = OllamaCppProcessManager(state, log_dir)
+        self._ollama = LlamaCppProcessManager(state, log_dir)
         self._ninfer = NInferProcessManager(state, log_dir)
 
     # ─── PID Tracking ────────────────────────────────────────────
@@ -209,13 +209,13 @@ class ProcessManager(BaseProcessManager):
     def is_comfyui_alive(self, port: int = 8188) -> bool:
         return self._comfyui.is_comfyui_alive(port)
 
-    # ─── Ollama.cpp ──────────────────────────────────────────────
+    # ─── Llama.cpp ──────────────────────────────────────────────
 
-    def start_ollama_cpp(self, cfg, model_type: str = "") -> dict:
-        return self._ollama.start_ollama_cpp(cfg, model_type)
+    def start_llama_cpp(self, cfg, model_type: str = "") -> dict:
+        return self._ollama.start_llama_cpp(cfg, model_type)
 
-    def stop_ollama_cpp(self, port: Optional[int] = None):
-        self._ollama.stop_ollama_cpp(port)
+    def stop_llama_cpp(self, port: Optional[int] = None):
+        self._ollama.stop_llama_cpp(port)
 
     def run_ollama(self, model_ref: str, keep_alive: str = "5m", num_gpu: int = -1) -> dict:
         return self._ollama.run_ollama(model_ref, keep_alive, num_gpu)

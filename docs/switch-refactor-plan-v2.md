@@ -25,11 +25,11 @@ def is_cpu_only(self) -> bool:
 |----------|------------------------|----------|
 | `llama3-1b`（ollama, `num_gpu: 0`） | ✅ CPU-only | ✅ GPU 占用为 0 |
 | `phi3-mini`（ollama, `num_gpu: 0`） | ✅ CPU-only | ✅ GPU 占用为 0 |
-| `qwen25-omni-3b`（ollama_cpp, `gpu_layers: 0`） | ✅ CPU-only | ✅ GPU 占用为 0 |
+| `qwen25-omni-3b`（llama_cpp, `gpu_layers: 0`） | ✅ CPU-only | ✅ GPU 占用为 0 |
 | `qwen25-omni-3b` 若改 `gpu_layers: 20` | ❌ 不再 CPU-only，但若仍标 `gpu_role: none` 则 `is_cpu_only` 误判 | ⚠️ 实际占 VRAM，应参与状态机 |
-| 未来 `ollama_cpp` + `gpu_role: shared` | ❌ 不是 CPU-only | ✅ 占 VRAM，参与状态机 |
+| 未来 `llama_cpp` + `gpu_role: shared` | ❌ 不是 CPU-only | ✅ 占 VRAM，参与状态机 |
 
-**关键观察：** `is_cpu_only` 把"运行框架的硬件选择"（CPU vs GPU）与"调度策略标记"（是否参与状态机）耦合在一个布尔里。当一个 `ollama_cpp` 模型部分 GPU offload（`gpu_layers > 0`）但被标 `gpu_role: none` 时，名字误导，代码不会报警。
+**关键观察：** `is_cpu_only` 把"运行框架的硬件选择"（CPU vs GPU）与"调度策略标记"（是否参与状态机）耦合在一个布尔里。当一个 `llama_cpp` 模型部分 GPU offload（`gpu_layers > 0`）但被标 `gpu_role: none` 时，名字误导，代码不会报警。
 
 **结论：** 重命名为 `is_gpu_none`，直接对齐 `gpu_role: none` 的字段语义——"GPU 占用为 0"，而非推断其运行位置。
 
@@ -163,8 +163,8 @@ switch(target)
 **决策：采用 `_switch_gpu_none()`。** 理由：
 
 1. **与属性同根对齐：** 分流条件 `if model.is_gpu_none: → self._switch_gpu_none(model)`，读作"若模型 GPU 无占用 → 走 GPU 无占用切换路径"，零认知跳转。
-2. **拒绝 `_switch_independent()`：** "独立"在此架构中是过载词——`ollama_cpp` 独立进程、`ollama` daemon 共享进程、vLLM 独立进程都各自"独立"于不同维度。用它命名会引入新歧义。
-3. **拒绝保留 `_switch_cpu_only()`：** 与重命名初衷矛盾，且未来 `ollama_cpp` + `gpu_layers > 0` + `gpu_role: none` 的组合（理论可能）下名实不符——它占 GPU 但不参与状态机。
+2. **拒绝 `_switch_independent()`：** "独立"在此架构中是过载词——`llama_cpp` 独立进程、`ollama` daemon 共享进程、vLLM 独立进程都各自"独立"于不同维度。用它命名会引入新歧义。
+3. **拒绝保留 `_switch_cpu_only()`：** 与重命名初衷矛盾，且未来 `llama_cpp` + `gpu_layers > 0` + `gpu_role: none` 的组合（理论可能）下名实不符——它占 GPU 但不参与状态机。
 4. **拒绝 `_switch_no_gpu()`：** 引入一族两种表述（`is_gpu_none` vs `_switch_no_gpu`），增加阅读心智。
 
 **方法体（与 v1 等价，仅命名更新）：**

@@ -63,7 +63,7 @@
 
   var ENGINE_LABEL = {
     vllm: 'vLLM', sglang: 'SGLang', ninfer: 'NInfer',
-    ollama: 'Ollama', ollama_cpp: 'OllamaCpp', comfyui: 'ComfyUI',
+    ollama: 'Ollama', llama_cpp: 'llama.cpp', comfyui: 'ComfyUI',
     tts: 'TTS', asr: 'ASR',
   };
 

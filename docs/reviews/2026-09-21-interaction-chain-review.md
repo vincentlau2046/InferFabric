@@ -104,7 +104,7 @@
 | D10 | LOW | engine_adapter/ollama.py:24-25 | ollama 健康检查是 daemon 级 → reconcile 每次 tick 把**所有** ollama 模型收养进 active_services（churn） |
 | D11 | LOW | manager.py:299-302 | 已 active 的 shared 模型检测到 config drift → 走 `_switch_to_idle()` 停掉**所有** GPU 服务，而非只重启漂移的那一个 |
 
-**Clean**：GPULock 正常路径健全（flock 崩溃自动释放、finally 双清）、start_new_session 全覆盖（vllm/sglang/ninfer/comfyui/tts/asr/ollama_cpp/ollama-daemon）、Ruling-H docker-stop 返回码检查全引擎一致、CLI 错误报告充分、热加载原子 dict swap 不干扰 in-flight switch。
+**Clean**：GPULock 正常路径健全（flock 崩溃自动释放、finally 双清）、start_new_session 全覆盖（vllm/sglang/ninfer/comfyui/tts/asr/llama_cpp/ollama-daemon）、Ruling-H docker-stop 返回码检查全引擎一致、CLI 错误报告充分、热加载原子 dict swap 不干扰 in-flight switch。
 
 ---
 

@@ -6,7 +6,7 @@
  *   - POST /pull  {name, framework} — 下载权重（admin header）
  *
  * 设计纪律（R12 + R14）：
- *   - 部署表单仅含 name + engine 类型选择（vllm / ollama_cpp——auto_deploy 仅支持
+ *   - 部署表单仅含 name + engine 类型选择（vllm / llama_cpp——auto_deploy 仅支持
  *     此两者，model_discovery.py:141；sglang/ninfer/ollama 服务需 models.d/ 手动 YAML）。
  *     旧 model_dir / port / gpu_mem slider 字段已删除——后端 auto_deploy
  *     自动生成 YAML，不读这些字段（handler.py:1055 _handle_deploy 仅取 name+type）。
@@ -33,7 +33,7 @@
   var $ = function (id) { return document.getElementById(id); };
 
   var ENGINE_LABEL = {
-    vllm: 'vLLM', ollama_cpp: 'Ollama (GGUF)',
+    vllm: 'vLLM', llama_cpp: 'llama.cpp',
   };
 
   function engineLabel(type) {
@@ -155,7 +155,7 @@
           UI.toast(name + ' 拉取完成', 'ok');
           store.forceRefresh();
         } else {
-          // 后端返回 error 状态（如 vllm/ollama_cpp 不支持拉取）
+          // 后端返回 error 状态（如 vllm/llama_cpp 不支持拉取）
           var emsg = (j && j.message) || '未知结果';
           showResult(name + ' 拉取未完成', emsg);
           UI.toast('拉取未完成: ' + emsg, 'error');
