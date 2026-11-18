@@ -224,7 +224,8 @@ class NInferProcessManager(BaseProcessManager):
         cmd = [
             "docker", "run", "-d", "--gpus", "all", "--rm",
             "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
-            "-v", f"{weight_dir}:/workspace",
+            # 权重只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
+            "-v", f"{weight_dir}:/workspace:ro",
             "-p", f"{cfg.port}:8080",
             "--name", container_name,
             "-e", "NVIDIA_DISABLE_REQUIRE=1",

@@ -135,8 +135,10 @@ class VLLMConfig:
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
             "-p", f"{self.port}:{self.port}",
-            "-v", f"{model_path}:{model_path}",
-            "-v", f"{MODEL_BASE}:/models",
+            # 权重目录只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
+            "-v", f"{model_path}:{model_path}:ro",
+            "-v", f"{MODEL_BASE}:/models:ro",
+            # HF cache 保持可写：tokenizer/配置加载可能落 lock 文件
             "-v", f"{Path.home() / '.cache/huggingface'}:/root/.cache/huggingface",
             "--name", container_name,
             "--entrypoint", "vllm",
@@ -241,8 +243,10 @@ class SGLangConfig:
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
             "-p", f"{self.port}:{self.port}",
-            "-v", f"{model_path}:{model_path}",
-            "-v", f"{MODEL_BASE}:/models",
+            # 权重目录只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
+            "-v", f"{model_path}:{model_path}:ro",
+            "-v", f"{MODEL_BASE}:/models:ro",
+            # HF cache 保持可写：tokenizer/配置加载可能落 lock 文件
             "-v", f"{Path.home() / '.cache/huggingface'}:/root/.cache/huggingface",
             "--name", container_name,
         ]

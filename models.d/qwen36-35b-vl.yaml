@@ -4,6 +4,9 @@ gpu_role: exclusive
 model_type: vl
 quantization: NVFP4
 peak_vram_mb: 30000
+# Docker-first 沙箱迁移试点（issue #3）：ephemeral 容器 + :ro 权重挂载。
+# 回滚：删掉 deployment: docker 即回到宿主机 conda 路径（conda_env 保留）。
+deployment: docker
 
 vllm:
   model_dir: Huihui-Qwen3.6-35B-A3B-abliterated-NVFP4
