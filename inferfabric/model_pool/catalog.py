@@ -46,6 +46,22 @@ def local_protocols_for_engine(engine: str) -> list[str]:
     return list(_LOCAL_PROTOCOLS.get(engine, ["openai"]))
 
 
+def local_protocols_for_model(engine: str, anthropic_native: bool = False) -> list[str]:
+    """按模型实例的协议声明（PLAN-2026-11-15 v2 Task 3）。
+
+    Mac 事实：llama_cpp 引擎在 llama-server b12361+ 原生 /v1/messages
+    （models.d 里 anthropic_native: true）— 直连路径 handler 已按
+    model_obj.anthropic_native 分流原生/翻译桥，但池声明此前只看引擎名，
+    llama_cpp 恒 openai-only → 带原生能力的模型被池静默排除、悄悄改选
+    云端。anthropic_native=True 追加 anthropic 声明；引擎映射仍然生效
+    （vllm/ninfer/sglang 双协议不依赖该标志）。
+    """
+    protocols = local_protocols_for_engine(engine)
+    if anthropic_native and "anthropic" not in protocols:
+        protocols = protocols + ["anthropic"]
+    return protocols
+
+
 def build_catalog(pm) -> dict:
     """构建候选目录（纯读，零副作用，不出网）。"""
     return {"local": _local_entries(pm), "cloud": _cloud_entries(pm)}

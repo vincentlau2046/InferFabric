@@ -221,10 +221,10 @@ def handle_chat(handler, pm, data):
     handler._usage = {"prompt_tokens": 0, "prompt_tokens_cached": 0,
                       "completion_tokens": 0}
 
-    # 逻辑模型池（iff/*）：完整名鉴权 + 池选择，先于直连鉴权/缓存
+    # 逻辑模型池（fabric-*）：完整名鉴权 + 池选择，先于直连鉴权/缓存
     # （spec §13 顺序：鉴权→槽位识别→选择→传输；池请求跳过响应缓存）
     # 函数内 import 避免 chat_handlers ↔ model_pool.dispatch 循环依赖
-    if model.startswith("iff/") and getattr(pm, "pool_registry", None) is not None:
+    if model.startswith("fabric-") and getattr(pm, "pool_registry", None) is not None:
         from inferfabric.model_pool.dispatch import handle_pool_chat
         if handle_pool_chat(handler, pm, data, model):
             return
@@ -574,6 +574,204 @@ def _forward_request(handler, pm, target_port, body, stream, model_name="", upst
         if not headers_sent:
             return False
         return True
+    finally:
+        if model_name:
+            pm.release_port(model_name, target_port)
+
+
+def _is_pool_actionable_status(status: int) -> bool:
+    """动作表管辖的上游状态（终审 I6）：401/403 冷却、429 等待、5xx 一次
+    重试（501 属能力不匹配的非回退类除外）。这些状态在池路径不直发客户端
+    — 未提交返回，交给 run_attempts 动作表决定冷却/等待/切换。"""
+    if status in (401, 403, 429):
+        return True
+    return 500 <= status <= 599 and status != 501
+
+
+def _forward_request_ex(handler, pm, target_port, body, stream, model_name="", upstream_path=None, cache_body=None, timeout=None,
+                        suppress_client_errors=False):
+    """结构化转发（PLAN-2026-11-15 v2 Task 3）：_forward_request 的可观测版。
+
+    返回 dict：
+      committed    响应已开始/完整写给客户端（headers 已发）— 已提交后池层
+                   终止，不重试不切换，也绝不写第二个错误信封
+      ok           真实成功：2xx 且（非流式 或 stream_state == "completed"）
+      status       上游真实 HTTP 状态（连接失败为 None）
+      stream_state 流结束分类：completed / missing_terminal / error_event /
+                   read_error / client_disconnect；非流式为 None
+      usage/ttft_ms/error
+    客户端可见字节序列与旧 _forward_request 成功路径逐字节一致；差异仅在
+    失败路径：流中断后补写 chunked 终止块（0\r\n\r\n），避免客户端悬挂。
+    """
+    if upstream_path is None:
+        upstream_path = handler.path
+    headers_sent = False
+    conn = None
+    resp = None
+    result = {"committed": False, "ok": False, "status": None,
+              "stream_state": None, "usage": {}, "ttft_ms": None,
+              "error": None}
+    try:
+        # 池预算超时必须经构造参数传入：HTTPConnection 无 settimeout
+        # （原 `conn.settimeout(timeout)` AttributeError → 本地池候选必
+        # unreachable，浏览器门禁 test_08 + 单测 test_forward_request_timeout
+        # 实锤）。timeout=None 时保持缺省调用形状（非池路径字节不变）
+        conn = (pm.make_conn(target_port) if timeout is None
+                else pm.make_conn(target_port, timeout=timeout))
+        conn.request("POST", upstream_path, body=body,
+                      headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+
+        resp_status = resp.status
+        result["status"] = resp_status
+        resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        resp_ct = resp_headers.get("content-type", "application/json")
+
+        # 终审 I6：池路径动作表状态不直发客户端（suppress 模式）——
+        # 此前 401/403/429/5xx 一律 committed 直发，冷却/等待/回退永不生效，
+        # 与云候选及 Anthropic 本地路径的 suppress 契约不一致。非回退类
+        # （400/404/413/422/501）保留 PR-14 直发语义（冻结不变）。
+        if suppress_client_errors and _is_pool_actionable_status(resp_status):
+            # resp_headers 键已小写；forwarder 助手按 "Retry-After" 取值
+            retry_after = (forwarder._retry_after_seconds(
+                               {"Retry-After": resp_headers.get("retry-after")})
+                           if resp_status == 429 else None)
+            try:
+                resp.read()
+                resp.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            result["committed"] = False
+            result["ok"] = False
+            result["error"] = f"upstream_http_{resp_status}"
+            result["retry_after"] = retry_after
+            return result
+
+        if stream:
+            headers_sent = True
+            handler.send_response(resp_status)
+            handler.send_header("Content-Type", resp_ct)
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.send_header("Transfer-Encoding", "chunked")
+            handler.send_header("Cache-Control", "no-cache")
+            handler.end_headers()
+            # PR-B: TTFT tracking — v6.1 语义 = 首个内容 delta（回调记录，精确到
+            # token）；首 chunk 记录仅作无回调时的兜底（避免在 role-only 前言
+            # chunk 上提前记）
+            ttft_recorded = False
+            sse_buf = SSELineBuffer(first_token_ttft_cb(handler))  # G-1b + v6.1
+            use_token_ttft = getattr(sse_buf, "_on_first_token", None) is not None
+            stream_error = None
+            try:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    # PR-B: Record TTFT on first data chunk（无回调时兜底）
+                    if not ttft_recorded and not use_token_ttft:
+                        ttft_recorded = True
+                        if hasattr(handler, '_req_start'):
+                            handler._ttft_ms = (time.monotonic() - handler._req_start) * 1000
+                    size = f"{len(chunk):x}\r\n".encode()
+                    handler._safe_write(size)
+                    handler._safe_write(chunk)
+                    handler._safe_write(b"\r\n")
+                    # G-1b: 旁路观察提取 usage
+                    sse_buf.feed(chunk)
+            except Exception as e:
+                stream_error = e
+                log.debug("Stream forwarding interrupted: %s", e)
+            finally:
+                # G-1b: flush 残余 + 保存 usage（即使异常也保留已提取的部分）
+                sse_buf.flush()
+                handler._usage = dict(sse_buf.usage)
+                # Task 3：中断也补写 chunked 终止块（best-effort）——
+                # 客户端 HTTP 层不再悬挂；SSE 层缺 [DONE] 由 stream_state
+                # 如实分类，不冒充成功
+                if not getattr(handler, "_client_gone", False):
+                    handler._safe_write(b"0\r\n\r\n")
+                resp.close()
+            result["usage"] = dict(sse_buf.usage)
+            result["ttft_ms"] = getattr(handler, "_ttft_ms", None)
+            result["committed"] = True
+            if getattr(handler, "_client_gone", False):
+                result["stream_state"] = "client_disconnect"
+            elif stream_error is not None:
+                result["stream_state"] = "read_error"
+                result["error"] = f"stream read error: {stream_error}"
+            elif sse_buf.saw_error:
+                result["stream_state"] = "error_event"
+                result["error"] = "stream error event"
+            elif sse_buf.saw_done:
+                result["stream_state"] = "completed"
+            else:
+                result["stream_state"] = "missing_terminal"
+                result["error"] = "stream ended without terminal marker"
+            result["ok"] = (200 <= resp_status < 300
+                            and result["stream_state"] == "completed")
+        else:
+            # 非流式不记 TTFT：引擎算完整响应才回 header，"收到 header"≈总耗时，
+            # 无"首 token"语义。若记为 ttft，聚合器派生 TPOT
+            # (duration-ttft)/(tokens_out-1) ≈ 0.001 → 舍入 0.0 污染延迟趋势。
+            # 保持 _ttft_ms=None（→ 请求日志 ttft_ms NULL，与 Anthropic 非流式路径一致）。
+            body_obj = None
+            try:
+                resp_body = resp.read()
+                # G-1b: 非流式 — 解析 JSON body 提取 usage
+                try:
+                    body_obj = json.loads(resp_body)
+                    usage = body_obj.get("usage", {})
+                    if usage:
+                        # 双协议归一化（OpenAI/Anthropic/百度），含缓存命中拆分
+                        handler._usage = normalize_usage(usage)
+                except (json.JSONDecodeError, AttributeError):
+                    body_obj = None
+                # A3 (R5): 非流式 200 响应写缓存 — 修复前 OpenAI 路径只有
+                # GET 没有 PUT，缓存永久冷。键用改写前快照 cache_body
+                # （model=客户端原名 + 未被转发 mutate 的 body）。
+                if resp_status == 200 and cache_body is not None and isinstance(body_obj, dict):
+                    rc = getattr(pm, 'response_cache', None)
+                    if rc is not None:
+                        try:
+                            rc.put(model_name, cache_body, body_obj, handler._usage or {})
+                        except Exception:
+                            log.debug("R5 cache put failed (non-critical)")
+            finally:
+                resp.close()
+            headers_sent = True
+            handler.send_response(resp_status)
+            handler.send_header("Content-Type", resp_ct)
+            handler.send_header("Content-Length", str(len(resp_body)))
+            handler.send_header("Access-Control-Allow-Origin", "*")
+            handler.end_headers()
+            handler._safe_write(resp_body)
+            result["committed"] = True
+            result["usage"] = dict(getattr(handler, "_usage", {}) or {})
+            result["ok"] = 200 <= resp_status < 300
+            if not result["ok"]:
+                result["error"] = f"upstream returned HTTP {resp_status}"
+        return result
+    except Exception as e:
+        log.error("Forward to :%d failed: %s", target_port, e)
+        try:
+            if resp:
+                resp.close()
+        except Exception:
+            pass
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+        if not headers_sent:
+            result["error"] = str(e)
+            return result
+        result["committed"] = True
+        return result
     finally:
         if model_name:
             pm.release_port(model_name, target_port)

@@ -462,7 +462,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # 逻辑模型池（iff/*）：完整名鉴权 + 池选择，先于直连鉴权/缓存/
         # SWITCHING guard（池调度不切换本地模型，guard 不适用；spec §13）
         # 函数内 import 避免 handler ↔ model_pool.dispatch 循环依赖
-        if req_model.startswith("iff/") and getattr(pm, "pool_registry", None) is not None:
+        if req_model.startswith("fabric-") and getattr(pm, "pool_registry", None) is not None:
             from inferfabric.model_pool.dispatch import handle_pool_messages
             if handle_pool_messages(self, pm, data, req_model):
                 return
@@ -816,7 +816,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             snap = pool_reg.snapshot()
             existing_ids = {m.get("id") for m in all_models}
             for name, ps in snap.pools.items():
-                logical = f"iff/{name}"
+                logical = f"fabric-{name}"
                 if (ps.pool.enabled and ps.candidates
                         and logical not in existing_ids):
                     all_models.append({"id": logical, "object": "model",

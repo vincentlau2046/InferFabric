@@ -241,7 +241,8 @@ class DualGateLimiter:
             return self._per_model[model]
 
     def acquire(self, model: str, timeout: int | None = None) -> 'GateResult':
-        effective_timeout = timeout or self._timeout
+        # Task 4：0 是合法 timeout（池预算耗尽 → 立即失败），不能用 or 兜底
+        effective_timeout = timeout if timeout is not None else self._timeout
 
         # Gate 1: RPM
         rpm_held = False
@@ -260,9 +261,12 @@ class DualGateLimiter:
         global_held = False
         if self._global_sem is not None:
             if self._mode == "observe":
-                acquired = self._global_sem.acquire(timeout=300)
+                # Task 4（PLAN-2026-11-15 v2）：观察模式等待同样受调用方
+                # timeout 约束（池路径传剩余预算）— 不再固定 300s 绕过硬截止
+                acquired = self._global_sem.acquire(timeout=effective_timeout)
                 if not acquired:
-                    log.error("Global concurrency observe: waited 300s — bug?")
+                    log.warning("Global concurrency observe: timed out after %.0fs — allowing unheld",
+                                effective_timeout)
                     return GateResult(self, model, ok=True, reason="", rpm_held=rpm_held,
                                       model_sem_held=False, global_held=False)
             else:
@@ -276,9 +280,10 @@ class DualGateLimiter:
         # Gate 2b: Per-model concurrency
         sem = self._get_or_create_sem(model)
         if self._mode == "observe":
-            acquired = sem.acquire(timeout=300)
+            acquired = sem.acquire(timeout=effective_timeout)
             if not acquired:
-                log.error("Model concurrency observe: %s waited 300s — bug?", model)
+                log.warning("Model concurrency observe: %s timed out after %.0fs — allowing unheld",
+                            model, effective_timeout)
                 if global_held and self._global_sem:
                     self._global_sem.release()
                 return GateResult(self, model, ok=True, reason="", rpm_held=rpm_held,
@@ -306,9 +311,11 @@ class DualGateLimiter:
         effective_timeout = timeout if timeout is not None else self._timeout
         sem = self._get_or_create_sem(model)
         if self._mode == "observe":
-            acquired = sem.acquire(timeout=300)
+            # Task 4：等待受 timeout（池剩余预算）约束，不再固定 300s
+            acquired = sem.acquire(timeout=effective_timeout)
             if not acquired:
-                log.error("Target concurrency observe: %s waited 300s — bug?", model)
+                log.warning("Target concurrency observe: %s timed out after %.0fs — allowing unheld",
+                            model, effective_timeout)
                 return GateResult(self, model, ok=True, reason="",
                                   rpm_held=False, model_sem_held=False,
                                   global_held=False)

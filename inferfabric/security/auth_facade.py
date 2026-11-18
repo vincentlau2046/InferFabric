@@ -25,7 +25,7 @@ class SecurityAuth:
             policy = self.store.get_policy()
             if not token:
                 required = self.legacy.enabled or policy == 'all' or (
-                    policy == 'pools' and model.startswith('iff/'))
+                    policy == 'pools' and model.startswith('fabric-'))
                 return (False, 'API key required') if required else (True, 'ok')
             result = self.store.check(token, model)
             if result[0]:

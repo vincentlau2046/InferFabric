@@ -65,11 +65,11 @@
    * 缺失组无创建入口。重构为单一形态 — 顶部调用树（端口→角色→模型，
    * 链路态 = 有没有被真实调用）+ 四角色常驻配置卡（未配置即待建）。
    * 四角色固定序与描述表（原向导 _ROLE_DEFS 上移 — 树与卡共用）。 */
-  var _ROLE_ORDER = ['fast', 'premium', 'small', 'classifier'];
+  var _ROLE_ORDER = ['flash', 'max', 'lite', 'classifier'];
   var _ROLE_DEFS = [
-    { name: 'fast', desc: '快速响应 — 日常对话与轻任务' },
-    { name: 'premium', desc: '旗舰质量 — 复杂推理与长文' },
-    { name: 'small', desc: '小模型 — 分类/抽取/批量任务' },
+    { name: 'flash', desc: '快速响应 — 日常对话与轻任务' },
+    { name: 'max', desc: '旗舰质量 — 复杂推理与长文' },
+    { name: 'lite', desc: '轻量任务 — 分类/抽取/批量任务' },
     { name: 'classifier', desc: '分类判别 — 路由/打标/判别' },
   ];
   // 树链路流动窗：真实 ok 交换在此窗内 = flowing。比卡片光带窗
@@ -102,7 +102,7 @@
     return { cls: 'idle', label: '空闲' };
   }
 
-  // 调用树渲染：每行完整链「:8999 ── iff/<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
+  // 调用树渲染：每行完整链「:8999 ── fabric-<角色> ── <候选链：每候选五态灯+名>」+ 态徽标。
   // 四角色固定序 + 额外池（YAML 手工组）追加其后，不隐藏（R3）。
   function treeHtml(defs, rt) {
     var pools = (defs && defs.pools) || {};
@@ -154,7 +154,7 @@
         // 不进结构签名：轮询零闪烁）
         + '<span class="mp-link mp-link-' + ls.cls
         + '" id="mp-tlink-a-' + esc(name) + '"></span>'
-        + '<span class="mp-tree-role">iff/' + esc(name) + '</span>'
+        + '<span class="mp-tree-role">fabric-' + esc(name) + '</span>'
         + '<span class="mp-link mp-link-' + ls.cls
         + '" id="mp-tlink-b-' + esc(name) + '"></span>'
         // leaf 是完整 HTML（mp-tree-cands / mp-tree-leaf）——原样插入，
@@ -183,8 +183,8 @@
   }
 
   // 未配置卡下拉默认值（原初始化引导的预填启发式按角色吸收；仅建议值）：
-  // fast=活跃最小 / premium=最大上下文本地（无本地则首个云）/
-  // small=最小 / classifier=首个活跃。目录条目需含 active/context_window
+  // flash=活跃最小 / max=最大上下文本地（无本地则首个云）/
+  // lite=最小 / classifier=首个活跃。目录条目需含 active/context_window
   // （fetchCatalog 完整形态）。额外池无启发式。
   function cardDefault(roleName, catalog) {
     var cat = catalog || {};
@@ -208,12 +208,12 @@
       }
       return 'local:' + sorted[0].name;
     }
-    // premium/small 同 fast/classifier 优先 active — L2a 把 VL 纳入目录后，
+  // max/lite 同 flash/classifier 优先 active — L2a 把 VL 纳入目录后，
     // 全量按上下文选会选中平时不激活、需 iff switch 的独占 VL 模型；
     // active 优先让文本池默认建议落在「当前可用」的模型上
-    if (roleName === 'fast') return pick(act.length ? act : llms, false);
-    if (roleName === 'premium') return pick(act.length ? act : llms, true);
-    if (roleName === 'small') return pick(act.length ? act : llms, false);
+    if (roleName === 'flash') return pick(act.length ? act : llms, false);
+    if (roleName === 'max') return pick(act.length ? act : llms, true);
+    if (roleName === 'lite') return pick(act.length ? act : llms, false);
     if (roleName === 'classifier') {
       return act.length ? 'local:' + act[0].name : pick(llms, false);
     }
@@ -261,7 +261,7 @@
       + '<div class="mp-beam mp-beam-dark" id="mp-beam-' + esc(name)
       + '"></div>'
       + '<div class="if-card-hdr">'
-      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="if-card-title mono">fabric-' + esc(name) + '</span>'
       + '<span class="mp-unconfigured-badge">未配置</span>'
       + '</div>'
       + (desc ? '<p class="mp-role-desc">' + esc(desc) + '</p>' : '')
@@ -656,7 +656,7 @@
       + '<div class="mp-beam ' + beamClass(st, rt) + '" id="mp-beam-'
       + esc(name) + '"></div>'
       + '<div class="if-card-hdr">'
-      + '<span class="if-card-title mono">iff/' + esc(name) + '</span>'
+      + '<span class="if-card-title mono">fabric-' + esc(name) + '</span>'
       + (roleDesc(name)
           ? '<span class="mp-role-desc">' + esc(roleDesc(name)) + '</span>'
           : '')
@@ -1206,7 +1206,7 @@
       if (res.ok) {
         clearActionError();
         _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
-        UI.toast('已' + (enable ? '启用' : '停用') + ' iff/' + pool, 'ok');
+        UI.toast('已' + (enable ? '启用' : '停用') + ' fabric-' + pool, 'ok');
         await renderModelPools();
         return;
       }
@@ -1624,7 +1624,7 @@
       if (_inline !== session) {
         // 陈旧完成：请求已发出并生效，但行内会话已换 — 只提示 + 刷新
         if (res.ok) {
-          UI.toast('已更新 iff/' + poolName, 'ok');
+          UI.toast('已更新 fabric-' + poolName, 'ok');
           await renderModelPools();
         }
         return;
@@ -1635,7 +1635,7 @@
         _inline = null;
         _catalog = null;   // 配置已变 → 目录缓存失效，下次手势重取
         clearActionError();
-        UI.toast('已更新 iff/' + poolName, 'ok');
+        UI.toast('已更新 fabric-' + poolName, 'ok');
         await renderModelPools();
         return;
       }
@@ -1800,7 +1800,7 @@
     var base = scheme + '//' + host + ':8999';
     // model 字面量用 JSON.stringify 生成（Python 兼容转义）：池名含引号/
     // 反斜杠/换行也只是一个完整字符串参数，无法注入到复制的代码（安全评审）
-    var modelLit = JSON.stringify('iff/' + pool);
+    var modelLit = JSON.stringify('fabric-' + pool);
     if (proto === 'anthropic') {
       return 'from anthropic import Anthropic\n\n'
         + 'client = Anthropic(\n'
@@ -1833,10 +1833,10 @@
     var anthropic = snippetText(pool, 'anthropic');
     _snippet = { pool: pool, openai: openai, anthropic: anthropic };
     modal.innerHTML = '<div class="mp-editor">'
-      + '<div class="mp-editor-hdr"><b class="mono">iff/' + esc(pool)
+      + '<div class="mp-editor-hdr"><b class="mono">fabric-' + esc(pool)
       + '</b><span>接入片段 — 复制即用，之后换模型无需改客户端</span></div>'
       + '<p class="mp-hint">注意：若 API key 配置了 models ACL，需包含'
-      + '<span class="mono">iff/' + esc(pool) + '</span>，否则会 401。</p>'
+      + '<span class="mono">fabric-' + esc(pool) + '</span>，否则会 401。</p>'
       + '<p class="mp-snippet-title">OpenAI 协议</p>'
       + '<pre class="mp-snippet">' + esc(openai) + '</pre>'
       + '<button type="button" data-mp-copy="openai">复制 OpenAI 片段</button>'

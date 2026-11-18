@@ -152,6 +152,20 @@ class CooldownStore:
                 # 重新冷却保留原 reason（新故障原因由 add() 覆盖，探测失败不覆盖）
                 self._until[fingerprint] = self._now(now) + self._ttl
 
+    def release_probe(self, fingerprint: str, now: float | None = None) -> None:
+        """释放探测权但不回写结果（PLAN-2026-11-15 v2 Task 4）。
+
+        适用：探测领取后请求在真实上游调用前退出（未准入 / 传输异常 /
+        客户端取消）。端点未被证实成功或失败 — 保持「到期待探测」状态
+        （_until 不动），下一个请求可重新领取；绝不误记端点失败。
+        """
+        with self._lock:
+            if fingerprint not in self._probing:
+                return
+            self._probing.discard(fingerprint)
+            self._record_event(fingerprint, "probe_cancel",
+                               self._reason.get(fingerprint), self._now(now))
+
     # ── 运行态只读视图（v7.1.0，供 GET /admin/model-pools/runtime）──
 
     def entries(self, now: float | None = None) -> dict[str, dict]:
@@ -234,6 +248,10 @@ class AttemptResult:
     route: str | None = None
     usage: dict = field(default_factory=dict)
     ttft_ms: float | None = None
+    # 流结束分类（Task 3）：completed / missing_terminal / error_event /
+    # read_error / client_disconnect；非流式 None。布尔 committed 不再独自
+    # 决定 ok — 流缺终止标志/显式错误事件 = 未完成
+    stream_state: str | None = None
 
 
 @dataclass
@@ -254,6 +272,9 @@ class AttemptRecord:
     retry_after: float | None = None
     incompatible: bool = False
     duration_ms: float | None = None
+    # 观测字段（Task 3）：stream 结束分类、attempt 级 TTFT
+    stream_state: str | None = None
+    ttft_ms: float | None = None
 
 
 @dataclass
@@ -284,8 +305,6 @@ def _physical_identity(cand) -> tuple[str | None, str | None]:
     if c.kind == "cloud":
         return c.model_id, c.provider
     return c.model_name, None
-
-
 def _is_non_fallback(status: int | None) -> bool:
     """确定性错误：换候选无解 → 终止（spec §6.2 不回退类）。"""
     if status is None:
@@ -336,6 +355,11 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         cand = queue[0]
         last_cand = cand
 
+        # 预算/次数已尽先于探测领取（Task 4）：先领后判会把探测权困在
+        # 已耗尽的循环里 — 不领取就不会泄漏
+        if attempts >= max_attempts:
+            break
+
         # 准入 1/2 — 端点冷却/半开单飞（终审 #18）：仍在冷却或已有并发
         # 探测在途 → 跳过该候选。准入失败不是真实上游调用，不消耗预算。
         if cooldowns is not None and not cooldowns.claim_probe(
@@ -346,15 +370,38 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             queue.pop(0)
             continue
 
-        if attempts >= max_attempts:
-            break
-
         t0 = mono()
-        res = transport(cand, remaining)
+        try:
+            res = transport(cand, remaining)
+        except Exception as e:
+            # 传输层异常（Task 4）：探测权释放但不回写失败（端点未被证实），
+            # 按连接失败动作表切下一候选 — 异常不得把半开探测权困死到重启。
+            # 终审 I7：异常 = 可能已发出的真实尝试（连接失败与发送后超时在
+            # 此层不可区分，保守计入）→ admitted=True + 消耗 max_attempts，
+            # attempt_count 不再少报、物理调用数受预算约束。准入失败
+            # （下方 res.admitted=False，发送前边界）仍不计。
+            log.warning("pool transport raised for candidate '%s': %s",
+                        cand.candidate.id, e)
+            if cooldowns is not None:
+                cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
+            attempts += 1
+            records.append(AttemptRecord(
+                ordinal=len(records) + 1, candidate_id=cand.candidate.id,
+                error=f"transport error: {e}", admitted=True,
+                duration_ms=(mono() - t0) * 1000.0))
+            queue.pop(0)
+            continue
+
+        # 传输耗时已消耗预算：重算剩余（Task 4）— 429 等待/后续决策不得
+        # 使用循环顶部的 stale remaining
+        remaining = deadline - mono()
 
         # 准入 2/2 — 传输回调判定准入失败（gate 超时/端口预留失败等，
-        # 终审 #11）：不消耗 attempt 预算，切下一候选
+        # 终审 #11）：不消耗 attempt 预算，切下一候选。探测权释放但不
+        # 回写失败（Task 4：拒绝准入不误记端点失败）
         if not res.admitted:
+            if cooldowns is not None:
+                cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
             records.append(AttemptRecord(
                 ordinal=len(records) + 1, candidate_id=cand.candidate.id,
                 route=res.route, error=res.error or "not_admitted",
@@ -368,7 +415,8 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             ordinal=len(records) + 1, candidate_id=cand.candidate.id, route=res.route,
             status=res.status, error=res.error, committed=res.committed,
             ok=res.ok, retry_after=res.retry_after, incompatible=res.incompatible,
-            duration_ms=(mono() - t0) * 1000.0))
+            duration_ms=(mono() - t0) * 1000.0,
+            stream_state=res.stream_state, ttft_ms=res.ttft_ms))
 
         # 半开探测结果回写（健康端点未注册探测 → no-op，终审 #18）。
         # incompatible 视作探测通过（cross-review 2026-11-04）：端点有应答、

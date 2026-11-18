@@ -91,7 +91,7 @@ class SecurityAdmin:
             elif action == 'create':
                 models = data.get('models')
                 if models is not None and (not isinstance(models, list) or any(
-                        not isinstance(m, str) or not m.startswith('iff/') or len(m) <= 4 for m in models)):
+                        not isinstance(m, str) or not m.startswith('fabric-') or len(m) <= 8 for m in models)):
                     raise ValueError('scope must be full access or exact pool names')
                 expiry = data.get('expires_at')
                 if expiry is not None:
