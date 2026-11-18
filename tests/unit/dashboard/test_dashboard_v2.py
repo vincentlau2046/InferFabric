@@ -885,8 +885,9 @@ def test_monitor_power_card_contract():
     for dead in ('pushGpuSample', 'renderGpuChart', '_gpuBuf', '_gpuWin'):
         assert dead not in js, "monitor.js still contains removed GPU ring buffer ref: %s" % dead
 
-    # 2. 数据源：GET /api/power（只读 fetch，无 POST）
-    assert "/api/power?gran=" in js, "monitor.js must fetch /api/power?gran= for power series"
+    # 2. 数据源：GET /api/device_power（DeviceTelemetry T4：聚合流端点，
+    #    只读 fetch，无 POST；legacy 流留在 /api/power）
+    assert "/api/device_power?gran=" in js, "monitor.js must fetch /api/device_power?gran= for power series"
     # 2b. 档位语义：小时/天/周（月整体弃用）；_pgranWinText 周 → 近 90 天
     assert re.search(r"_pgranWinText\([^)]*\)\s*\{\s*if \(gran === 'day'\) return '近 30 天';", js), (
         "monitor.js power window text must map day → 近 30 天"
@@ -934,7 +935,8 @@ def test_monitor_power_card_contract():
     )
     assert 'symbolSize: 5' in js, "power line dots must declare symbolSize"
 
-    # 5b. 双轴单网格 + 整数坐标（用户拍板）：左 W 固定 0–600（卡 TDP 封顶），
+    # 5b. 双轴单网格 + 整数坐标（用户拍板）：左 W max=_niceCeil(窗口实际样本,6)
+    #     （DeviceTelemetry T5：无固定 600W TDP 上限假设，数据驱动 nice 取整），
     #     右 度 max=_niceCeil(累计量,6) nice 上取整到 6 等分干净步长，
     #     两轴同 splitNumber:6 + min:0 → 网格位置重合，右轴 splitLine 隐藏只印标签。
     #     原 splitNumber:1 一刀切设计已废弃（单刻度过秃），此处防的是退化回去。
@@ -942,9 +944,10 @@ def test_monitor_power_card_contract():
         "both power y-axes must share splitNumber:6 + min:0 so the 6-division "
         "pixel positions coincide — right axis reuses left gridline positions"
     )
-    assert 'max: 600' in js and "'dataMax'" not in js, (
-        "left W axis must be FIXED 0–600 (card TDP ceiling, never exceeded) — "
-        "dynamic dataMax top would give non-integer/non-adapted tick values"
+    assert 'max: maxW' in js and "_niceCeil(Math.max.apply" in js and "'dataMax'" not in js, (
+        "left W axis must be data-driven via maxW = _niceCeil(window samples, 6) "
+        "(DeviceTelemetry T5: no fixed 600W TDP assumption) — raw 'dataMax' would "
+        "give non-integer/non-adapted tick values"
     )
     assert 'splitLine: { show: false }' in js, (
         "right kWh axis must hide its own split lines — ONE scale-line set "

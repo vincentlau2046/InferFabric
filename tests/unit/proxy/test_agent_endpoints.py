@@ -119,7 +119,12 @@ def test_snapshot_carries_agent_ua():
              "tokens_in_cached": 0, "tokens_out": 1, "ttft_ms": None,
              "duration_ms": None, "route": "local", "key_name": "k", "error": None,
              "agent": "", "ua": "curl/8"}]
-    pm = SimpleNamespace(telemetry=SimpleNamespace(query_request_log=lambda since, limit=50: rows),
+    from inferfabric.platform.telemetry import NullTelemetry
+    _null_tel = NullTelemetry()
+    pm = SimpleNamespace(telemetry=SimpleNamespace(
+                             device_telemetry=_null_tel,
+                             get_device_snapshot=lambda: _null_tel.snapshot(),
+                             query_request_log=lambda since, limit=50: rows),
                          mgr=SimpleNamespace(state=SimpleNamespace(get_history=lambda n: []),
                                              list_models=lambda: [], _models={}),
                          _snap_exp_cache=None)

@@ -62,7 +62,7 @@ def _make_pm(*, request_log=None, status_calls=None, metrics_calls=None,
     status_calls = status_calls if status_calls is not None else []
     metrics_calls = metrics_calls if metrics_calls is not None else []
 
-    def status():
+    def status(include_device=True):
         status_calls.append(1)
         return {"gpu_mode": "shared", "active_services": ["qwen"]}
 
@@ -82,7 +82,13 @@ def _make_pm(*, request_log=None, status_calls=None, metrics_calls=None,
         active_services={"qwen"},
     )
     pm.metrics = SimpleNamespace(get_metrics=get_metrics)
+    # DeviceTelemetry T5: snapshot 组装消费 hub 设备遥测（观测缓存路径），
+    # 桩用 NullTelemetry 空态（gpu_* 全 None，不触平台命令）。
+    from inferfabric.platform.telemetry import NullTelemetry
+    _null_tel = NullTelemetry()
     pm.telemetry = SimpleNamespace(
+        device_telemetry=_null_tel,
+        get_device_snapshot=lambda: _null_tel.snapshot(),
         token_collector=SimpleNamespace(_load_full_state=lambda: {}),
         query_request_log=lambda since, limit: (request_log if request_log is not None
                                                 else [{"model": "qwen", "status": 200,
@@ -105,7 +111,7 @@ def _make_handler(headers=None):
     h.path = "/api/snapshot"
     h.command = "GET"
     h._sys = {"gpu_temp_c": 45.0, "gpu_util_pct": 12.0, "version": "test"}
-    h._system_info = lambda: dict(h._sys)
+    h._system_info = lambda *a, **k: dict(h._sys)
     h._records = []      # ("status", code)
     h._headers = []      # (k, v)
     h._bodies = []       # body bytes

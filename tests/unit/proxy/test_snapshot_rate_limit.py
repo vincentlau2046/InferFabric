@@ -37,7 +37,12 @@ def _make_pm(dual_gate=None, exp_ttl=1000.0):
         active_services=set(),
     )
     pm.metrics = SimpleNamespace(get_metrics=lambda window, axis_models=None: {})
+    # DeviceTelemetry T5: snapshot 组装消费 hub 设备遥测；NullTelemetry 空态桩。
+    from inferfabric.platform.telemetry import NullTelemetry
+    _null_tel = NullTelemetry()
     pm.telemetry = SimpleNamespace(
+        device_telemetry=_null_tel,
+        get_device_snapshot=lambda: _null_tel.snapshot(),
         token_collector=SimpleNamespace(_load_full_state=lambda: {}),
         query_request_log=lambda since, limit: [],
     )
@@ -66,7 +71,7 @@ def _call_snapshot(dual_gate=None):
     h.path = "/api/snapshot"
     h.command = "GET"
     h._sys = {"gpu_temp_c": 45.0, "gpu_util_pct": 12.0, "version": "test"}
-    h._system_info = lambda: dict(h._sys)
+    h._system_info = lambda *a, **k: dict(h._sys)
     records, bodies = [], []
     h.send_response = lambda code: records.append(code)
     h.send_header = lambda k, v: None
