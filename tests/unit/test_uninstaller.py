@@ -47,18 +47,20 @@ def _model(served_name="", vllm=None, sglang=None, ninfer=None,
     return m
 
 
-def _run_map(responses):
-    """fake run：按 argv 关键字匹配预设 (rc, stderr)。"""
+def _run_map(responses, digests=None):
+    """fake run：按 argv 关键字匹配预设 (rc, stderr)；digests 模拟 digest inspect。"""
     calls = []
 
     class R:
-        def __init__(self, rc, stderr=""):
+        def __init__(self, rc, stderr="", stdout=""):
             self.returncode = rc
             self.stderr = stderr
-            self.stdout = ""
+            self.stdout = stdout
 
     def run(cmd, **kw):
         calls.append(list(cmd))
+        if "--format" in cmd:
+            return R(0, "", (digests or {}).get(cmd[-1], ""))
         for key, (rc, err) in responses.items():
             if key in cmd:
                 return R(rc, err)
@@ -327,16 +329,35 @@ class TestRemoveImage:
 
     def test_referenced_image_blocked(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("vllm:v1", now=1.0)
+        led.record("vllm:v1", digest="repo@sha256:v1", now=1.0)
         report = remove_image("vllm:v1", models={"a": _model(vllm=_NS(docker_image="vllm:v1"))},
                               ledger=led)
         assert report["status"] == "blocked"
         assert report["referenced_by"] == ["a"]
         assert led.refs() == {"vllm:v1"}
 
+    def test_no_digest_blocked_unverifiable(self, tmp_path):
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("vllm:v1", now=1.0)          # 无 digest 的旧条目
+        run = _run_map({})
+        report = remove_image("vllm:v1", models={}, ledger=led, run=run)
+        assert report["status"] == "blocked"
+        assert "digest" in report["message"]
+        assert not any("rmi" in c for c in run.calls)
+        assert led.refs() == {"vllm:v1"}
+
+    def test_digest_changed_refused(self, tmp_path):
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("vllm:v1", digest="repo@sha256:old", now=1.0)
+        run = _run_map({}, digests={"vllm:v1": "repo@sha256:new"})
+        report = remove_image("vllm:v1", models={}, ledger=led, run=run)
+        assert report["status"] == "blocked"
+        assert "digest changed" in report["message"]
+        assert not any("rmi" in c for c in run.calls)
+
     def test_dry_run_no_calls(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("vllm:v1", now=1.0)
+        led.record("vllm:v1", digest="repo@sha256:v1", now=1.0)
         run = _run_map({})
         report = remove_image("vllm:v1", models={}, ledger=led, run=run, dry_run=True)
         assert report["status"] == "would-remove"
@@ -344,17 +365,18 @@ class TestRemoveImage:
 
     def test_rmi_removes_and_forgets(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("vllm:v1", now=1.0)
-        run = _run_map({})
+        led.record("vllm:v1", digest="repo@sha256:v1", now=1.0)
+        run = _run_map({}, digests={"vllm:v1": "repo@sha256:v1"})
         report = remove_image("vllm:v1", models={}, ledger=led, run=run)
         assert report["status"] == "removed"
-        assert run.calls == [["docker", "rmi", "vllm:v1"]]
+        assert ["docker", "rmi", "vllm:v1"] in run.calls
         assert led.refs() == set()
 
     def test_rmi_failure_fail_visible_ref_stays(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("vllm:v1", now=1.0)
-        run = _run_map({"rmi": (1, "image is in use")})
+        led.record("vllm:v1", digest="repo@sha256:v1", now=1.0)
+        run = _run_map({"rmi": (1, "image is in use")},
+                       digests={"vllm:v1": "repo@sha256:v1"})
         report = remove_image("vllm:v1", models={}, ledger=led, run=run)
         assert report["status"] == "error"
         assert "in use" in report["message"]

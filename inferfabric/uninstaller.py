@@ -39,6 +39,7 @@ import yaml
 from inferfabric.image_manager import (
     ManagedImageLedger,
     default_ledger_path,
+    image_digest,
 )
 
 
@@ -407,8 +408,10 @@ def remove_image(ref: str, *, models: dict, ledger: ManagedImageLedger | None = 
                  run=None, dry_run: bool = False, extra_sources=()) -> dict:
     """Remove a project-managed image that no model config references.
 
-    "Managed" = recorded in the image ledger (image_manager L3b). User-pulled
-    images are never touched; `docker image prune` is never issued.
+    "Managed" = recorded in the image ledger (image_manager L3b) *and* its
+    digest still matches the recorded one — a repointed tag is refused, not
+    deleted. User-pulled images are never touched; `docker image prune` is
+    never issued.
     """
     if not ref:
         return {"status": "error", "message": "image ref required"}
@@ -427,6 +430,23 @@ def remove_image(ref: str, *, models: dict, ledger: ManagedImageLedger | None = 
         return {"status": "blocked", "image": ref,
                 "message": f"image {ref!r} is not in the managed-image ledger — "
                            f"only images this project pulled are removable"}
+
+    # digest 门禁（与 prune_managed 同一纪律）：台账记录的是 pull 时的镜像
+    # 身份；tag 可被重指，不复核 digest 就可能删掉台账从未见过的镜像。
+    want = ledger.digest(ref)
+    if dry_run:
+        return {"status": "would-remove", "image": ref,
+                "actions": [{"action": "would-rmi", "ref": ref,
+                             "digest_recorded": bool(want)}]}
+    if not want:
+        return {"status": "blocked", "image": ref,
+                "message": "no digest recorded for this image (unverifiable) — "
+                           "re-pull it so the ledger can record the digest"}
+    current = image_digest(ref, run)
+    if current != want:
+        return {"status": "blocked", "image": ref,
+                "message": f"digest changed (ledger {want!r} != current {current!r}) — "
+                           f"the tag now points at a different image; refusing"}
 
     if dry_run:
         return {"status": "would-remove", "image": ref,
