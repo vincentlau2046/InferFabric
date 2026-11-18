@@ -76,6 +76,17 @@ def pool_name_of(model: str) -> str:
     return canonical_pool_name(model[len(POOL_PREFIX):])
 
 
+def _resolve_pool_snap(snapshot, model):
+    """池快照解析（评审 PR#4 blocker）：先规范名（别名映射 flash/lite/max），
+    未命中回落原短名——存量 model_pools.yaml 键仍为 fast/small/premium 时不
+    被重命名切断路由；配置迁移到规范名后，别名与规范名并存期双向可用。"""
+    if snapshot is None:
+        return None
+    short = model[len(POOL_PREFIX):]
+    return (snapshot.pools.get(pool_name_of(model))
+            or snapshot.pools.get(short))
+
+
 # ── 请求能力提取 ──
 
 def _has_vision_openai(data: dict) -> bool:
@@ -280,8 +291,7 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
 
     registry = getattr(pm, "pool_registry", None)
     snapshot = registry.snapshot() if registry is not None else None
-    pool_snap = (snapshot.pools.get(pool_name_of(model))
-                 if snapshot is not None else None)
+    pool_snap = _resolve_pool_snap(snapshot, model)
     if pool_snap is None:
         _send_pool_error_openai(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
@@ -402,8 +412,7 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
     registry = getattr(pm, "pool_registry", None)
     snapshot = registry.snapshot() if registry is not None else None
-    pool_snap = (snapshot.pools.get(pool_name_of(model))
-                 if snapshot is not None else None)
+    pool_snap = _resolve_pool_snap(snapshot, model)
     if pool_snap is None:
         _send_pool_error_anthropic(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
@@ -523,11 +532,16 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
     # 预算 — 键 = served_name（与直连路由一致）。acquire_target 只占
     # per-model 并发，不双扣外层已计费的 RPM/全局并发（终审 #8）。
     # 门先于端口预留（终审 #14）：失败时不占用副本端口。
+    # 评审 nit 1：门等待最多 min(30, remaining)，转发 timeout 必须用门后
+    # 重算的剩余——用门前 stale 值最坏 ≈2×remaining，突破池总预算。
+    deadline_at = (time.monotonic() + remaining) if remaining is not None else None
     gate = pm.dual_gate.acquire_target(c.model_name, timeout=_gate_timeout(remaining))
     if not gate.ok:
         return AttemptResult(admitted=False, route=route,
                              error=f"physical target '{c.model_name}' rate "
                                    f"limited: {gate.reason}")
+    if deadline_at is not None:
+        remaining = max(0.0, deadline_at - time.monotonic())
     try:
         target_port = pm.get_target_port(c.model_name)
         if not target_port:
@@ -650,13 +664,17 @@ def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand,
     data["model"] = c.model_id
 
     # 物理目标容量门（spec §8）：键 = provider/model_id（与云直连一致；
-    # 终审 #8 acquire_target / 终审 #7 等待受剩余预算约束）
+    # 终审 #8 acquire_target / 终审 #7 等待受剩余预算约束）。评审 nit 1：
+    # 门后重算剩余再作转发 timeout，同本地路径。
+    deadline_at = (time.monotonic() + remaining) if remaining is not None else None
     gate = pm.dual_gate.acquire_target(f"{c.provider}/{c.model_id}",
                                        timeout=_gate_timeout(remaining))
     if not gate.ok:
         return AttemptResult(admitted=False, route=route,
                              error=f"cloud target '{c.provider}/{c.model_id}' "
                                    f"rate limited: {gate.reason}")
+    if deadline_at is not None:
+        remaining = max(0.0, deadline_at - time.monotonic())
     try:
         result = forwarder.forward_to_cloud(
             handler, data, provider_cfg, cloud_model,

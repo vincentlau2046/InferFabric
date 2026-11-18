@@ -194,10 +194,9 @@ def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateC
             issues.append(f"{where}: unknown feature {f!r}")
             return None
 
-    try:
-        priority = int(raw.get("priority"))
-    except (TypeError, ValueError):
-        issues.append(f"pool '{pool_name}' candidate '{cid}': priority must be an integer")
+    priority = _strict_int(raw.get("priority"), "priority",
+                           f"pool '{pool_name}' candidate '{cid}'", issues)
+    if priority is None:
         return None
 
     return CandidateConfig(

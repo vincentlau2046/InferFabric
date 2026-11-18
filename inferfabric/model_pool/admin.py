@@ -91,7 +91,7 @@ def handle_put_model_pools(handler, pm):
     data = handler._read_body()
     if data is None:
         return
-    expected = data.get("expected_revision")
+    expected = data.pop("expected_revision", None)
     if not isinstance(expected, int):
         handler._send_json(
             {"error": "expected_revision (int) is required for conflict-safe update",

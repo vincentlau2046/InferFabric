@@ -271,3 +271,13 @@ class TestLoadFile:
         cfg, issues = load_pools_file(p)
         assert cfg is None
         assert issues
+
+    def test_priority_type_rejected(self):
+        # 评审 PR#4 nit 3：priority 与 max_attempts 同标准 — bool/float/str
+        # 经 _strict_int 一律拒绝（int(True)=1 静默畸变不再发生）
+        for bad in (True, 2.5, "3"):
+            raw = _raw_file()
+            raw["pools"]["fast"]["candidates"][0]["priority"] = bad
+            cfg, issues = load_pools_dict(raw, current_revision=0)
+            assert cfg is None
+            assert any("priority" in i for i in issues)
