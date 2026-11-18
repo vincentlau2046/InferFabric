@@ -134,7 +134,7 @@ class TestDualGateLimiter:
         assert not t2.ok
         t.release()
         # 全局并发未被 acquire_target 占用 → 另一逻辑名全量 gate 可过
-        other = gate.acquire("iff/fast", timeout=0.1)
+        other = gate.acquire("fabric-fast", timeout=0.1)
         assert other.ok
         other.release()
 

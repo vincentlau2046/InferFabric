@@ -62,7 +62,7 @@ class TestGetModelPools:
         status, body = h.sent[-1]
         assert status == 200
         assert body["revision"] == 1
-        pool = body["pools"]["fast"]
+        pool = body["pools"]["flash"]
         assert pool["enabled"] is True
         assert pool["allowed_locations"] == ["local", "cloud"]
         assert len(pool["candidates"]) == 2
@@ -140,7 +140,7 @@ class TestValidate:
 
     def test_validate_invalid_config(self, pm):
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"] = [
+        cfg["pools"]["flash"]["candidates"] = [
             {"id": "a", "priority": 1, "kind": "cloud", "provider": "p",
              "model_id": "m"},
             {"id": "a", "priority": 1, "kind": "cloud", "provider": "p",
@@ -166,7 +166,7 @@ class TestStatus:
 
         status, body = h.sent[-1]
         assert status == 200
-        pool = body["pools"]["fast"]
+        pool = body["pools"]["flash"]
         assert set(pool["protocols"]) == {"openai", "anthropic"}
         # 候选只声明 openai → openai 有 chosen，anthropic 报 no_evidence
         assert pool["protocols"]["openai"]["chosen"] == "loc"
@@ -185,12 +185,12 @@ class TestStatus:
         h = AdminHandler()
         mp_admin.handle_get_model_pools_status(h, pm2)
         _, body = h.sent[-1]
-        assert any("qwen-small" in i for i in body["pools"]["fast"]["issues"])
+        assert any("qwen-small" in i for i in body["pools"]["flash"]["issues"])
 
 
 class TestDryRun:
     def test_dry_run_openai_selects_local(self, pm):
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai"})
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai"})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
 
         status, body = h.sent[-1]
@@ -201,7 +201,7 @@ class TestDryRun:
                                         "reason": "ok"}
 
     def test_dry_run_anthropic_explains_exclusion(self, pm):
-        h = AdminHandler(body={"pool": "fast", "protocol": "anthropic"})
+        h = AdminHandler(body={"pool": "flash", "protocol": "anthropic"})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
 
         status, body = h.sent[-1]
@@ -212,10 +212,10 @@ class TestDryRun:
     def test_dry_run_vision_routes_to_vision_capable(self, registry):
         # 7.9.0：带图 dry-run 只在 vision-capable 候选中选（模型本体声明）
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"].append(
+        cfg["pools"]["flash"]["candidates"].append(
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
-        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -226,7 +226,7 @@ class TestDryRun:
                                  {"name": "qwen-vl", "model_type": "vl"}],
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai",
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai",
                                "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
@@ -234,7 +234,7 @@ class TestDryRun:
 
     def test_dry_run_vision_without_vision_capable_routes_by_priority(self, pm):
         # 7.10.0：带图 dry-run 无 vision-capable 候选 → 纯优先级正常选中
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai",
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai",
                                "vision": True})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         _, body = h.sent[-1]
@@ -251,7 +251,7 @@ class TestDryRun:
 
     def test_dry_run_zero_side_effects(self, pm):
         before = pm.pool_registry.snapshot()
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai"})
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai"})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         assert pm.pool_registry.snapshot() is before
         assert pm.dual_gate.acquired == []   # 不占限流
@@ -266,38 +266,38 @@ class TestToggleEndpoint:
     """
 
     def test_toggle_success_flips_and_increments(self, pm, tmp_path):
-        h = AdminHandler(body={"pool": "fast", "enabled": False,
+        h = AdminHandler(body={"pool": "flash", "enabled": False,
                                "expected_revision": 1})
         mp_admin.handle_post_model_pools_toggle(h, pm)
 
         status, body = h.sent[-1]
         assert status == 200
         assert body == {"status": "updated", "revision": 2,
-                        "pool": "fast", "enabled": False}
-        assert pm.pool_registry.snapshot().pools["fast"].pool.enabled is False
+                        "pool": "flash", "enabled": False}
+        assert pm.pool_registry.snapshot().pools["flash"].pool.enabled is False
         # 落盘同步（含悬空候选不丢失的原始结构）
         yaml_text = (tmp_path / "model_pools.yaml").read_text(encoding="utf-8")
         assert "enabled: false" in yaml_text
 
     def test_toggle_back_on_preserves_other_fields(self, pm):
-        h = AdminHandler(body={"pool": "fast", "enabled": True,
+        h = AdminHandler(body={"pool": "flash", "enabled": True,
                                "expected_revision": 1})
         mp_admin.handle_post_model_pools_toggle(h, pm)
         assert h.sent[-1][0] == 200
-        pool = pm.pool_registry.snapshot().pools["fast"].pool
+        pool = pm.pool_registry.snapshot().pools["flash"].pool
         assert pool.enabled is True
         assert pool.max_attempts == 2                   # 其余配置原样
         assert [c.candidate.id for c in pm.pool_registry.snapshot()
-                .pools["fast"].candidates] == ["loc", "cld"]
+                .pools["flash"].candidates] == ["loc", "cld"]
 
     def test_toggle_stale_revision_409(self, pm):
-        h = AdminHandler(body={"pool": "fast", "enabled": False,
+        h = AdminHandler(body={"pool": "flash", "enabled": False,
                                "expected_revision": 0})
         mp_admin.handle_post_model_pools_toggle(h, pm)
         status, body = h.sent[-1]
         assert status == 409
         assert body["status"] == "revision_conflict"
-        assert pm.pool_registry.snapshot().pools["fast"].pool.enabled is True
+        assert pm.pool_registry.snapshot().pools["flash"].pool.enabled is True
 
     def test_toggle_unknown_pool_404(self, pm):
         h = AdminHandler(body={"pool": "nope", "enabled": False,
@@ -308,7 +308,7 @@ class TestToggleEndpoint:
         assert body["status"] == "unknown_pool"
 
     def test_toggle_missing_fields_400(self, pm):
-        h = AdminHandler(body={"pool": "fast"})
+        h = AdminHandler(body={"pool": "flash"})
         mp_admin.handle_post_model_pools_toggle(h, pm)
         assert h.sent[-1][0] == 400
         assert pm.pool_registry.snapshot().revision == 1  # 未变更
@@ -316,7 +316,7 @@ class TestToggleEndpoint:
     def test_toggle_after_external_edit_uses_latest_raw(self, registry, tmp_path):
         # 外部编辑（无 revision 键）→ reload 拾取 → flip 基于最新原始结构
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"].append(
+        cfg["pools"]["flash"]["candidates"].append(
             {"id": "extra", "priority": 3, "kind": "cloud",
              "provider": "prov", "model_id": "cloud-m2",
              "declared_protocols": ["openai"]})
@@ -328,11 +328,11 @@ class TestToggleEndpoint:
                      local_models={"qwen-small": _local_model()},
                      cloud_models={"prov/cloud-m": object()},
                      providers={"prov": object()})
-        h = AdminHandler(body={"pool": "fast", "enabled": False,
+        h = AdminHandler(body={"pool": "flash", "enabled": False,
                                "expected_revision": registry.snapshot().revision})
         mp_admin.handle_post_model_pools_toggle(h, pm2)
         assert h.sent[-1][0] == 200
-        ids = [c.candidate.id for c in registry.snapshot().pools["fast"].candidates]
+        ids = [c.candidate.id for c in registry.snapshot().pools["flash"].candidates]
         assert "extra" in ids                           # 外部新增候选不丢失
 
 
@@ -350,7 +350,7 @@ class TestGetRuntimeState:
         assert body["configured"] is True
         assert body["load_error"] is None
         # raw 是编辑基底：含视图不回传的字段（declared_protocols）
-        raw_cand = body["raw"]["pools"]["fast"]["candidates"][0]
+        raw_cand = body["raw"]["pools"]["flash"]["candidates"][0]
         assert raw_cand["declared_protocols"] == ["openai"]
 
     def test_get_unconfigured_returns_null_raw(self, tmp_path):
@@ -399,7 +399,7 @@ class TestGetRuntimeState:
         def racing_raw_config():
             # 模拟并发 update 在 snapshot() 之后、raw_config() 之前落地
             cfg = _raw_config()
-            cfg["pools"]["fast"]["candidates"].append(
+            cfg["pools"]["flash"]["candidates"].append(
                 {"id": "racer", "priority": 9, "kind": "cloud",
                  "provider": "prov", "model_id": "cloud-x"})
             reg.update(cfg, expected_revision=reg.snapshot().revision)
@@ -430,7 +430,7 @@ class TestDryRunWithConfig:
         # 同池名，编辑态候选 ≠ 快照候选 → decisions 必须来自 config
         edited = {
             "schema_version": 1,
-            "pools": {"fast": {
+            "pools": {"flash": {
                 "enabled": True,
                 "allowed_locations": ["local"],
                 "accept_declared": True,
@@ -441,7 +441,7 @@ class TestDryRunWithConfig:
                 ],
             }},
         }
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai",
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai",
                                "config": edited})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         status, body = h.sent[-1]
@@ -451,9 +451,9 @@ class TestDryRunWithConfig:
         assert ids == ["newloc"]      # 不含快照候选 loc/cld
 
     def test_dry_run_with_config_invalid_400(self, pm):
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai",
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai",
                                "config": {"schema_version": 1,
-                                          "pools": {"fast": "not-a-map"}}})
+                                          "pools": {"flash": "not-a-map"}}})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         status, body = h.sent[-1]
         assert status == 400
@@ -469,7 +469,7 @@ class TestDryRunWithConfig:
 
     def test_dry_run_without_config_unchanged(self, pm):
         # 不传 config → 走已发布快照（既有契约）
-        h = AdminHandler(body={"pool": "fast", "protocol": "openai"})
+        h = AdminHandler(body={"pool": "flash", "protocol": "openai"})
         mp_admin.handle_post_model_pools_dry_run(h, pm)
         status, body = h.sent[-1]
         assert status == 200
@@ -484,7 +484,7 @@ class TestRuntimeEndpoint:
         status, body = h.sent[-1]
         assert status == 200
         assert body["revision"] == 1
-        cands = body["pools"]["fast"]["candidates"]
+        cands = body["pools"]["flash"]["candidates"]
         by_id = {c["id"]: c for c in cands}
         assert set(by_id) == {"loc", "cld"}
         # 本地候选：active=True（在 active_services）；云候选：active=True（已发现）
@@ -504,7 +504,7 @@ class TestRuntimeEndpoint:
         h2 = AdminHandler()
         mp_admin.handle_get_model_pools_runtime(h2, pm)
         _, body2 = h2.sent[-1]
-        c = {x["id"]: x for x in body2["pools"]["fast"]["candidates"]}["loc"]
+        c = {x["id"]: x for x in body2["pools"]["flash"]["candidates"]}["loc"]
         assert c["cooling"]["reason"] == "cooldown_401"
         assert c["cooling"]["probing"] is False
         assert c["cooling"]["remaining_s"] > 0
@@ -519,7 +519,7 @@ class TestRuntimeEndpoint:
         h = AdminHandler()
         mp_admin.handle_get_model_pools_runtime(h, pm2)
         _, body = h.sent[-1]
-        by_id = {c["id"]: c for c in body["pools"]["fast"]["candidates"]}
+        by_id = {c["id"]: c for c in body["pools"]["flash"]["candidates"]}
         assert by_id["loc"]["active"] is False
         assert by_id["cld"]["active"] is False
 
@@ -528,10 +528,10 @@ class TestRuntimeEndpoint:
         # 判定源同 selector（本地 models.d model_type=vl / 云
         # supports_vision=True）；未声明 / 未发现 / 元数据不可用 → False
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"].append(
+        cfg["pools"]["flash"]["candidates"].append(
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
-        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -546,7 +546,7 @@ class TestRuntimeEndpoint:
         h = AdminHandler()
         mp_admin.handle_get_model_pools_runtime(h, pm)
         _, body = h.sent[-1]
-        by_id = {c["id"]: c for c in body["pools"]["fast"]["candidates"]}
+        by_id = {c["id"]: c for c in body["pools"]["flash"]["candidates"]}
         assert by_id["loc"]["vision"] is False    # 本地 llm
         assert by_id["vlloc"]["vision"] is True   # 本地 model_type=vl
         assert by_id["cld"]["vision"] is True     # 云 supports_vision=True
@@ -557,7 +557,7 @@ class TestRuntimeEndpoint:
         h2 = AdminHandler()
         mp_admin.handle_get_model_pools_runtime(h2, pm2)
         _, body2 = h2.sent[-1]
-        by_id2 = {c["id"]: c for c in body2["pools"]["fast"]["candidates"]}
+        by_id2 = {c["id"]: c for c in body2["pools"]["flash"]["candidates"]}
         assert by_id2["cld"]["vision"] is False
 
     def test_runtime_endpoint_empty_registry(self, tmp_path):
@@ -579,7 +579,7 @@ class TestLatencyEventsEndpoints:
     """P3 只读端点：latency（延迟环）+ events（事件时间线）。"""
 
     def _fp(self, pm, cand_id="loc"):
-        for rc in pm.pool_registry.snapshot().pools["fast"].candidates:
+        for rc in pm.pool_registry.snapshot().pools["flash"].candidates:
             if rc.candidate.id == cand_id:
                 return rc.endpoint_fingerprint
         raise AssertionError("candidate not found")
@@ -589,14 +589,14 @@ class TestLatencyEventsEndpoints:
         from inferfabric.model_pool.history import PoolHistory
         hist = PoolHistory(clock=itertools.count(1000.0).__next__)
         for i in range(25):
-            hist.record("fast", "loc", ttft_ms=float(10 + i), total_ms=100.0,
+            hist.record("flash", "loc", ttft_ms=float(10 + i), total_ms=100.0,
                         ok=True)
         pm.pool_history = hist
         h = AdminHandler()
         mp_admin.handle_get_model_pools_latency(h, pm)
         status, body = h.sent[-1]
         assert status == 200
-        ring = body["pools"]["fast"]["loc"]
+        ring = body["pools"]["flash"]["loc"]
         assert len(ring) == 20                     # 每候选最近 20
         assert ring[0]["ttft_ms"] == 15.0          # 新在后：i=5..24
         assert ring[-1]["ttft_ms"] == 34.0
@@ -616,7 +616,7 @@ class TestLatencyEventsEndpoints:
         mp_admin.handle_get_model_pools_events(h, pm)
         status, body = h.sent[-1]
         assert status == 200
-        evs = body["pools"]["fast"]
+        evs = body["pools"]["flash"]
         assert len(evs) == 50
         e = evs[-1]
         assert e["type"] == "cooldown"
@@ -637,7 +637,7 @@ class TestLatencyEventsEndpoints:
         mp_admin.handle_get_model_pools_events(h, pm)
         status, body = h.sent[-1]
         assert status == 200
-        evs = body["pools"]["fast"]
+        evs = body["pools"]["flash"]
         assert len(evs) == 1                       # 孤儿指纹丢弃
         assert evs[0]["candidate_id"] == "loc"
         assert evs[0]["reason"] == "cooldown_403"

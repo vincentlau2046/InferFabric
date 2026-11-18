@@ -25,7 +25,7 @@ def test_off_policy_unregistered_key_passes_auth(tmp_path):
 
     async def scenario(ex):
         async with TestClient(TestServer(async_server.build_app(pm, ex, MagicMock()))) as client:
-            body = {'model': 'iff/work', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 1}
+            body = {'model': 'fabric-work', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 1}
             # 匿名（off 允许）与带未注册 key 都通过鉴权 → 都落到 unknown-pool 404
             assert (await client.post('/v1/chat/completions', json=body)).status == 404
             res = await client.post('/v1/messages', json=body,
@@ -40,7 +40,7 @@ def test_off_policy_unregistered_key_passes_auth(tmp_path):
 def test_pool_auth_protocol_headers(tmp_path, path, header):
     store = KeyStore(tmp_path / 'security.db', provision=True)
     store.set_policy('pools')
-    meta, token = store.create_key('client', ['iff/work'], None)
+    meta, token = store.create_key('client', ['fabric-work'], None)
     pm = MagicMock()
     pm.auth = SecurityAuth(AuthManager(), store)
     pm.pool_registry.snapshot.return_value.pools = {}  # Authorized requests reach unknown-pool 404.
@@ -50,14 +50,14 @@ def test_pool_auth_protocol_headers(tmp_path, path, header):
 
     async def scenario(ex):
         async with TestClient(TestServer(async_server.build_app(pm, ex, MagicMock()))) as client:
-            body = {'model': 'iff/work', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 1}
+            body = {'model': 'fabric-work', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 1}
             assert (await client.post(path, json=body)).status == 401
             headers = {header: ('Bearer ' if header == 'Authorization' else '') + token}
             assert (await client.post(path, json=body, headers=headers)).status == 404
-            body['model'] = 'iff/other'
+            body['model'] = 'fabric-other'
             assert (await client.post(path, json=body, headers=headers)).status == 401
             store.revoke_key(meta['id'])
-            body['model'] = 'iff/work'
+            body['model'] = 'fabric-work'
             assert (await client.post(path, json=body, headers=headers)).status == 401
     with ThreadPoolExecutor(max_workers=2) as ex:
         asyncio.run(scenario(ex))

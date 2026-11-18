@@ -71,7 +71,7 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
             status, _, _ = await request('POST', '/admin/keys', {'name': 'denied'}, {'X-CSRF-Token': ''})
             assert status == 401
             status, response_headers, result = await request('POST', '/admin/keys',
-                                                              {'name': 'tool', 'models': ['iff/work']})
+                                                              {'name': 'tool', 'models': ['fabric-work']})
             assert status == 201 and response_headers['Cache-Control'] == 'no-store'
             token, entry = result['key'], result['entry']
             status, _, result = await request('GET', '/admin/keys')
@@ -83,13 +83,13 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
                         {'policy': policy, 'confirm': policy, 'confirm_all': True})
                 assert status == 200
                 for path in ('/v1/chat/completions', '/v1/messages'):
-                    body = {'model': 'iff/work', 'messages': [{'role': 'user', 'content': 'test'}], 'max_tokens': 1}
+                    body = {'model': 'fabric-work', 'messages': [{'role': 'user', 'content': 'test'}], 'max_tokens': 1}
                     status, _, _ = await request('POST', path, body)
                     assert status == (404 if policy == 'off' else 401)
                     status, _, _ = await request('POST', path, body, {'x-api-key': token})
                     assert status == 404  # Real auth passed; no actual pool/backend configured.
             assert (await request('POST', '/admin/keys/revoke', {'id': entry['id']}))[0] == 200
-            status, _, _ = await request('POST', '/v1/messages', {'model': 'iff/work'}, {'x-api-key': token})
+            status, _, _ = await request('POST', '/v1/messages', {'model': 'fabric-work'}, {'x-api-key': token})
             assert status == 401
             assert (await request('POST', '/admin/keys/logout', {}))[0] == 200
             assert (await request('GET', '/admin/keys'))[0] == 401

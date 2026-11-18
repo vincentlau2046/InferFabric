@@ -224,16 +224,16 @@ class TestValidationIssues:
         assert any("kind" in i for i in issues)
 
     def test_candidate_target_referencing_pool_namespace(self):
-        # 池引用池（递归）禁止
+        # 池引用池（递归）禁止 — v2 命名空间硬切 fabric-（原 iff/）
         raw = _raw_file()
         raw["pools"]["fast"]["candidates"][0] = {
             "id": "c1", "priority": 1, "kind": "cloud",
-            "provider": "p", "model_id": "iff/other",
+            "provider": "p", "model_id": "fabric-fast",
         }
         cfg, issues = load_pools_dict(raw, current_revision=0)
 
         assert cfg is None
-        assert any("iff/" in i for i in issues)
+        assert any("fabric-" in i for i in issues)
 
     def test_cross_location_requires_both_locations(self):
         raw = _raw_file()

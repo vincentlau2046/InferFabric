@@ -1,4 +1,4 @@
-"""model_pool.dispatch — Anthropic /v1/messages 入口 iff/ 池调度（fake pm）。"""
+"""model_pool.dispatch — Anthropic /v1/messages 入口 fabric- 池调度（fake pm）。"""
 
 import time
 from types import SimpleNamespace
@@ -32,7 +32,7 @@ class FakeMessagesHandler(FakeHandler):
 def _raw_config_anthropic():
     """候选声明 anthropic 协议（与 OpenAI 测试夹具同构、协议不同）。"""
     cfg = _raw_config()
-    for c in cfg["pools"]["fast"]["candidates"]:
+    for c in cfg["pools"]["flash"]["candidates"]:
         c["declared_protocols"] = ["anthropic"]
     return cfg
 
@@ -70,17 +70,17 @@ class TestPoolMessagesDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert len(anth_local) == 1
-        assert anth_local[0]["original"] == "iff/fast"
+        assert anth_local[0]["original"] == "fabric-fast"
         assert anth_local[0]["model_obj"].served_name == "qwen-small"
         assert pm.ensure_service_calls == []          # ready_only
-        assert pm.dual_gate.acquired[:1] == ["iff/fast"]  # 外层逻辑名 gate
+        assert pm.dual_gate.acquired[:1] == ["fabric-fast"]  # 外层逻辑名 gate
         assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理目标 gate（acquire_target，终审 #8）
         assert h.sent == []
-        assert any(getattr(e, "route", None) == "pool:fast/local:qwen-small"
+        assert any(getattr(e, "route", None) == "pool:flash/local:qwen-small"
                    and getattr(e, "model", None) == "qwen-small"  # 物理模型（终审 #15）
                    for e in pm.logger.entries)
 
@@ -95,7 +95,7 @@ class TestPoolMessagesDispatch:
 
         # 跨位置回退显式开启（终审 #2：本地未就绪不落云是默认行为）
         cfg = _raw_config_anthropic()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         pm = FakePM(registry, active=set(),
@@ -104,18 +104,18 @@ class TestPoolMessagesDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert anth_local == []
         assert cloud_calls == [{"model": "cloud-m", "protocol": "anthropic"}]
 
     def test_anthropic_error_envelope_shape(self, registry):
         pm = FakePM(registry, active=set(), local_models={}, cloud_models={})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         status, body, hdrs = h.sent[-1]
         # Anthropic 错误信封：type=error + error{type,message}
         assert status == 503
@@ -127,9 +127,9 @@ class TestPoolMessagesDispatch:
     def test_unknown_pool_404_anthropic_envelope(self, registry):
         pm = FakePM(registry)
         h = FakeMessagesHandler()
-        data = {"model": "iff/nope", "messages": []}
+        data = {"model": "fabric-nope", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/nope") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-nope") is True
         status, body, _ = h.sent[-1]
         assert status == 404
         assert body == {"type": "error",
@@ -138,9 +138,9 @@ class TestPoolMessagesDispatch:
     def test_auth_rejected_401_anthropic_envelope(self, registry):
         pm = FakePM(registry, auth=FakeAuth(models=["other"], name="guest"))
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         status, body, _ = h.sent[-1]
         assert status == 401
         assert body["error"]["type"] == "authentication_error"
@@ -148,7 +148,7 @@ class TestPoolMessagesDispatch:
     def test_protocol_mismatch_400_invalid_request(self, registry):
         # 池只有 openai 声明候选 → anthropic 入站无兼容
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"] = [
+        cfg["pools"]["flash"]["candidates"] = [
             {"id": "cld", "priority": 1, "kind": "cloud",
              "provider": "prov", "model_id": "cloud-m",
              "declared_protocols": ["openai"]}]
@@ -158,9 +158,9 @@ class TestPoolMessagesDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["error"]["type"] == "invalid_request_error"
@@ -179,9 +179,9 @@ class TestPoolMessagesDispatch:
         pm.mgr.state = SimpleNamespace(
             get=lambda key, default="": "SWITCHING" if key == "profile_state" else default)
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert len(anth_local) == 1
 
     def test_anthropic_vision_no_vision_capable_routes_by_priority(
@@ -189,7 +189,7 @@ class TestPoolMessagesDispatch:
         # 7.10.0：池内候选模型本体均无视觉 → 带图请求按优先级正常
         # 调用本地 p1（是否支持由模型/provider 自身处理；遗留 features 忽略）
         cfg = _raw_config_anthropic()
-        for c in cfg["pools"]["fast"]["candidates"]:
+        for c in cfg["pools"]["flash"]["candidates"]:
             c["features"] = ["vision"]   # 遗留声明 — 读时忽略
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
@@ -198,22 +198,22 @@ class TestPoolMessagesDispatch:
                     cloud_models={"prov/cloud-m": SimpleNamespace(
                         supports_vision=None)})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": [
+        data = {"model": "fabric-fast", "messages": [
             {"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "data": "x"}},
             ]}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert len(anth_local) == 1              # 正常转发本地 p1
         assert h.sent == []                      # 无错误信封
 
     def test_anthropic_vision_routes_to_vision_capable(self, registry, anth_local):
         # 带图请求落到 model_type=vl 的本地候选（anthropic 直通路径）
         cfg = _raw_config_anthropic()
-        cfg["pools"]["fast"]["candidates"].append(
+        cfg["pools"]["flash"]["candidates"].append(
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["anthropic"]})
-        cfg["pools"]["fast"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -223,12 +223,12 @@ class TestPoolMessagesDispatch:
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": [
+        data = {"model": "fabric-fast", "messages": [
             {"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "data": "x"}},
             ]}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert len(anth_local) == 1
         assert anth_local[0]["model_obj"].served_name == "qwen-vl"
 
@@ -237,10 +237,10 @@ class TestPoolMessagesDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": [],
+        data = {"model": "fabric-fast", "messages": [],
                 "tools": [{"name": "t", "input_schema": {}}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert len(anth_local) == 1
 
 
@@ -274,7 +274,7 @@ class TestParallelToolUseFailover:
         monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         cfg = _raw_config_anthropic()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
@@ -283,9 +283,9 @@ class TestParallelToolUseFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert cloud_calls == [{"model": "cloud-m", "protocol": "anthropic"}]
         assert h.sent == []                      # 成功路径无错误信封
 
@@ -295,7 +295,7 @@ class TestParallelToolUseFailover:
         monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local", fake_local)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         cfg = _raw_config_anthropic()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
@@ -304,9 +304,9 @@ class TestParallelToolUseFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         assert cloud_calls == []
         status, body, _ = h.sent[-1]
         assert status == 400
@@ -327,9 +327,9 @@ class TestParallelToolUseFailover:
                     local_models={"qwen-small": _local_model()},
                     cloud_models={}, providers={})
         h = FakeMessagesHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
         status, body, _ = h.sent[-1]
         assert status == 503
         assert body["type"] == "error"
