@@ -14,6 +14,8 @@
 全部纯逻辑（tmp_path / fake run / 构造 config），无 docker/conda/GPU 依赖。
 """
 
+import urllib.error
+
 import yaml
 import pytest
 
@@ -47,8 +49,15 @@ def _model(served_name="", vllm=None, sglang=None, ninfer=None,
     return m
 
 
-def _run_map(responses, digests=None):
-    """fake run：按 argv 关键字匹配预设 (rc, stderr)；digests 模拟 digest inspect。"""
+def _no_proxy(monkeypatch):
+    """force the no-live-registry path (connection refused semantics)."""
+    def _boom(*a, **k):
+        raise urllib.error.URLError("proxy down")
+    monkeypatch.setattr(un, "_admin_request", _boom)
+
+
+def _run_map(responses, digests=None, ids=None):
+    """fake run：按 argv 关键字匹配预设；digests/ids 模拟 inspect 的 --format 输出。"""
     calls = []
 
     class R:
@@ -60,6 +69,8 @@ def _run_map(responses, digests=None):
     def run(cmd, **kw):
         calls.append(list(cmd))
         if "--format" in cmd:
+            if "{{.Id}}" in cmd:
+                return R(0, "", (ids or {}).get(cmd[-1], ""))
             return R(0, "", (digests or {}).get(cmd[-1], ""))
         for key, (rc, err) in responses.items():
             if key in cmd:
@@ -144,20 +155,93 @@ class TestPoolCandidates:
         assert rows == [{"pool": "fast", "candidate_id": "a", "model_name": "m1"}]
         assert pool_refs(tmp_path / "absent.yaml", {"m1"}) == []
 
-    def test_purge_removes_matching_keeps_rest_and_bumps_revision(self, tmp_path):
+    def test_purge_removes_matching_keeps_rest_and_bumps_revision(
+            self, tmp_path, monkeypatch):
+        _no_proxy(monkeypatch)
         p = _write_pools(tmp_path / "pools.yaml")
-        removed = purge_pool_candidates(p, {"m1"})
-        assert removed == [{"pool": "fast", "candidate_id": "a", "model_name": "m1"}]
+        res = purge_pool_candidates(p, {"m1"})
+        assert res["removed"] == [{"pool": "fast", "candidate_id": "a", "model_name": "m1"}]
+        assert res["reload"]["status"] == "pending"
         raw = yaml.safe_load(p.read_text())
         assert raw["revision"] == 5
         ids = [c["id"] for pool in raw["pools"].values() for c in pool["candidates"]]
         assert ids == ["b", "c"]            # 云候选与他池候选原样保留
 
-    def test_purge_no_match_is_noop_no_write(self, tmp_path):
+    def test_purge_no_match_is_noop_no_write(self, tmp_path, monkeypatch):
+        _no_proxy(monkeypatch)
         p = _write_pools(tmp_path / "pools.yaml")
         before = p.read_text()
-        assert purge_pool_candidates(p, {"nope"}) == []
+        res = purge_pool_candidates(p, {"nope"})
+        assert res["removed"] == [] and res["reload"]["status"] == "noop"
         assert p.read_text() == before
+
+    def test_unreadable_pool_config_fails_closed(self, tmp_path):
+        from inferfabric.uninstaller import PoolsConfigError
+        p = tmp_path / "pools.yaml"
+        p.write_text("pools: [unclosed\n")
+        with pytest.raises(PoolsConfigError):
+            pool_refs(p, {"m1"})
+        with pytest.raises(PoolsConfigError):
+            purge_pool_candidates(p, {"m1"})
+
+    def test_non_mapping_pool_config_fails_closed(self, tmp_path):
+        from inferfabric.uninstaller import PoolsConfigError
+        p = tmp_path / "pools.yaml"
+        p.write_text("- just\n- a list\n")
+        with pytest.raises(PoolsConfigError):
+            pool_refs(p, {"m1"})
+
+    def test_bad_admin_json_fails_closed_no_local_write(
+            self, tmp_path, monkeypatch):
+        from inferfabric.uninstaller import PoolsConfigError
+        p = _write_pools(tmp_path / "pools.yaml")
+        before = p.read_text()
+        monkeypatch.setattr(
+            un, "_admin_request",
+            lambda *a, **k: (_ for _ in ()).throw(ValueError("bad json")))
+        with pytest.raises(PoolsConfigError):
+            purge_pool_candidates(p, {"m1"})
+        assert p.read_text() == before      # 活 registry 在跑时绝不本地偷写
+
+    def test_purge_uses_live_registry_cas(self, tmp_path, monkeypatch):
+        p = _write_pools(tmp_path / "pools.yaml")
+        calls = []
+
+        def fake_admin(method, path, **kw):
+            calls.append((method, kw.get("payload")))
+            if method == "GET":
+                return 200, {"revision": 4, "raw": yaml.safe_load(p.read_text())}
+            return 200, {"status": "updated", "revision": 5}
+
+        monkeypatch.setattr(un, "_admin_request", fake_admin)
+        res = purge_pool_candidates(p, {"m1"})
+        assert res["removed"][0]["candidate_id"] == "a"
+        assert res["reload"] == {"status": "applied-live", "revision": 5}
+        put_payload = calls[-1][1]
+        assert put_payload["expected_revision"] == 4     # CAS 基点=live revision
+        assert "revision" not in put_payload   # registry 管理 revision，不落盘旧值
+        # live 模式不本地写盘：文件仍由 proxy 的 registry 持久化
+        assert len(yaml.safe_load(p.read_text())["pools"]["fast"]["candidates"]) == 2
+
+    def test_purge_cas_conflict_refreshes_once(self, tmp_path, monkeypatch):
+        p = _write_pools(tmp_path / "pools.yaml")
+        state = {"gets": 0, "puts": 0}
+
+        def fake_admin(method, path, **kw):
+            if method == "GET":
+                state["gets"] += 1
+                return 200, {"revision": 4 + state["gets"] - 1,
+                             "raw": yaml.safe_load(p.read_text())}
+            state["puts"] += 1
+            if state["puts"] == 1:
+                raise urllib.error.HTTPError(path, 409, "conflict", {}, None)
+            assert kw["payload"]["expected_revision"] == 5
+            return 200, {"status": "updated", "revision": 6}
+
+        monkeypatch.setattr(un, "_admin_request", fake_admin)
+        res = purge_pool_candidates(p, {"m1"})
+        assert res["reload"] == {"status": "applied-live", "revision": 6}
+        assert state == {"gets": 2, "puts": 2}
 
 
 # ── 模型卸载 ──────────────────────────────────────────────────
@@ -225,7 +309,8 @@ class TestRemoveModel:
         assert (mdir / "m1.yaml").exists()
         assert len(yaml.safe_load(pools.read_text())["pools"]["fast"]["candidates"]) == 2
 
-    def test_purge_pools_clears_candidates_then_removes(self, tmp_path):
+    def test_purge_pools_clears_candidates_then_removes(self, tmp_path, monkeypatch):
+        _no_proxy(monkeypatch)
         models, mdir = _model_env(tmp_path)
         pools = _write_pools(tmp_path / "pools.yaml")
         report = remove_model("m1", models=models, models_dir=mdir,
@@ -235,6 +320,21 @@ class TestRemoveModel:
         assert not (mdir / "m1.yaml").exists()
         raw = yaml.safe_load(pools.read_text())
         assert [c["id"] for c in raw["pools"]["fast"]["candidates"]] == ["b"]
+        reload_action = [a for a in report["actions"] if a["action"] == "pool-reload"]
+        assert reload_action and reload_action[0]["status"] == "pending"
+
+    def test_unreadable_pools_abort_before_any_side_effect(self, tmp_path):
+        models, mdir = _model_env(tmp_path)
+        pools = tmp_path / "pools.yaml"
+        pools.write_text("pools: [unclosed\n")
+        stops = []
+        report = remove_model("m1", models=models, models_dir=mdir,
+                              pools_path=pools, purge_pools=True,
+                              stop_fn=lambda: stops.append(1) or {"status": "stopped"},
+                              is_running_fn=lambda: True)
+        assert report["status"] == "error"
+        assert "pool reference gate unavailable" in report["message"]
+        assert stops == [] and (mdir / "m1.yaml").exists()
 
     def test_unknown_model_error(self, tmp_path):
         assert remove_model("nope", models={}, models_dir=tmp_path)["status"] == "error"
@@ -287,14 +387,16 @@ class TestRemoveEnv:
         assert "in use" in report["message"]
         assert (root / "orphan").exists()
 
-    def test_missing_conda_requires_force(self, tmp_path):
+    def test_missing_conda_requires_force(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(un.shutil, "which", lambda *a, **k: None)
         root = self._root(tmp_path)
         report = remove_env("orphan", models={}, envs_root=root, conda_bin=None)
         assert report["status"] == "error"
         assert "--force" in report["message"]
         assert (root / "orphan").exists()
 
-    def test_force_rmtree_when_conda_missing(self, tmp_path):
+    def test_force_rmtree_when_conda_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(un.shutil, "which", lambda *a, **k: None)
         root = self._root(tmp_path)
         (root / "orphan" / "bin").mkdir()
         report = remove_env("orphan", models={}, envs_root=root,
@@ -313,6 +415,35 @@ class TestRemoveEnv:
         report = remove_env("ghost", models={}, envs_root=root)
         assert report["status"] == "error"
         assert "does not exist" in report["message"]
+
+    def test_default_root_is_project_env_dir_not_user_conda(
+            self, tmp_path, monkeypatch):
+        """issue #3：删的是 <IFF_DATA_DIR>/envs 下的项目前缀；用户级
+        ~/miniconda3/envs 只读遗留。"""
+        import inferfabric.config as cfg
+        data = tmp_path / "data"
+        (data / "envs" / "orphan").mkdir(parents=True)
+        monkeypatch.setattr(cfg, "IFF_DATA_DIR", data)
+        run = _run_map({})
+        report = remove_env("orphan", models={}, run=run,
+                            conda_bin="/usr/bin/conda")
+        assert report["status"] == "removed"
+        assert ["/usr/bin/conda", "env", "remove", "-p",
+                str(data / "envs" / "orphan"), "-y"] in run.calls
+
+    def test_user_level_conda_env_is_not_removable(self, tmp_path, monkeypatch):
+        import inferfabric.config as cfg
+        data = tmp_path / "data"
+        data.mkdir()
+        legacy = tmp_path / "miniconda3" / "envs" / "orphan"
+        legacy.mkdir(parents=True)
+        monkeypatch.setattr(cfg, "IFF_DATA_DIR", data)
+        run = _run_map({})
+        report = remove_env("orphan", models={}, run=run,
+                            conda_bin="/usr/bin/conda")
+        assert report["status"] == "error"
+        assert "read-only legacy" in report["message"]
+        assert legacy.exists() and run.calls == []
 
 
 # ── 镜像卸载 ──────────────────────────────────────────────────
@@ -342,9 +473,35 @@ class TestRemoveImage:
         run = _run_map({})
         report = remove_image("vllm:v1", models={}, ledger=led, run=run)
         assert report["status"] == "blocked"
-        assert "digest" in report["message"]
+        assert "identity" in report["message"]
         assert not any("rmi" in c for c in run.calls)
         assert led.refs() == {"vllm:v1"}
+
+    def test_dry_run_unverifiable_is_blocked_not_would_remove(self, tmp_path):
+        """dry-run 必须是忠实计划：执行会 blocked 的条目不得报 would-remove。"""
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("vllm:v1", now=1.0)
+        run = _run_map({})
+        report = remove_image("vllm:v1", models={}, ledger=led, run=run, dry_run=True)
+        assert report["status"] == "blocked"
+        assert run.calls == []
+
+    def test_locally_built_image_removable_by_image_id(self, tmp_path):
+        """本地构建镜像无 RepoDigests → 台账记 .Id，仍可在复核后删除。"""
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("ninfer:local", digest="sha256:localid", now=1.0)
+        run = _run_map({}, ids={"ninfer:local": "sha256:localid"})
+        report = remove_image("ninfer:local", models={}, ledger=led, run=run)
+        assert report["status"] == "removed"
+        assert ["docker", "rmi", "ninfer:local"] in run.calls
+
+    def test_local_image_id_changed_refused(self, tmp_path):
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("ninfer:local", digest="sha256:oldid", now=1.0)
+        run = _run_map({}, ids={"ninfer:local": "sha256:newid"})
+        report = remove_image("ninfer:local", models={}, ledger=led, run=run)
+        assert report["status"] == "blocked"
+        assert not any("rmi" in c for c in run.calls)
 
     def test_digest_changed_refused(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
@@ -352,7 +509,7 @@ class TestRemoveImage:
         run = _run_map({}, digests={"vllm:v1": "repo@sha256:new"})
         report = remove_image("vllm:v1", models={}, ledger=led, run=run)
         assert report["status"] == "blocked"
-        assert "digest changed" in report["message"]
+        assert "identity changed" in report["message"]
         assert not any("rmi" in c for c in run.calls)
 
     def test_dry_run_no_calls(self, tmp_path):
@@ -401,3 +558,50 @@ class TestCmdRemove:
             cmd_remove(["model", "ghost"])
         assert ei.value.code == 1
         assert "unknown model" in capsys.readouterr().out
+
+class TestCmdRemoveFlow:
+    """两段式 CLI：--dry-run 退出 0、无 --yes 退出 1、--yes 执行。"""
+
+    def _setup(self, monkeypatch, tmp_path):
+        import inferfabric.cli as cli
+        import inferfabric.config as cfg
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "m1.yaml").write_text("name: m1\ntype: vllm\n")
+        models = {"m1": _model(served_name="m1")}
+
+        class FakeMgr:
+            active_services = {}
+            def stop_service(self, name):
+                raise AssertionError("dry-run must not stop services")
+
+        monkeypatch.setattr(cfg, "load_models", lambda *a, **k: models)
+        monkeypatch.setattr(cfg, "MODELS_DIR", mdir)
+        monkeypatch.setattr(cfg, "IFF_DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        return cli, mdir
+
+    def test_dry_run_exits_0_without_side_effects(self, monkeypatch, tmp_path):
+        cli, mdir = self._setup(monkeypatch, tmp_path)
+        cli.cmd_remove(["model", "m1", "--dry-run"])   # 正常返回 ⇒ exit 0
+        assert (mdir / "m1.yaml").exists()
+
+    def test_plan_without_yes_exits_1_without_side_effects(self, monkeypatch, tmp_path):
+        cli, mdir = self._setup(monkeypatch, tmp_path)
+        with pytest.raises(SystemExit) as ei:
+            cli.cmd_remove(["model", "m1"])
+        assert ei.value.code == 1
+        assert (mdir / "m1.yaml").exists()
+
+    def test_yes_executes(self, monkeypatch, tmp_path):
+        cli, mdir = self._setup(monkeypatch, tmp_path)
+
+        class FakeMgr:
+            active_services = {"m1": True}
+            def stop_service(self, name):
+                self.stopped = name
+                return {"status": "stopped"}
+
+        monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        cli.cmd_remove(["model", "m1", "--yes"])
+        assert not (mdir / "m1.yaml").exists()

@@ -191,9 +191,10 @@ def record_image(image: str, *, ledger: ManagedImageLedger | None = None,
 def image_digest(image: str, run=None) -> str | None:
     """Current repo digest of `image` (`repo@sha256:…`), None if unavailable.
 
-    This is the removable-image key: the ledger records it at pull time and
-    prune re-reads it before `rmi`, so a repointed tag is skipped instead of
-    deleting an image the ledger never saw.
+    This is the preferred removable-image key: the ledger records it at pull
+    time and prune re-reads it before `rmi`, so a repointed tag is skipped
+    instead of deleting an image the ledger never saw. Locally built images
+    have no RepoDigests — see ``image_identity``.
     """
     run = run or subprocess.run
     try:
@@ -207,6 +208,36 @@ def image_digest(image: str, run=None) -> str | None:
         return None
     d = (getattr(r, "stdout", "") or "").strip()
     return d or None
+
+
+def image_id(image: str, run=None) -> str | None:
+    """Local image ID (`sha256:…`), None if unavailable.
+
+    Key for locally built images: `docker build` produces no RepoDigests, so
+    a digest-only key would make every local image permanently unremovable.
+    """
+    run = run or subprocess.run
+    try:
+        r = run(["docker", "image", "inspect", "--format", "{{.Id}}", image],
+                capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        log.warning("image id inspect failed for %s: %s", image, e)
+        return None
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    i = (getattr(r, "stdout", "") or "").strip()
+    return i or None
+
+
+def image_identity_value(image: str, run=None) -> str | None:
+    """Removable identity: repo digest if present, else local image ID.
+
+    One string covers both cases; `repo@sha256:…` means pulled (digest),
+    bare `sha256:…` means locally built (image ID). Verification and prune
+    compare the full string, so a re-pull/re-tag changing the kind is a
+    mismatch (skipped), never a silent deletion.
+    """
+    return image_digest(image, run) or image_id(image, run)
 
 
 def ensure_image_pulled(image: str, *, ledger: ManagedImageLedger | None = None,
@@ -223,7 +254,7 @@ def ensure_image_pulled(image: str, *, ledger: ManagedImageLedger | None = None,
                 capture_output=True, text=True, timeout=30)
         if r.returncode == 0:
             record_image(image, ledger=ledger, data_dir=data_dir,
-                         digest=image_digest(image, run))
+                         digest=image_identity_value(image, run))
             return {"status": "ok", "pulled": False, "image": image}
     except Exception as e:
         log.warning("image inspect failed for %s: %s", image, e)
@@ -232,7 +263,7 @@ def ensure_image_pulled(image: str, *, ledger: ManagedImageLedger | None = None,
                 capture_output=True, text=True, timeout=timeout)
         if r.returncode == 0:
             record_image(image, ledger=ledger, data_dir=data_dir,
-                         digest=image_digest(image, run))
+                         digest=image_identity_value(image, run))
             return {"status": "ok", "pulled": True, "image": image}
         log.warning("docker pull failed for %s (rc=%d): %s",
                     image, r.returncode, (r.stderr or "").strip())
@@ -262,10 +293,12 @@ def prune_managed(ledger: ManagedImageLedger, referenced: set[str], *,
     Invariants (issue #3 L3b):
     - never issues `docker image prune` (global cleanup stays impossible);
     - refs in `referenced` (any models.d config) are always kept;
-    - **digest gate**: before `rmi`, the current repo digest is re-read and
-      must equal the digest recorded at pull time. A repointed tag →
-      `action: "skipped", reason: "digest changed"` and the entry stays in
-      the ledger; an entry without a recorded digest is likewise skipped
+    - **identity gate**: before `rmi`, the current identity is re-read and
+      must equal the one recorded at pull/build time (repo digest for pulled
+      images, local image ID for locally built ones — see `image_identity_value`).
+      A repointed tag →
+      `action: "skipped", reason: "identity changed"` and the entry stays in
+      the ledger; an entry without a recorded identity is likewise skipped
       ("unverifiable") — we never delete what we cannot prove is ours;
     - rmi failures are fail-visible in the report and the ref STAYS in the
       ledger (an image we cannot remove remains our responsibility);
@@ -287,10 +320,10 @@ def prune_managed(ledger: ManagedImageLedger, referenced: set[str], *,
             report.append({"ref": ref, "action": "skipped",
                            "reason": "no digest recorded (unverifiable)"})
             continue
-        current = image_digest(ref, run)
+        current = image_identity_value(ref, run)
         if current != want:
             report.append({"ref": ref, "action": "skipped",
-                           "reason": f"digest changed (ledger {want!r} != "
+                           "reason": f"identity changed (ledger {want!r} != "
                                      f"current {current!r})"})
             continue
         try:

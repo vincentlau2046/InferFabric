@@ -550,12 +550,14 @@ def _print_remove_report(report: dict) -> None:
     print(f"{icon} {status}: {kind}")
     if report.get("message"):
         print(f"  {report['message']}")
-    for k in ("prefix", "pool_refs", "referenced_by"):
+    for k in ("prefix", "pool_refs", "referenced_by", "scenario_refs"):
         if report.get(k):
             print(f"  {k}: {report[k]}")
     for a in report.get("actions") or []:
         detail = a.get("path") or a.get("prefix") or a.get("ref") or \
-            a.get("candidates") or a.get("reason") or ""
+            a.get("candidates") or a.get("reason") or a.get("detail") or ""
+        if a.get("action") == "pool-reload":
+            detail = f"{a.get('status')} ({detail})"
         print(f"  - {a.get('action')}: {detail}")
     for w in report.get("weights_kept") or []:
         print(f"  weights kept: {w}")
@@ -600,6 +602,7 @@ def cmd_remove(args):
         report = un.remove_model(
             target, models=models, models_dir=MODELS_DIR,
             pools_path=IFF_DATA_DIR / "model_pools.yaml",
+            applied_scenarios_path=IFF_DATA_DIR / "active_scenarios.yaml",
             stop_fn=(lambda: mgr.stop_service(name)),
             is_running_fn=(lambda: name in mgr.active_services),
             purge_pools=purge_pools, dry_run=plan_only)
