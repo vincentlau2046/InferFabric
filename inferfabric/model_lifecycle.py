@@ -29,12 +29,24 @@ def check_vram_budget(model, telemetry) -> dict | None:
 
     Reads one snapshot via the injected telemetry and applies the existing
     peak_vram_mb / typical_vram_pct rules against the 97% budget. Returns
-    an error dict on violation or when the reading is unavailable
+    an error dict on violation or when telemetry is absent/unavailable
     (fail-closed: missing telemetry never passes an allocation), and None
     when the allocation may proceed. Callers keep their existing bypasses
     (gpu-none models, already-running engines) upstream of this check.
     """
+    # fail-closed：direct construction 默认 device_telemetry=None（测试/嵌入
+    # 方）时必须显式拒绝 —— 文档承诺的语义由代码保证，不靠注入方自觉。
+    if telemetry is None:
+        msg = ("device memory telemetry unavailable — VRAM admission "
+               "refused (fail-closed)")
+        log.warning(msg)
+        return {"status": "error", "message": msg}
     s = telemetry.snapshot()
+    if s is None:
+        msg = ("device memory telemetry returned no snapshot — VRAM "
+               "admission refused (fail-closed)")
+        log.warning(msg)
+        return {"status": "error", "message": msg}
     if s.memory_kind == "unified":
         # Apple: ledger R1 admission (_admit_memory) owns the budget —
         # CUDA VRAM arithmetic does not apply (§14.2).
@@ -147,7 +159,9 @@ class ModelLifecycle:
         # 幸存引擎在场时跳过 —— gpu-reset 会摧毁加载中/健在的容器（15min 冷启）。
         if (not engine_present and GPU_AUTO_CLEAR_CUDA_STATE
                 and model.is_exclusive and target_mode == GPUMode.EXCLUSIVE):
-            self._proc.clear_gpu_cuda_state()
+            # force=True：刚刚停掉重服务，残留显存是预期状态（PR #5 评审：
+            # 非 force 的占用门禁会把"正是需要清理时"的 gpu-clear 拒掉）
+            self._proc.clear_gpu_cuda_state(force=True)
 
         # PR-1: VRAM budget guard — reject if peak would exceed 97% of GPU
         # (95% was too tight: bge-m3 ~480MB + peak_vram_mb leaves <10MB margin)
@@ -350,7 +364,8 @@ class ModelLifecycle:
         # fragmented memory. Clearing here prevents allocation failures
         # when the new model tries to allocate its KV cache.
         if GPU_AUTO_CLEAR_CUDA_STATE:
-            self._proc.clear_gpu_cuda_state()
+            # force=True：旧引擎刚退出，残留是预期状态（同 P1-6 语义）
+            self._proc.clear_gpu_cuda_state(force=True)
 
         # Deploy the new model
         result = self._deploy_model(model, GPUMode.EXCLUSIVE)
@@ -474,7 +489,7 @@ class ModelLifecycle:
                 if any(m.is_comfyui or m.is_vllm or m.is_sglang
                        for svc in from_services if (m := self._models.get(svc))):
                     # only clear if GPU had a heavy service running
-                    self._proc.clear_gpu_cuda_state()
+                    self._proc.clear_gpu_cuda_state(force=True)
 
             # Update state
             self.state.set_multi({

@@ -49,9 +49,11 @@ class FakeControl:
     def __init__(self, result):
         self.result = result
         self.called = 0
+        self.forces = []
 
-    def reset(self):
+    def reset(self, force=False):
         self.called += 1
+        self.forces.append(force)
         return self.result
 
 
@@ -141,6 +143,16 @@ def test_pct_guard_fails_closed_when_unavailable():
     assert d is not None and d["status"] == "error"
 
 
+def test_guard_fails_closed_on_none_telemetry():
+    """Review finding: `ModelLifecycle` 默认 device_telemetry=None 时，
+    守卫必须返回 fail-closed error dict，而不是 AttributeError 炸掉部署路径
+    （文档承诺的语义由代码保证）。"""
+    from inferfabric.model_lifecycle import check_vram_budget
+    d = check_vram_budget(_model(peak_vram_mb=4000), None)
+    assert d is not None and d["status"] == "error"
+    assert "fail-closed" in d["message"]
+
+
 # ── manager status: device + legacy fields from ONE snapshot ─────
 
 def _make_manager(tmp_path, snapshot):
@@ -207,6 +219,7 @@ def test_clear_gpu_cuda_state_routes_through_device_control(tmp_path):
                           device_control=ctrl)
     r = proc.clear_gpu_cuda_state(force=True)
     assert ctrl.called == 1
+    assert ctrl.forces == [True]        # force 传到 DeviceControl（占用门禁豁免）
     assert r["status"] == "ok" and r["method"] == "gpu-reset"
 
 

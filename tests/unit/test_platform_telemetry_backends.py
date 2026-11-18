@@ -259,6 +259,78 @@ def test_reset_scoped_success_and_fallback_order():
     assert "--gpu-reset" in calls[1]
 
 
+def test_non_force_reset_refuses_busy_target_card():
+    """非 force：目标卡有占用 → 拒绝，零 reset 命令（门禁保留给一般调用方）。"""
+    from inferfabric.platform.nvidia_telemetry import NvidiaDeviceControl
+    calls = []
+
+    def run(cmd, **k):
+        calls.append(list(cmd))
+        if "memory.used" in cmd[1]:
+            return _Result(0, "4000\n")   # 单卡 4000 MB > 2048
+        return _Result(0, "")
+
+    r = NvidiaDeviceControl(run=run, gpu_index=0).reset()
+    assert not r.ok and "busy" in r.message
+    assert not any("--gpu-reset" in c or "-pm" in c for c in calls)
+
+
+def test_force_reset_bypasses_target_busy_gate():
+    """force=True（操作员 gpu-clear / 停后残留清理）→ 目标卡有占用也执行 scoped reset。"""
+    from inferfabric.platform.nvidia_telemetry import NvidiaDeviceControl
+    calls = []
+
+    def run(cmd, **k):
+        calls.append(list(cmd))
+        if "memory.used" in cmd[1]:
+            return _Result(0, "12000\n")
+        if "--gpu-reset" in cmd:
+            return _Result(0, "")
+        return _Result(0, "")
+
+    r = NvidiaDeviceControl(run=run, gpu_index=0).reset(force=True)
+    assert r.ok and r.status == "ok"
+    assert any("--gpu-reset" in c for c in calls)
+
+
+def test_force_never_widens_scope_when_other_card_busy():
+    """force 只放宽目标卡占用门禁；未限定范围的 fallback 仍要求其他卡空闲。"""
+    from inferfabric.platform.nvidia_telemetry import NvidiaDeviceControl
+    calls = []
+
+    def run(cmd, **k):
+        calls.append(" ".join(cmd))
+        if "memory.used" in cmd[1]:
+            return _Result(0, "12000\n9000\n")   # 两卡都忙
+        if "--gpu-reset" in cmd:
+            return _Result(1, "", "reset failed")
+        return _Result(0, "")
+
+    r = NvidiaDeviceControl(run=run, gpu_index=0).reset(force=True)
+    assert not r.ok
+    joined = " | ".join(calls)
+    assert "--gpu-reset -i 0" in joined
+    assert "-pm" not in joined and " -r" not in joined.replace("--gpu-reset", "")
+
+
+def test_reset_threshold_matches_gpu_free_definition():
+    """阈值与网关 GPU_FREE_THRESHOLD_MB 对齐：1500 MB（旧 1024 会拒）视为空闲，不被自相矛盾地拒掉。"""
+    from inferfabric.platform.nvidia_telemetry import (
+        RESET_IDLE_THRESHOLD_MB, NvidiaDeviceControl)
+    from inferfabric.config import GPU_FREE_THRESHOLD_MB
+    assert RESET_IDLE_THRESHOLD_MB == GPU_FREE_THRESHOLD_MB
+
+    def run(cmd, **k):
+        if "memory.used" in cmd[1]:
+            return _Result(0, "1500\n")
+        if "--gpu-reset" in cmd:
+            return _Result(0, "")
+        return _Result(0, "")
+
+    r = NvidiaDeviceControl(run=run, gpu_index=0).reset()
+    assert r.ok and "gpu-reset" in r.message
+
+
 def test_null_and_apple_control_never_run_commands():
     for ctl in (NullDeviceControl(),):
         r = ctl.reset()

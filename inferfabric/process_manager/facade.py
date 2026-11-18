@@ -378,11 +378,12 @@ class ProcessManager(BaseProcessManager):
             return {"status": "skipped", "message": "disabled by config"}
 
         # DeviceTelemetry T3: route through DeviceControl when injected
-        # (occupancy-gated, platform-aware). gpu_index != 0 keeps the legacy
+        # (occupancy-gated, platform-aware; force relaxes the occupancy gate
+        # for caller-intentional clears). gpu_index != 0 keeps the legacy
         # nvidia-smi path — DeviceControl is assembled per gpu_index=0.
         ctrl = self.device_control
         if ctrl is not None and gpu_index == 0:
-            result = ctrl.reset()
+            result = ctrl.reset(force=force)
             if result.ok and result.status == "ok":
                 return {"status": "ok",
                         "method": result.message or "gpu-reset"}

@@ -238,15 +238,27 @@ def _power_series_from_stream(db, gran: str, price: float,
 
 
 def query_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH) -> dict:
-    """GET /api/power — legacy 流（unknown/unknown，v007 历史）分桶序列。
+    """GET /api/power — 升级后不再静默冻结（PR #5 评审 Secondary）。
 
-    只读 legacy 流：v007 首卡样本永不与 v011 全卡样本跨流插值。
+    采样器现在只写 aggregate 流；legacy `unknown` 流自 v011 起冻结。本入口
+    优先返回窗口内完整的 aggregate 流；仅当该流窗口内无样本（升级前数据）
+    时整段回落到 legacy 流 —— **两条流永不合并/插值**，只整段择一，§14 的
+    跨流不变量保持。响应新增 `stream` 字段标明本次数据来自哪条流（增字段，
+    不破坏旧 shape）。
     """
-    return _power_series_from_stream(db, gran, price, device_id="unknown")
+    out = _power_series_from_stream(db, gran, price, device_id="aggregate")
+    if out["available"]:
+        out["stream"] = "aggregate"
+        return out
+    out = _power_series_from_stream(db, gran, price, device_id="unknown")
+    out["stream"] = "unknown"
+    return out
 
 
 def query_device_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH) -> dict:
     """GET /api/device_power — 当前聚合流（accelerator/aggregate）分桶序列。
 
-    与 /api/power 同 shape {gran, buckets, totals, available}。"""
-    return _power_series_from_stream(db, gran, price, device_id="aggregate")
+    与 /api/power 同 shape {gran, buckets, totals, available, stream}。"""
+    out = _power_series_from_stream(db, gran, price, device_id="aggregate")
+    out["stream"] = "aggregate"
+    return out
