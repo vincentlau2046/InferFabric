@@ -644,9 +644,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if route and route.startswith("cloud:"):
                 provider_name = route.split(":", 1)[1]
                 provider_cfg = pm.cloud.get_provider_config(provider_name)
-                cloud_model = pm.cloud.cloud_models.get(
-                    requested_model.split("/")[-1] if "/" in requested_model else requested_model
-                )
+                cloud_model = pm.cloud.resolve_cloud_model(provider_name, requested_model)
                 if provider_cfg and cloud_model:
                     log.info("/v1/messages → CLOUD %s [%s] [model=%s]",
                              provider_name, "anthropic", requested_model)
