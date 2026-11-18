@@ -39,6 +39,12 @@ from .model_discovery import auto_deploy as _auto_deploy
 from .gpu_state import GpuStateMachine
 from .model_lifecycle import ModelLifecycle
 
+
+def ModeOf(m):
+    """ModelConfig → ledger Mode（ledger_mode 空值=on_demand）。"""
+    from inferfabric.platform.resource import Mode
+    return Mode.RESIDENT if getattr(m, "ledger_mode", "") == "resident" else Mode.ON_DEMAND
+
 log = logging.getLogger("inferfabric")
 
 
@@ -262,9 +268,44 @@ class ModelManager:
         """Check if Ollama daemon is running."""
         return check_http_status(f"http://localhost:{port}/api/tags")
 
+    def _admit_memory(self, model, force: bool = False):
+        """Unified-memory ledger admission (R1) — dynamic ledger rebuild, no
+        lifecycle bookkeeping.
+
+        Budget B = RAM − reserve (platform probe); running models are booked
+        by their resident mode; the probed watermark and the bookkeeping take
+        the tighter constraint. baseline≤0 (unknown memory) → admit without
+        check. Returns None when no check applies (non-macOS / unknown
+        memory), else an AdmitDecision.
+        """
+        from inferfabric.platform.resource import Lifecycle
+        from inferfabric.platform.resource_umem import UnifiedMemoryLedger as MemoryLedger
+        from inferfabric.platform import probe as platform_probe
+        if not platform_probe.IS_MACOS:
+            return None
+        baseline = getattr(model, "mem_baseline_mb", 0) or getattr(model, "peak_vram_mb", 0)
+        if baseline <= 0:
+            return None
+        ledger = MemoryLedger(
+            budget_mb=platform_probe.budget_mb(),
+            # probe semantics = "memory currently available for inference"
+            # = B − measured used (not used itself)
+            probe_available_mb=lambda: (
+                (platform_probe.budget_mb() - (platform_probe.mem_used_mb() or 0))
+                if platform_probe.mem_used_mb() is not None else None),
+        )
+        for name, m in self._models.items():
+            if name == model.name or name not in self.active_services:
+                continue
+            base2 = getattr(m, "mem_baseline_mb", 0) or getattr(m, "peak_vram_mb", 0)
+            e = ledger.register(name, base2, ModeOf(m))
+            e.state = Lifecycle.READY  # running = memory occupied
+        e = ledger.register(model.name, baseline, ModeOf(model))
+        return ledger.admit(model.name, force=force)
+
     # ── Switch ────────────────────────────────────────────────────
 
-    def switch(self, target: str) -> dict:
+    def switch(self, target: str, force: bool = False) -> dict:
         # v5.6.8 debug: log stack trace on every switch to trace mysterious caller
         import traceback
         log.info("switch(%r) caller:\n%s", target, "".join(traceback.format_stack()[:-1]))
@@ -303,6 +344,12 @@ class ModelManager:
         model = self._models.get(target)
         if not model:
             return {"status": "error", "message": f"Unknown model: {target}. Available: {list(self._models.keys())}"}
+
+        # ── Memory-ledger admission (force = user confirmed "load anyway") ──
+        decision = self._admit_memory(model, force=force)
+        if decision is not None and not decision.ok:
+            return {"status": "memory_insufficient", "message": decision.reason,
+                    "available_mb": decision.available_mb, "needed_mb": decision.needed_mb}
 
         # Already running? (P0-1: check config drift before skipping)
         if target in self.active_services:
