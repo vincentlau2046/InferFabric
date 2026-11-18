@@ -575,9 +575,34 @@ class CloudDiscovery:
         if short_name in local_models or model_name in local_models:
             return "local"
         with self._models_lock:
-            cm = self._cloud_models.get(short_name) or self._cloud_models.get(model_name)
+            # Full name (with "provider/" prefix) takes priority over short
+            # name — short names are ambiguous first-wins keys when multiple
+            # providers serve the same model id; an explicit prefixed request
+            # must not be hijacked by them.
+            cm = self._cloud_models.get(model_name) or self._cloud_models.get(short_name)
         if cm:
             return f"cloud:{cm.provider}"
+        return None
+
+    def resolve_cloud_model(self, provider_name: str, model_name: str) -> "CloudModel | None":
+        """Resolve a registry entry precisely by provider + model name.
+
+        Second-stage lookup after resolve_route() hits. model_name may take
+        three legal forms: short name ("glm-5"), slash-bearing model_id
+        ("kimi/k3.1-pro"), or provider-prefixed full name
+        ("atlaswork/kimi/k3.1-pro"). Call sites historically did
+        split("/")[-1] and rebuilt the key — both keys come out wrong for
+        slash-bearing model ids, guaranteeing 404; compare against entries
+        directly instead.
+        """
+        prefix = f"{provider_name}/"
+        stripped = model_name[len(prefix):] if model_name.startswith(prefix) else model_name
+        with self._models_lock:
+            for k, v in self._cloud_models.items():
+                if v.provider != provider_name:
+                    continue
+                if model_name in (k, v.model_id) or stripped in (k, v.model_id):
+                    return v
         return None
 
     def get_provider_config(self, provider_name: str) -> ProviderConfig | None:
@@ -776,6 +801,11 @@ class CloudDiscovery:
                   二者不一致，必须显式传入，否则 spec 属性会被漏合并。
         """
         spec = cfg.model_specs.get(spec_key or model.model_id)
+        if spec is None:
+            # 落盘后 spec key 是短名（_serialize_providers 对含斜杠 model_id
+            # 取 split("/")[-1]）— 按 model_id 查不到时兜底短名键，
+            # 否则重启后打标属性对斜杠模型全部漏合并
+            spec = cfg.model_specs.get(model.model_id.split("/")[-1])
         if not spec:
             return model
         # 新字段

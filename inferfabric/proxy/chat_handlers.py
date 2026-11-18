@@ -333,9 +333,7 @@ def handle_chat(handler, pm, data):
         if route and route.startswith("cloud:"):
             provider_name = route.split(":", 1)[1]
             provider_cfg = pm.cloud.get_provider_config(provider_name)
-            short_name = model.split("/")[-1] if "/" in model else model
-            cloud_model = (pm.cloud.cloud_models.get(f"{provider_name}/{short_name}")
-                          or pm.cloud.cloud_models.get(short_name))
+            cloud_model = pm.cloud.resolve_cloud_model(provider_name, model)
             if provider_cfg and cloud_model:
                 log.info("/v1/chat/completions → CLOUD %s [model=%s]", provider_name, model)
                 result = forwarder.forward_to_cloud(
