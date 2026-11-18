@@ -111,7 +111,13 @@ class ModelLifecycle:
 
         # PR-1: VRAM budget guard — reject if peak would exceed 97% of GPU
         # (95% was too tight: bge-m3 ~480MB + peak_vram_mb leaves <10MB margin)
-        if not engine_present and model.gpu_role != "none":
+        # Platform (F2): on unified-memory hosts (macOS) admission is owned by
+        # the memory-ledger gate (manager._admit_memory, switch entry, supports
+        # force oversell) — this VRAM gate retires there to avoid two gates
+        # with conflicting semantics; Linux keeps the original behavior.
+        from inferfabric.platform import probe as _platform_probe
+        if (not engine_present and model.gpu_role != "none"
+                and not _platform_probe.IS_MACOS):
             if model.peak_vram_mb > 0:
                 current_vram = gpu_used_mb()
                 gpu_total = gpu_total_mb()

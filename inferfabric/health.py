@@ -17,6 +17,7 @@ from .config import (
     GPU_FREE_THRESHOLD_MB,
     STOP_SIGTERM_TIMEOUT,
 )
+from .platform import probe  # platform-layer probes (F2)
 
 log = logging.getLogger("inferfabric")
 
@@ -30,7 +31,14 @@ def _run(cmd: list[str], timeout: int = 30, **kw) -> subprocess.CompletedProcess
 # ─── GPU Memory ──────────────────────────────────────────────────
 
 def gpu_used_mb() -> int:
-    """Get total GPU memory used across all GPUs."""
+    """Get total GPU memory used across all GPUs.
+
+    Platform (F2): on unified-memory hosts (macOS) this maps to the system
+    memory watermark — there is no discrete VRAM to query.
+    """
+    if probe.IS_MACOS:
+        used = probe.mem_used_mb()
+        return used if used is not None else 0
     try:
         r = _run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
         total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())
@@ -40,7 +48,14 @@ def gpu_used_mb() -> int:
 
 
 def gpu_total_mb() -> int:
-    """Get total GPU memory."""
+    """Get total GPU memory.
+
+    Platform (F2): on unified-memory hosts (macOS) this returns the
+    inference budget B = RAM − reserve, so wait_gpu_free and other
+    upstream logic keep correct semantics there.
+    """
+    if probe.IS_MACOS:
+        return probe.budget_mb()
     try:
         r = _run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())

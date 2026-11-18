@@ -562,6 +562,9 @@ class TestDeployEngineAdoption:
                             lambda: used_mb)
         monkeypatch.setattr("inferfabric.model_lifecycle.gpu_total_mb",
                             lambda: total_mb)
+        # 这些用例验证的是离散显存（CUDA）路径的 VRAM 守卫语义 —
+        # 平台钉为非 macOS，统一内存机器上也能确定性走守卫（C2 纪律）。
+        monkeypatch.setattr("inferfabric.platform.probe.IS_MACOS", False)
 
     def test_deploy_skips_vram_guard_when_engine_exists(self, monkeypatch):
         """幸存引擎在场 → 不 clear CUDA、不 VRAM 拒绝、直收养。"""

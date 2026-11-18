@@ -138,22 +138,29 @@ def discover_local_models(models_dir: Path) -> dict:
     return {"discovered": discovered, "configured": configured}
 
 
-def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: dict, switch_fn) -> dict:
-    """Auto-generate YAML and deploy a discovered model.
+def install_yaml(name: str, model_type: str, models_dir: Path, existing_models: dict,
+                 model_type_label: str = "") -> dict:
+    """Auto-generate YAML for a discovered model — config write only, no start
+    (unified-memory semantics: models stay off until first request wakes them).
+
+    On unified-memory hosts (macOS) the llama_cpp template uses full Metal
+    offload + on_demand ledger fields; the upstream template
+    (gpu_layers: 0, CPU-only) is preserved verbatim for every other platform.
 
     Args:
         name: Model name.
         model_type: Type string (e.g. "vllm", "llama_cpp").
         models_dir: Path to models YAML directory.
         existing_models: Dict of currently loaded models (for port scanning).
-        switch_fn: Callable(name) -> dict — the ModelManager.switch() method.
+        model_type_label: Optional label written into the YAML (llm/embed/...).
 
     Returns:
         dict with status message.
     """
     yaml_path = models_dir / f"{name}.yaml"
     if yaml_path.exists():
-        return {"status": "already_configured", "message": f"YAML already exists for {name}, running switch"}
+        return {"status": "already_configured",
+                "message": f"YAML already exists for {name}, running switch"}
 
     # Find next available port
     used_ports = set()
@@ -179,7 +186,38 @@ vllm:
 """
     elif model_type.startswith("llama_cpp"):
         port = max([p for p in used_ports if p >= 11435] + [11434]) + 1
-        yaml_content = f"""name: {name}
+        from .platform import probe as _platform_probe
+        if _platform_probe.IS_MACOS:
+            gguf = ""
+            for base in [models_dir.parents[1] / "models", Path.home() / "models"]:
+                if base.exists():
+                    hits = sorted(base.glob(f"**/{name}*.gguf")) or sorted(base.glob(f"**/{name}/*.gguf"))
+                    if hits:
+                        gguf = str(hits[0])
+                        break
+            if not gguf:
+                return {"status": "error",
+                        "message": f"GGUF for {name} not found under workspace models dir or ~/models"}
+            binary = models_dir.parents[1] / "engines" / "llama-b12361" / "llama-server"
+            binary_lines = f"  binary_path: {binary}\n" if binary.exists() else ""
+            label = model_type_label or "llm"
+            yaml_content = f"""name: {name}
+description: "{name} (auto-installed, llama.cpp Metal)"
+type: llama_cpp
+gpu_role: shared
+model_type: {label}
+# Ledger tri-fields: do not auto-start; first request wakes the model
+mode: on_demand
+idle_timeout_min: 30
+llama_cpp:
+  model_path: {gguf}
+{binary_lines}  port: {port}
+  threads: 8
+  context_size: 16384
+  gpu_layers: 99
+"""
+        else:
+            yaml_content = f"""name: {name}
 description: "{name} (auto-deployed, llama.cpp)"
 type: llama_cpp
 gpu_role: none
@@ -204,7 +242,14 @@ llama_cpp:
         return {"status": "error", "message": f"Failed to write YAML: {e}"}
     log.info("Auto-generated YAML (atomic): %s", yaml_path)
 
-    # Reload models and switch
     from .config import load_models
     load_models(models_dir)  # refresh module-level cache
+    return {"status": "installed", "model": name, "yaml": str(yaml_path)}
+
+
+def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: dict, switch_fn) -> dict:
+    """Auto-generate YAML and deploy a discovered model (legacy path: installs then switches)."""
+    result = install_yaml(name, model_type, models_dir, existing_models)
+    if result.get("status") not in ("installed", "already_configured"):
+        return result
     return switch_fn(name)
