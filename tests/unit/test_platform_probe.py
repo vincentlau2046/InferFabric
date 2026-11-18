@@ -55,3 +55,23 @@ def test_is_macos_follows_profile(monkeypatch):
     monkeypatch.setenv("IFF_FORCE_PLATFORM", "darwin")
     importlib.reload(p2)
     assert p2.IS_MACOS is True
+
+
+def test_iff_env_alias_read(monkeypatch, tmp_path):
+    """Env vars are dual-read: IFF_* first (upstream name since PR#2),
+    MACFABRIC_* fallback (fork alias) — keeps fork/upstream platform files
+    textually identical except alias lines (cherry-pick discipline)."""
+    _write_policy(tmp_path, 4096)
+    monkeypatch.setattr(probe, "mem_total_mb", lambda: 32768)
+    monkeypatch.delenv("IFF_RESERVE_MB", raising=False)
+    monkeypatch.setenv("MACFABRIC_RESERVE_MB", "16384")
+    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path))
+    assert probe.budget_mb() == 32768 - 16384  # fallback alias honored
+    monkeypatch.setenv("IFF_RESERVE_MB", "4096")
+    assert probe.budget_mb() == 32768 - 4096   # IFF_* wins
+    from inferfabric.platform import detect
+    monkeypatch.setenv("IFF_FORCE_PLATFORM", "linux")
+    assert detect().os == "linux"
+    monkeypatch.delenv("IFF_FORCE_PLATFORM", raising=False)
+    monkeypatch.setenv("MACFABRIC_FORCE_PLATFORM", "darwin")
+    assert detect().os == "darwin"
