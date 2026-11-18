@@ -664,3 +664,21 @@ class TestStreamUsageInjection:
 
         assert len(cloud_bodies) == 1
         assert cloud_bodies[0]["stream_options"] == {"include_usage": True}
+
+
+class TestLegacyPoolKeyFallback:
+    def test_legacy_keyed_config_still_routes(self, registry, forwarded):
+        """评审 PR#4 blocker 回归：存量 model_pools.yaml 键仍为旧名
+        （fast/small/premium）时，fabric- 请求规范名未命中后回落原短名，
+        路由不被重命名切断；配置迁移到规范名后别名/规范名双向可用。"""
+        cfg = _raw_config()
+        cfg["pools"]["fast"] = cfg["pools"].pop("flash")   # 存量键名未迁移
+        registry.update(cfg, expected_revision=registry.snapshot().revision)
+        pm = FakePM(registry, active={"qwen-small"},
+                    local_models={"qwen-small": _local_model()})
+        h = FakeHandler()
+        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert len(forwarded) == 1
+        assert h.sent == []

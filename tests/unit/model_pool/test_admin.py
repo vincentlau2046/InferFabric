@@ -96,6 +96,9 @@ class TestPutModelPools:
         assert status == 200
         assert body == {"status": "updated", "revision": 2}
         assert pm.pool_registry.snapshot().revision == 2
+        # 评审 PR#4 nit 2：expected_revision 是请求元数据，不得持久化进
+        # model_pools.yaml（旧实现整包 PUT body 落盘）
+        assert "expected_revision" not in (pm.pool_registry.raw_config() or {})
 
     def test_put_stale_revision_409(self, pm):
         cfg = _raw_config()
