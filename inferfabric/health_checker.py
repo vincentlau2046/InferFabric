@@ -34,7 +34,7 @@ class DefaultHealthChecker:
             time.sleep(1)
         return False
 
-    def gpu_used_mb(self) -> int:
+    def gpu_used_mb(self) -> int | None:
         from .health import gpu_used_mb
         return gpu_used_mb()
 

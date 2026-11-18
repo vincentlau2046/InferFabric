@@ -424,26 +424,81 @@ class IFFDB:
                         log.warning("DB query failed: %s", e)
                 return deleted
 
-    # ── GPU 功耗时间序列（v6.2，监控 TAB 功耗/电费卡）──
+    # ── 设备功耗时间序列（v011 device_power_samples，平台中立）──
 
-    def insert_gpu_power_samples(self, samples: list[dict]):
-        """落盘 60s 功耗采样。ts 主键 → 同一秒 INSERT OR IGNORE 幂等去重。"""
+    def insert_device_power_samples(self, samples: list[dict]):
+        """落盘设备功耗采样（每拍一个聚合样本）。
+
+        主键 (ts, accelerator, device_id) → 同秒 INSERT OR IGNORE 幂等去重。
+        """
         if not samples:
             return
+        rows = [{
+            "ts": int(s["ts"]),
+            "platform": str(s.get("platform", "unknown")),
+            "accelerator": str(s.get("accelerator", "unknown")),
+            "device_id": str(s.get("device_id", "aggregate")),
+            "watts": float(s["watts"]),
+            "source": str(s.get("source", "device_telemetry")),
+        } for s in samples]
         with self._write_lock:
             with self.connect(REQUEST_LOG_DB) as conn:
                 conn.executemany(
-                    "INSERT OR IGNORE INTO gpu_power_samples (ts, watts) "
-                    "VALUES (:ts, :watts)",
-                    [{"ts": int(s["ts"]), "watts": float(s["watts"])} for s in samples],
+                    "INSERT OR IGNORE INTO device_power_samples "
+                    "(ts, platform, accelerator, device_id, watts, source) "
+                    "VALUES (:ts, :platform, :accelerator, :device_id, "
+                    ":watts, :source)",
+                    rows,
                 )
                 conn.commit()
 
+    def query_device_power_samples(self, since: float, until: float | None = None,
+                                   limit: int = 300000,
+                                   device_id: str | None = None) -> list[dict]:
+        """按 ts 升序返回全部元数据列；[since, until) 半开区间。
+
+        device_id=None 返回所有流（raw 元数据查询）；分桶序列按
+        device_id 过滤，保证 legacy 与 aggregate 流分开积分。
+        """
+        with self.connect(REQUEST_LOG_DB) as conn:
+            sql = ("SELECT ts, platform, accelerator, device_id, watts, source "
+                   "FROM device_power_samples WHERE ts >= ?")
+            params: list[Any] = [since]
+            if until is not None:
+                sql += " AND ts < ?"
+                params.append(until)
+            if device_id is not None:
+                sql += " AND device_id = ?"
+                params.append(device_id)
+            sql += " ORDER BY ts ASC LIMIT ?"
+            params.append(limit)
+            cols = ["ts", "platform", "accelerator", "device_id", "watts", "source"]
+            rows = conn.execute(sql, params).fetchall()
+            return [dict(zip(cols, r)) for r in rows]
+
+    def prune_device_power_samples(self, before: float) -> int:
+        with self._write_lock:
+            with self.connect(REQUEST_LOG_DB) as conn:
+                cur = conn.execute("DELETE FROM device_power_samples WHERE ts < ?",
+                                   (before,))
+                conn.commit()
+                return cur.rowcount
+
+    # ── GPU 功耗时间序列（v6.2 → v011 兼容层）──
+
+    def insert_gpu_power_samples(self, samples: list[dict]):
+        """DEPRECATED shim — legacy 写入重定向到 device_power_samples
+        （unknown/unknown/legacy 标记），不写兼容视图（视图只读）。"""
+        self.insert_device_power_samples([{
+            "ts": s["ts"], "platform": "unknown", "accelerator": "unknown",
+            "device_id": "unknown", "watts": s["watts"],
+            "source": "legacy_gpu_power_samples",
+        } for s in samples])
+
     def query_gpu_power_samples(self, since: float, until: float | None = None,
                                 limit: int = 300000) -> list[dict]:
-        """按 ts 升序返回 [{ts, watts}]；分桶聚合（查询侧）依赖升序。"""
+        """按 ts 升序返回 [{ts, watts}]；读兼容视图（历史 + 非冲突聚合）。"""
         with self.connect(REQUEST_LOG_DB) as conn:
-            cols = [d[0] for d in conn.execute("SELECT * FROM gpu_power_samples LIMIT 0").description]
             sql = "SELECT ts, watts FROM gpu_power_samples WHERE ts >= ?"
             params: list[Any] = [since]
             if until is not None:
@@ -452,14 +507,11 @@ class IFFDB:
             sql += " ORDER BY ts ASC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
-            return [dict(zip(cols, r)) for r in rows]
+            return [{"ts": r[0], "watts": r[1]} for r in rows]
 
     def prune_gpu_power_samples(self, before: float) -> int:
-        with self._write_lock:
-            with self.connect(REQUEST_LOG_DB) as conn:
-                cur = conn.execute("DELETE FROM gpu_power_samples WHERE ts < ?", (before,))
-                conn.commit()
-                return cur.rowcount
+        """DEPRECATED shim — 重定向到新表清理（无法 DELETE 视图）。"""
+        return self.prune_device_power_samples(before)
 
     def wal_checkpoint(self):
         with self.connect(REQUEST_LOG_DB) as conn:

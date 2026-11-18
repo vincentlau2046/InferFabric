@@ -89,10 +89,17 @@ def mem_used_mb() -> int | None:
     vm_stat 口径：free/inactive/speculative 页可回收，active/wired/compressed
     视为在用。失败返回 None。
     """
-    if not IS_MACOS:
+    return mem_used_given_total(mem_total_mb())
+
+
+def mem_used_given_total(total_mb: int | None) -> int | None:
+    """vm_stat 已用水位，接受外部采样好的物理总量（Apple 遥测适配器用：
+
+    used 与 budget 共享同一次 hw.memsize 读取，避免同帧两次 sysctl 得到
+    不一致的窗口）。total 未知 → None。"""
+    if total_mb is None:
         return None
-    total = mem_total_mb()
-    if total is None:
+    if not IS_MACOS:
         return None
     try:
         r = _run(["vm_stat"])
@@ -116,10 +123,29 @@ def mem_used_mb() -> int | None:
 
         reclaimable = (pg("Pages free") + pg("Pages inactive")
                        + pg("Pages speculative"))
-        used_mb = total - (reclaimable * page_size) // (1024 * 1024)
+        used_mb = total_mb - (reclaimable * page_size) // (1024 * 1024)
         return max(used_mb, 0)
     except Exception:
         return None
+
+
+def memory_pressure_level() -> int | None:
+    """macOS 内核内存压力档位：1=normal 2=warning 3=critical。
+
+    sysctl kern.memorystatus_vm_pressure_level（非特权可读）。
+    只认 1..3；非 macOS / 命令失败 / 未知值 → None（观测 fail-open）。
+    """
+    if not IS_MACOS:
+        return None
+    try:
+        r = _run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"])
+        if r.returncode == 0:
+            v = r.stdout.strip()
+            if v.isdigit() and int(v) in (1, 2, 3):
+                return int(v)
+    except Exception:
+        pass
+    return None
 
 
 # ─── 预算 B（内存账本地基）─────────────────────────────────────
@@ -157,3 +183,13 @@ def budget_mb() -> int:
     无缓存层）。非 macOS 返回 0（调用方以 IS_MACOS 门禁在前）。
     """
     return _budget_core(mem_total_mb())
+
+
+def budget_given_total(total_mb: int | None) -> int | None:
+    """观测语义的预算：total 未知 → None（不发布账本内部的 0 兜底）。
+
+    Apple 遥测适配器发布快照用；准入仍走 budget_mb()（保守 0 语义）。
+    """
+    if total_mb is None:
+        return None
+    return _budget_core(total_mb)

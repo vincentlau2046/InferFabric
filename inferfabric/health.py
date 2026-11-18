@@ -17,7 +17,6 @@ from .config import (
     GPU_FREE_THRESHOLD_MB,
     STOP_SIGTERM_TIMEOUT,
 )
-from .platform import probe  # platform-layer probes (F2)
 
 log = logging.getLogger("inferfabric")
 
@@ -30,45 +29,53 @@ def _run(cmd: list[str], timeout: int = 30, **kw) -> subprocess.CompletedProcess
 
 # ─── GPU Memory ──────────────────────────────────────────────────
 
-def gpu_used_mb() -> int:
-    """Get total GPU memory used across all GPUs.
+def _default_device_telemetry():
+    """Assemble the platform telemetry backend (single factory entry)."""
+    from .platform import detect
+    from .platform.telemetry import telemetry_for_profile
+    return telemetry_for_profile(detect())
 
-    Platform (F2): on unified-memory hosts (macOS) this maps to the system
-    memory watermark — there is no discrete VRAM to query.
+
+def _device_snapshot(telemetry=None):
+    tel = telemetry if telemetry is not None else _default_device_telemetry()
+    return tel.snapshot()
+
+
+def gpu_used_mb(telemetry=None) -> int | None:
+    """DEPRECATED compat shim — device telemetry is the source of truth.
+
+    Returns snapshot.memory_used_mb; None when unavailable (fail-open for
+    observations). Callers on admission/control paths must handle None
+    (fail-closed), never treat it as 0.
     """
-    if probe.IS_MACOS:
-        used = probe.mem_used_mb()
-        return used if used is not None else 0
-    try:
-        r = _run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"])
-        total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())
-        return total
-    except Exception:
-        return 0
+    return _device_snapshot(telemetry).memory_used_mb
 
 
-def gpu_total_mb() -> int:
-    """Get total GPU memory.
+def gpu_total_mb(telemetry=None) -> int | None:
+    """DEPRECATED compat shim — legacy "total" mapping per memory_kind.
 
-    Platform (F2): on unified-memory hosts (macOS) this returns the
-    inference budget B = RAM − reserve, so wait_gpu_free and other
-    upstream logic keep correct semantics there.
+    unified (Apple): budget B = RAM − reserve (spec §14.2 — wait_gpu_free
+    and legacy UI keep budget semantics). vram (NVIDIA): physical VRAM
+    total. None when unavailable.
     """
-    if probe.IS_MACOS:
-        return probe.budget_mb()
-    try:
-        r = _run(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        total = sum(int(x.strip()) for x in r.stdout.strip().splitlines() if x.strip())
-        return total
-    except Exception:
-        return 32607  # fallback for RTX 5090D
+    s = _device_snapshot(telemetry)
+    if s.memory_kind == "unified":
+        return s.memory_budget_mb
+    return s.memory_total_mb
 
 
-def wait_gpu_free(timeout: int = GPU_FREE_TIMEOUT, threshold_mb: int = GPU_FREE_THRESHOLD_MB) -> bool:
-    """Wait for GPU memory to drop below threshold. Returns False on timeout."""
+def wait_gpu_free(timeout: int = GPU_FREE_TIMEOUT,
+                  threshold_mb: int = GPU_FREE_THRESHOLD_MB,
+                  telemetry=None) -> bool:
+    """Wait for device memory to drop below threshold. False on timeout.
+
+    Fail-closed: an unavailable reading is never treated as free; polling
+    continues until the deadline, then returns False.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if gpu_used_mb() < threshold_mb:
+        used = gpu_used_mb(telemetry)
+        if used is not None and used < threshold_mb:
             return True
         time.sleep(2)
     return False

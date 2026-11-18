@@ -33,6 +33,10 @@ class BaseProcessManager:
     def __init__(self, state, log_dir: Path):
         self._state = state
         self._log_dir = log_dir
+        # DeviceTelemetry T3: optional providers injected by ModelManager;
+        # None → legacy direct-probe fallback paths.
+        self.device_control = None
+        self.device_telemetry = None
 
 
     def _pkill_by_port(self, port: int) -> None:
@@ -149,7 +153,11 @@ class BaseProcessManager:
         
         for _ in range(timeout):
             used = gpu_used_mb()
-            if used is not None and used <= threshold:
+            if used is None:
+                # Fail-closed: an unavailable reading never reports free.
+                return {"status": "timeout",
+                        "message": "device memory telemetry unavailable"}
+            if used <= threshold:
                 log.info("GPU returned to idle (%d MB, threshold=%d)", used, threshold)
                 return {"status": "ok", "used_mb": used}
             time.sleep(1)
@@ -183,7 +191,8 @@ class BaseProcessManager:
         Each approach is validated by reading GPU memory before and after.
         """
         before_mb = gpu_used_mb()
-        log.info("Clearing GPU CUDA state (current usage: %d MB) ...", before_mb)
+        before_txt = f"{before_mb} MB" if before_mb is not None else "unknown"
+        log.info("Clearing GPU CUDA state (current usage: %s) ...", before_txt)
 
         # ── Approach 1: nvidia-smi --gpu-reset ────────────────────
         try:
@@ -194,7 +203,8 @@ class BaseProcessManager:
             if r.returncode == 0:
                 time.sleep(2)  # wait for reset to complete
                 after_mb = gpu_used_mb()
-                log.info("GPU reset successful (before: %d MB, after: %d MB)", before_mb, after_mb)
+                log.info("GPU reset successful (before: %s, after: %s MB)", before_txt,
+                 f"{after_mb} MB" if after_mb is not None else "unknown")
                 return {"status": "ok", "method": "gpu-reset", "before_mb": before_mb, "after_mb": after_mb}
             else:
                 log.warning("nvidia-smi --gpu-reset failed (rc=%d): %s", r.returncode, r.stderr.strip())
@@ -216,7 +226,8 @@ class BaseProcessManager:
                 )
                 time.sleep(1)
                 after_mb = gpu_used_mb()
-                log.info("GPU PM toggle successful (before: %d MB, after: %d MB)", before_mb, after_mb)
+                log.info("GPU PM toggle successful (before: %s, after: %s MB)", before_txt,
+                 f"{after_mb} MB" if after_mb is not None else "unknown")
                 return {"status": "ok", "method": "pm-toggle", "before_mb": before_mb, "after_mb": after_mb}
             else:
                 log.warning("nvidia-smi -pm toggle failed (rc=%d): %s", r.returncode, r.stderr.strip())
@@ -232,7 +243,8 @@ class BaseProcessManager:
             if r.returncode == 0:
                 time.sleep(2)
                 after_mb = gpu_used_mb()
-                log.info("GPU nvidia-smi -r successful (before: %d MB, after: %d MB)", before_mb, after_mb)
+                log.info("GPU nvidia-smi -r successful (before: %s, after: %s MB)", before_txt,
+                 f"{after_mb} MB" if after_mb is not None else "unknown")
                 return {"status": "ok", "method": "nvidia-smi-r", "before_mb": before_mb, "after_mb": after_mb}
             else:
                 log.warning("nvidia-smi -r failed (rc=%d): %s", r.returncode, r.stderr.strip())

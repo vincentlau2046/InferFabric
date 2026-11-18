@@ -65,7 +65,13 @@ def cmd_status():
     if pid_info:
         print(f"PIDs     : {', '.join(pid_info)}")
 
-    print(f"GPU      : {s['gpu_used_mb']}/{s['gpu_total_mb']} MiB used")
+    # DeviceTelemetry T3: unavailable readings render as "—", never 0.
+    dev = (s.get("device") or {}).get("snapshot") or {}
+    kind = dev.get("memory_kind", "unknown")
+    used, total = s.get("gpu_used_mb"), s.get("gpu_total_mb")
+    used_txt = str(used) if used is not None else "—"
+    total_txt = str(total) if total is not None else "—"
+    print(f"GPU      : {used_txt}/{total_txt} MiB used (memory_kind={kind})")
 
 
 def cmd_models(args):
@@ -194,7 +200,9 @@ def cmd_reset(args):
     if result["status"] == "reset":
         print(f"✅ Reset to idle (GPU: {result['gpu_mode']})")
         if not result["gpu_free"]:
-            print(f"⚠️ WARNING: GPU still has {gpu_used_mb()} MB used — orphan CUDA context likely")
+            used = gpu_used_mb()
+            used_txt = f"{used} MB" if used is not None else "an unknown amount"
+            print(f"⚠️ WARNING: GPU still has {used_txt} used — orphan CUDA context likely")
             print(f"   May need 'nvidia-smi --gpu-reset' or reboot")
     else:
         print(f"❌ Reset failed")

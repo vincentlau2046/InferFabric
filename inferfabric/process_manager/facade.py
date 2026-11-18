@@ -36,8 +36,12 @@ class ProcessManager(BaseProcessManager):
     Delegates per-engine operations to dedicated sub-managers.
     """
 
-    def __init__(self, state, log_dir: Path = DEFAULT_LOG_DIR):
+    def __init__(self, state, log_dir: Path = DEFAULT_LOG_DIR,
+                 device_control=None, device_telemetry=None):
         super().__init__(state, log_dir)
+        # DeviceTelemetry T3: optional providers injected by ModelManager.
+        self.device_control = device_control
+        self.device_telemetry = device_telemetry
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._vllm = VLLMProcessManager(state, log_dir)
         self._sglang = SGLangProcessManager(state, log_dir)
@@ -372,6 +376,22 @@ class ProcessManager(BaseProcessManager):
         if not GPU_AUTO_CLEAR_CUDA_STATE and not force:
             log.debug("GPU CUDA state clear disabled by GPU_AUTO_CLEAR_CUDA_STATE=False")
             return {"status": "skipped", "message": "disabled by config"}
+
+        # DeviceTelemetry T3: route through DeviceControl when injected
+        # (occupancy-gated, platform-aware). gpu_index != 0 keeps the legacy
+        # nvidia-smi path — DeviceControl is assembled per gpu_index=0.
+        ctrl = self.device_control
+        if ctrl is not None and gpu_index == 0:
+            result = ctrl.reset()
+            if result.ok and result.status == "ok":
+                return {"status": "ok",
+                        "method": result.message or "gpu-reset"}
+            if result.status == "unsupported":
+                return {"status": "error",
+                        "message": result.message or "device reset not supported"}
+            return {"status": "error",
+                    "message": result.message or "device reset failed"}
+
         return self._clear_gpu_cuda_state(gpu_index)
 
     def force_kill_all(self) -> dict:
@@ -427,7 +447,10 @@ class ProcessManager(BaseProcessManager):
 
         time.sleep(2)
         if GPU_AUTO_CLEAR_CUDA_STATE:
-            self._clear_gpu_cuda_state()  # clear fragmentation after force kill
+            # Review fix: use the gated public path — with DeviceControl
+            # injected the occupancy gates apply (unknown occupancy refuses);
+            # without one this falls back to the legacy sequence.
+            self.clear_gpu_cuda_state(force=True)  # clear fragmentation after force kill
         self._state.set("vllm_pid", "")
         self._state.set("comfyui_pid", "")
         self._state.set("tts_pid", "")

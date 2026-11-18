@@ -115,23 +115,30 @@ class StateStore {
       const sys = snap.system || {};
 
       // ── Normalize into binding-friendly shape (merged via update → merge)
-      const gpuUsed = status.gpu_used_mb || 0;
-      const gpuTotal = status.gpu_total_mb || 32607;
+      // DeviceTelemetry T5: null = unavailable — pass through as null,
+      // never coerce into a fake number. memory_kind drives label/semantics.
+      const device = snap.device || null;
+      const devSnap = (device && device.snapshot) || {};
+      const gpuUsed = status.gpu_used_mb;   // null passthrough
+      const gpuTotal = status.gpu_total_mb; // null passthrough
       const ramTotal = sys.ram_total_gb || 1;
       const ramUsed = sys.ram_used_gb || 0;
 
       const merged = {
         gpu_mode: status.gpu_mode || 'idle',
+        device: device,
+        memory_kind: devSnap.memory_kind || 'unknown',
+        capabilities: (device && device.capabilities) || {},
         gpu: {
           used:  gpuUsed,
           total: gpuTotal,
-          pct:   (gpuUsed / gpuTotal * 100),
+          pct:   (gpuUsed != null && gpuTotal) ? (gpuUsed / gpuTotal * 100) : null,
         },
         gpu_util: {
-          pct:   sys.gpu_util_pct || 0,
-          clock: sys.gpu_clock_mhz || '—',
-          power: sys.gpu_power_w || '—',
-          temp:  sys.gpu_temp_c || null,
+          pct:   (sys.gpu_util_pct != null ? sys.gpu_util_pct : null),
+          clock: (sys.gpu_clock_mhz != null ? sys.gpu_clock_mhz : null),
+          power: (sys.gpu_power_w != null ? sys.gpu_power_w : null),
+          temp:  (sys.gpu_temp_c != null ? sys.gpu_temp_c : null),
         },
         mem: {
           used:  ramUsed,

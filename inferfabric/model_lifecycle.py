@@ -19,13 +19,51 @@ from .config import (
     load_models,
 )
 from .gpu_state import GpuStateMachine
-from .health import (
-    gpu_used_mb,
-    gpu_total_mb,
-)
 from .state import GPUMode, ServiceState, StateDB, validate_transition
 
 log = logging.getLogger("inferfabric")
+
+
+def check_vram_budget(model, telemetry) -> dict | None:
+    """DeviceTelemetry T3 — VRAM new-allocation guard (extracted).
+
+    Reads one snapshot via the injected telemetry and applies the existing
+    peak_vram_mb / typical_vram_pct rules against the 97% budget. Returns
+    an error dict on violation or when the reading is unavailable
+    (fail-closed: missing telemetry never passes an allocation), and None
+    when the allocation may proceed. Callers keep their existing bypasses
+    (gpu-none models, already-running engines) upstream of this check.
+    """
+    s = telemetry.snapshot()
+    if s.memory_kind == "unified":
+        # Apple: ledger R1 admission (_admit_memory) owns the budget —
+        # CUDA VRAM arithmetic does not apply (§14.2).
+        return None
+    total = s.memory_total_mb
+    used = s.memory_used_mb
+    if total is None or used is None:
+        msg = ("device memory telemetry unavailable — VRAM admission "
+               "refused (fail-closed)")
+        log.warning(msg)
+        return {"status": "error", "message": msg}
+    budget = int(total * 0.97)
+    if model.peak_vram_mb > 0:
+        if used + model.peak_vram_mb > budget:
+            msg = (f"VRAM budget exceeded: current {used}MB + "
+                   f"peak {model.peak_vram_mb}MB = {used + model.peak_vram_mb}MB "
+                   f"> budget {budget}MB (97% of {total}MB)")
+            log.warning(msg)
+            return {"status": "error", "message": msg}
+        return None
+    if model.typical_vram_pct > 0:
+        current_pct = used / max(total, 1) * 100
+        if current_pct + model.typical_vram_pct > 97:
+            msg = (f"Insufficient GPU memory: current ~{current_pct:.0f}%, "
+                   f"{model.name} needs ~{model.typical_vram_pct}%, "
+                   f"total would be ~{current_pct + model.typical_vram_pct:.0f}% (limit 95%).")
+            log.warning(msg)
+            return {"status": "error", "message": msg}
+    return None
 
 
 class ModelLifecycle:
@@ -36,7 +74,8 @@ class ModelLifecycle:
     (that lives in GpuStateMachine).
     """
 
-    def __init__(self, state, proc, health, lock, gpu_state, models, models_dir=None):
+    def __init__(self, state, proc, health, lock, gpu_state, models,
+                 models_dir=None, device_telemetry=None):
         self.state = state
         self._proc = proc
         self._health = health
@@ -44,6 +83,7 @@ class ModelLifecycle:
         self._gpu_state = gpu_state
         self._models = models
         self.models_dir = models_dir
+        self._device_telemetry = device_telemetry
 
     # ── Start Model (dispatch) ────────────────────────────────────
 
@@ -115,27 +155,14 @@ class ModelLifecycle:
         # the memory-ledger gate (manager._admit_memory, switch entry, supports
         # force oversell) — this VRAM gate retires there to avoid two gates
         # with conflicting semantics; Linux keeps the original behavior.
+        # DeviceTelemetry T3: 守卫提取为 check_vram_budget（fail-closed：
+        # 遥测缺失显式拒绝），unified 内存由账本接管（返回 None 放行）。
         from inferfabric.platform import probe as _platform_probe
         if (not engine_present and model.gpu_role != "none"
                 and not _platform_probe.IS_MACOS):
-            if model.peak_vram_mb > 0:
-                current_vram = gpu_used_mb()
-                gpu_total = gpu_total_mb()
-                budget = int(gpu_total * 0.97)
-                if current_vram + model.peak_vram_mb > budget:
-                    msg = (f"VRAM budget exceeded: current {current_vram}MB + "
-                           f"peak {model.peak_vram_mb}MB = {current_vram + model.peak_vram_mb}MB "
-                           f"> budget {budget}MB (97% of {gpu_total}MB)")
-                    log.warning(msg)
-                    return {"status": "error", "message": msg}
-            elif model.typical_vram_pct > 0:
-                # Fallback to legacy pct-based check
-                current_pct = self._gpu_state._get_current_vram_pct()
-                if current_pct + model.typical_vram_pct > 97:
-                    msg = (f"VRAM budget exceeded: current ~{current_pct:.0f}% + "
-                           f"~{model.typical_vram_pct}% > 95%")
-                    log.warning(msg)
-                    return {"status": "error", "message": msg}
+            guard = check_vram_budget(model, self._device_telemetry)
+            if guard is not None:
+                return guard
 
         results = {}
         # Preserve gpu_role=none services in active_services (PR-18)
@@ -230,31 +257,9 @@ class ModelLifecycle:
         # peak 与 pct 两个分支一起跳 —— 守卫测的是「新分配叠加坡上」，在场引擎
         # 走收养/等待/先停后建，不构成叠加）
         if not self._engine_already_running(model):
-            if model.peak_vram_mb > 0:
-                current_vram = gpu_used_mb()
-                gpu_total = gpu_total_mb()
-                budget = int(gpu_total * 0.97)
-                if current_vram + model.peak_vram_mb > budget:
-                    return {
-                        "status": "error",
-                        "message": (
-                            f"VRAM budget exceeded: current {current_vram}MB + "
-                            f"peak {model.peak_vram_mb}MB = {current_vram + model.peak_vram_mb}MB "
-                            f"> budget {budget}MB (97% of {gpu_total}MB)"
-                        ),
-                    }
-            elif model.typical_vram_pct > 0:
-                # Fallback to legacy pct-based check for models without peak_vram_mb
-                current_pct = self._gpu_state._get_current_vram_pct()
-                if current_pct + model.typical_vram_pct > 97:
-                    return {
-                        "status": "error",
-                        "message": (
-                            f"Insufficient GPU memory: current ~{current_pct:.0f}%, "
-                            f"{model.name} needs ~{model.typical_vram_pct}%, "
-                            f"total would be ~{current_pct + model.typical_vram_pct:.0f}% (limit 95%)."
-                        ),
-                    }
+            guard = check_vram_budget(model, self._device_telemetry)
+            if guard is not None:
+                return guard
 
         # ── Start only the new service — centralized type dispatch ──
         log.info("Shared add (incremental): %s", model.name)

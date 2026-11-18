@@ -95,29 +95,42 @@
   function renderRail() {
     var gpu = store.get('gpu') || {};
     var util = store.get('gpu_util') || {};
+    // DeviceTelemetry T5: memory_kind 驱动标签与语义；null = 不可用 → '—'
+    // 或不填充，绝不画 0。量级条无固定设备额定上限（已改为 no-scale 空态）。
+    var kind = store.get('memory_kind') || 'unknown';
 
-    var used = gpu.used, total = gpu.total, vramPct = gpu.pct || 0;
+    var used = gpu.used, total = gpu.total;
+    var vramPct = (gpu.pct != null) ? gpu.pct : 0;
     var vram = $('trVram');
-    if (vram) vram.textContent = UI.fmtGB(used);
+    if (vram) {
+      vram.textContent = (used == null) ? '—' : UI.fmtGB(used);
+      var seg = vram.closest ? vram.closest('.tr-seg') : null;
+      if (seg) {
+        var lbl = seg.querySelector('.tr-label');
+        if (lbl) lbl.textContent = (kind === 'unified') ? '统一内存' : 'VRAM';
+        var unit = seg.querySelector('.tr-unit');
+        if (unit) unit.textContent = (total != null) ? ('/ ' + UI.fmtGB(total)) : '';
+      }
+    }
     setFill('trVramFill', vramPct);
 
-    var utilPct = util.pct || 0;
+    var utilPct = (util.pct == null) ? null : util.pct;
     var utilEl = $('trUtil');
-    if (utilEl) utilEl.textContent = UI.fmtNum(Math.round(utilPct));
-    setFill('trUtilFill', utilPct);
+    if (utilEl) utilEl.textContent = (utilPct == null) ? '—' : UI.fmtNum(Math.round(utilPct));
+    setFill('trUtilFill', utilPct || 0);
 
     var pwr = $('trPwr');
-    if (pwr) pwr.textContent = (util.power == null || util.power === '—') ? '—' : UI.fmtNum(Math.round(util.power));
-    // 遥测带 5 段统一量级条：功耗/温度/时钟按本机额定上限（5090D）折算
-    setFill('trPwrFill', numPct(util.power, 575));
+    if (pwr) pwr.textContent = (util.power == null) ? '—' : UI.fmtNum(Math.round(util.power));
+    // 无额定上限数据 → 不填充量级条（no-scale 空态），数值仍正常显示
+    setFill('trPwrFill', 0);
 
     var temp = $('trTemp');
     if (temp) temp.textContent = (util.temp == null || util.temp === '') ? '—' : UI.fmtNum(Math.round(util.temp));
-    setFill('trTempFill', numPct(util.temp, 90));
+    setFill('trTempFill', numPct(util.temp, 90));   // 90°C 通用热上限，非设备额定值
 
     var clk = $('trClock');
     if (clk) clk.textContent = fmtClock(util.clock);
-    setFill('trClockFill', numPct(util.clock, 3110));
+    setFill('trClockFill', 0);                      // 无额定上限数据 → no-scale
   }
 
   /* 数值 → 量级百分比（0–100 钳制）；非数字（—/null）→ 0。 */

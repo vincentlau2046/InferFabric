@@ -21,7 +21,7 @@
  *      天=30×1d/周=13×7d；local/cloud 双 scope；月整体弃用；
  *      每桶 cost 字段（¥，4dp）= 云端费用，未配价模型计 0）
  *   - GET /api/engine_metrics?model=<active> → 6 KPI 原始指标
- *   - GET /api/power?gran=hour|day|week → 功耗/电费分桶（5min TTL；服务端 60s
+ *   - GET /api/device_power?gran=hour|day|week → 功耗/电费分桶（5min TTL；服务端 60s
  *     采样落 SQLite，页面关着历史也连续；小时=近24h/天=近30天/周=近~90天）
  *
  * 窗口/粒度切换 = 客户端 display filter（不触达服务端状态变更）。
@@ -57,7 +57,8 @@
   var _claimSample = '';
 
   // 功耗/电费卡独立 TTL 缓存（5min）——历史功耗无需秒级刷新；不随 3s snapshot 重绘。
-  // 数据源 /api/power（服务端 60s 采样 + v007 表 + 5min 后端 TTL），与延迟卡同构。
+  // 数据源 /api/device_power（DeviceTelemetry T4 聚合流；服务端 60s 采样
+  // + v011 device_power_samples + 5min 后端 TTL），与延迟卡同构。
   var _pgranCache = {};
   var _pgranInflight = {};
   var _POWER_TTL = 300000;       // 5min——四卡统一口径
@@ -147,7 +148,7 @@
 
   /* ── 1. 功耗 / 电费（单图双轴，v6.2 取代 GPU 显存/利用率曲线）──
    * 口径：GPU 板卡功耗（nvidia-smi power.draw，含 idle），¥1/度。
-   * 粒度 hour/day/week = display filter（服务端分桶，GET /api/power；月整体弃用）。
+   * 粒度 hour/day/week = display filter（服务端分桶，GET /api/device_power；月整体弃用）。
    *   - 柱（左轴 W）  = 每桶平均功耗——看"哪个时段烧得凶"
    *   - 折线（右轴 度=元） = 窗口起点累计电量/电费——看"一共烧了多少、花了多少"
    * 双轴合法性：功耗↔累计电量是 流速↔存量 因果对（累计=功率对时间积分），
@@ -200,7 +201,7 @@
     if (c && now - c.at < _POWER_TTL) return c.data;
     if (!_pgranInflight[gran]) {
       _pgranInflight[gran] = true;
-      fetch('/api/power?gran=' + gran, { cache: 'no-store' })
+      fetch('/api/device_power?gran=' + gran, { cache: 'no-store' })
         .then(function (res) {
           if (!res.ok) throw new Error('HTTP ' + res.status);
           return res.json();
@@ -209,7 +210,7 @@
           _pgranCache[gran] = { data: data || {}, at: Date.now() };
           if (isMonitorActive()) drawPower();
         })
-        .catch(function (e) { console.warn('[monitor] /api/power fetch failed:', e); })
+        .catch(function (e) { console.warn('[monitor] /api/device_power fetch failed:', e); })
         .then(function () { _pgranInflight[gran] = false; });
     }
     return c ? c.data : {};
@@ -262,11 +263,11 @@
       // echarts 首渲染即抛 cartesian2d getInitialData 异常）
       IFCharts.update(_charts.power, {
         xAxis: { data: [], boundaryGap: true },
-        // 双轴同构骨架：左 W 固定 0–600（卡 TDP 封顶，不会突破，无需动态取整）；
-        // 右 度 空态 _niceCeil(0,6)=1.2 → 0,0.2,…,1.2。两轴同 splitNumber:6 + min:0
-        // → 6 等分像素位置重合，右轴只印标签不画网格线，一套尺度线（左轴的）。
+        // 双轴同构骨架（DeviceTelemetry T5：无固定 600W TDP 上限——左轴
+        // no-scale 空态与右轴同取 _niceCeil(0,6)=1.2）。两轴同 splitNumber:6
+        // + min:0 → 6 等分像素位置重合，右轴只印标签不画网格线。
         yAxis: [
-          { name: 'W', min: 0, max: 600, splitNumber: 6, position: 'left',
+          { name: 'W', min: 0, max: _niceCeil(0, 6), splitNumber: 6, position: 'left',
             axisLabel: { formatter: function (v) { return v + ' W'; } } },
           { name: '度', min: 0, max: _niceCeil(0, 6), splitNumber: 6,
             splitLine: { show: false }, position: 'right',
@@ -289,17 +290,20 @@
     var cum = buckets.map(function (b) {
       return { value: b.cum_kwh, symbol: 'circle', symbolSize: 5 };
     });
-    // 左轴 W 固定 0–600（卡 TDP 封顶，不会突破）；右轴 度 max = _niceCeil(累计量, 6)
+    // 左轴 W max = 本窗口实际样本的 nice 上取整（DeviceTelemetry T5：移除
+    // 固定瓦数上限假设，数据驱动；无数据桶时退化为 no-scale 空态 1.2）；
+    // 右轴 度 max = _niceCeil(累计量, 6)
     // —— nice 上取整到 6 等分干净步长，max/6 恒为 {1,2,5}×10^k：
     //   总量大 → 整数刻度（37 度 → max 60 → 0,10,…,60），总量 <1 度 → 0.1/0.2/0.5 档。
     // 两轴同 splitNumber:6 + min:0 → 6 等分像素位置重合，右轴只印标签（splitLine 隐藏），
     // 只有左轴一套尺度线——「坐标整数」「max 随实际调节」「不能有两套尺度线」三点齐。
     var maxKwh = _niceCeil((totals.kwh || 0) || 1, 6);
+    var maxW = _niceCeil(Math.max.apply(null, avg.filter(function (v) { return v != null; }).concat([1])), 6);
 
     IFCharts.update(_charts.power, {
       xAxis: { data: xs, boundaryGap: true },
       yAxis: [
-        { name: 'W', min: 0, max: 600, splitNumber: 6, position: 'left',
+        { name: 'W', min: 0, max: maxW, splitNumber: 6, position: 'left',
           axisLabel: { formatter: function (v) { return v + ' W'; } } },
         { name: '度', min: 0, max: maxKwh, splitNumber: 6,
           splitLine: { show: false }, position: 'right',
