@@ -126,13 +126,15 @@ def test_status_scenario_active_reads_applied_layer(tmp_path, monkeypatch):
     from inferfabric.manager import ModelManager
     from inferfabric.config import load_models
     models_dir, applied = _tmp_models_dir(tmp_path, monkeypatch)
-    monkeypatch.setattr(mgrmod, "gpu_used_mb", lambda: 100)
-    monkeypatch.setattr(mgrmod, "gpu_total_mb", lambda: 32768)
+    # DeviceTelemetry T5: status() 的 gpu_* 字段经设备遥测投影（不再用模块级
+    # gpu_*_mb）；本用例只关心 scenario_active → NullTelemetry 空态即可。
+    from inferfabric.platform.telemetry import NullTelemetry
 
     mgr = MagicMock()
     mgr._models = load_models(models_dir)
     mgr.active_services = []
     mgr.state.get_all_sleep_states.return_value = {}
+    mgr._device_telemetry = NullTelemetry()
 
     s = ModelManager.status(mgr)
     assert s["scenario_active"] == {"M": "default"}, "无条目 = default（= 模型 YAML 当前值）"

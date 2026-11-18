@@ -186,9 +186,11 @@ def _make_mgr(monkeypatch, tmp_path):
     mgr.models_dir = models_dir
     # 隔离应用层（load_models 默认 include_applied=True 会读它）
     monkeypatch.setattr(cfgmod, "APPLIED_SCENARIOS_FILE", tmp_path / "active_scenarios.yaml")
-    # gpu_used_mb is a module-level function in manager.py (imported from .health),
-    # so patch the module attribute (not a ModelManager class attribute).
-    monkeypatch.setattr(manager_mod, "gpu_used_mb", lambda: 25074)
+    # DeviceTelemetry T3: switch() 经注入遥测读占用水位（gpu_used_mb 带遥测
+    # 参数）。桩模块级函数 + 注入 NullTelemetry（占位，读数走上面的桩）。
+    monkeypatch.setattr(manager_mod, "gpu_used_mb", lambda telemetry=None: 25074)
+    from inferfabric.platform.telemetry import NullTelemetry
+    mgr._device_telemetry = NullTelemetry()
     return mgr
 
 

@@ -258,16 +258,44 @@ def test_query_power_series_empty(tmp_iffdb, monkeypatch):
 
 # ── 4. PowerSampler ────────────────────────────────────────────
 
+def _fake_telemetry(readings, start_ts=1000, step=60):
+    """DeviceTelemetry T4: PowerSampler 消费统一遥测（不再用 probe 回调）。
+
+    伪后端按序吐 snapshot：power_w 取自 readings（None=本拍不可用），
+    timestamp 自 start_ts 步进 step（采样落盘的 ts 源）。
+    """
+    from inferfabric.platform.telemetry import DeviceSnapshot
+    seq = iter(readings)
+    ts_seq = itertools.count(start_ts, step)
+
+    class _Tel:
+        def snapshot(self):
+            return DeviceSnapshot(
+                platform="linux", accelerator="nvidia", memory_kind="vram",
+                memory_used_mb=None, memory_total_mb=None,
+                memory_budget_mb=None, utilization_pct=None,
+                power_w=next(seq, None), temperature_c=None,
+                clock_mhz=None, pressure_level=None,
+                timestamp=float(next(ts_seq)), sources={})
+
+        def capabilities(self):
+            from inferfabric.platform.telemetry import DeviceCapabilities
+            return DeviceCapabilities(power=True)
+
+    return _Tel()
+
+
 def test_sampler_thread_inserts_non_none(tmp_iffdb, monkeypatch):
-    probe_seq = iter([500.5, None, 510.2, 480.1, None])
-    s = PowerSampler(tmp_iffdb, interval=0.02, probe=lambda: next(probe_seq, None))
-    fake_now = itertools.count(1000, 60)
-    monkeypatch.setattr(s, "_now", lambda: next(fake_now))
+    s = PowerSampler(tmp_iffdb, interval=0.02,
+                     telemetry=_fake_telemetry([500.5, None, 510.2, 480.1, None]))
+    # _now 只驱动清理检查（time.time 会触发首拍 prune 清掉小 ts 样本）；
+    # 钉 0 → 永不 prune（本用例只验证采样落盘）。
+    monkeypatch.setattr(s, "_now", lambda: 0)
     s.start()
     time.sleep(0.15)
     s.stop()
-    rows = tmp_iffdb.query_gpu_power_samples(since=0)
-    # None probe 跳过 → 只落 3 行非 None 采样；ts 单调递增
+    rows = tmp_iffdb.query_device_power_samples(since=0, device_id="aggregate")
+    # None 读数跳过 → 只落 3 行非 None 采样；ts 单调递增
     assert len(rows) == 3
     rows_sorted = sorted(rows, key=lambda r: r["ts"])
     assert [r["watts"] for r in rows_sorted] == [500.5, 510.2, 480.1]
@@ -275,9 +303,9 @@ def test_sampler_thread_inserts_non_none(tmp_iffdb, monkeypatch):
 
 
 def test_sampler_direct_sample_once(tmp_iffdb):
-    s = PowerSampler(tmp_iffdb, interval=999, probe=lambda: 520.0)
+    s = PowerSampler(tmp_iffdb, interval=999, telemetry=_fake_telemetry([520.0]))
     assert s.sample_once() == 520.0
-    s2 = PowerSampler(tmp_iffdb, interval=999, probe=lambda: None)
-    assert s2.sample_once() is None                              # 无 GPU → 不落盘
-    rows = tmp_iffdb.query_gpu_power_samples(since=0)
+    s2 = PowerSampler(tmp_iffdb, interval=999, telemetry=_fake_telemetry([None]))
+    assert s2.sample_once() is None                              # 不可用 → 不落盘
+    rows = tmp_iffdb.query_device_power_samples(since=0, device_id="aggregate")
     assert len(rows) == 1 and abs(rows[0]["watts"] - 520.0) < 1e-9

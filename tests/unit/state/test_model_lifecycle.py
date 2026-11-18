@@ -555,13 +555,21 @@ class TestDeployEngineAdoption:
     守卫本身不全局关闭 —— 引擎不存在时照常生效。
     """
 
-    def _patch_gpu(self, monkeypatch, models, used_mb=30500, total_mb=32768):
+    def _patch_gpu(self, monkeypatch, lc, models, used_mb=30500, total_mb=32768):
         monkeypatch.setattr("inferfabric.model_lifecycle.load_models",
                             lambda models_dir=None: models)
-        monkeypatch.setattr("inferfabric.model_lifecycle.gpu_used_mb",
-                            lambda: used_mb)
-        monkeypatch.setattr("inferfabric.model_lifecycle.gpu_total_mb",
-                            lambda: total_mb)
+        # DeviceTelemetry T3: VRAM 守卫改为消费注入遥测（check_vram_budget
+        # 读 snapshot.memory_used/total），不再 monkeypatch 模块级 gpu_*_mb。
+        # 伪快照模拟「幸存容器自己占着 ~30GB」的 P0 场景。
+        from types import SimpleNamespace as _NS
+        from inferfabric.platform.telemetry import DeviceSnapshot
+        snap = DeviceSnapshot(
+            platform="linux", accelerator="nvidia", memory_kind="vram",
+            memory_used_mb=used_mb, memory_total_mb=total_mb,
+            memory_budget_mb=int(total_mb * 0.97), utilization_pct=None,
+            power_w=None, temperature_c=None, clock_mhz=None,
+            pressure_level=None, timestamp=0.0, sources={})
+        lc._device_telemetry = _NS(snapshot=lambda: snap)
         # 这些用例验证的是离散显存（CUDA）路径的 VRAM 守卫语义 —
         # 平台钉为非 macOS，统一内存机器上也能确定性走守卫（C2 纪律）。
         monkeypatch.setattr("inferfabric.platform.probe.IS_MACOS", False)
@@ -570,7 +578,7 @@ class TestDeployEngineAdoption:
         """幸存引擎在场 → 不 clear CUDA、不 VRAM 拒绝、直收养。"""
         lc, proc, model, models = _make_deploy_lifecycle()
         proc.engine_exists.return_value = True
-        self._patch_gpu(monkeypatch, models)
+        self._patch_gpu(monkeypatch, lc, models)
 
         result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
 
@@ -583,7 +591,7 @@ class TestDeployEngineAdoption:
         """引擎不在场（全新部署）→ 守卫照常：VRAM 超预算必须拒绝。"""
         lc, proc, model, models = _make_deploy_lifecycle()
         proc.engine_exists.return_value = False
-        self._patch_gpu(monkeypatch, models)
+        self._patch_gpu(monkeypatch, lc, models)
 
         result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
 
@@ -600,7 +608,7 @@ class TestDeployEngineAdoption:
         """
         lc, proc, model, models = _make_deploy_lifecycle()
         # engine_exists.return_value 故意不设置（默认 MagicMock）
-        self._patch_gpu(monkeypatch, models)
+        self._patch_gpu(monkeypatch, lc, models)
 
         result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
 
@@ -611,7 +619,7 @@ class TestDeployEngineAdoption:
         """探测本身抛异常 → 按不在场处理，不得阻断部署（守卫路径照走）。"""
         lc, proc, model, models = _make_deploy_lifecycle()
         proc.engine_exists.side_effect = RuntimeError("docker unavailable")
-        self._patch_gpu(monkeypatch, models, used_mb=100)
+        self._patch_gpu(monkeypatch, lc, models, used_mb=100)
 
         result = lc._deploy_model(model, GPUMode.EXCLUSIVE)
 
@@ -626,7 +634,7 @@ class TestDeployEngineAdoption:
         model.gpu_role = "shared"
         lc._lock.is_held = True
         proc.engine_exists.return_value = True
-        self._patch_gpu(monkeypatch, models)
+        self._patch_gpu(monkeypatch, lc, models)
 
         result = lc._shared_add_service(model)
 
