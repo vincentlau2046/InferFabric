@@ -30,8 +30,8 @@ def _policy_reserve_mb():
     直接读 JSON 不 import packs（避免 packs→config→本模块 环）；
     缺失/损坏/非法一律 None 回退默认，绝不抛异常（本模块纪律）。
     """
-    state_dir = os.environ.get(
-        "IFF_DATA_DIR",
+    state_dir = os.environ.get("IFF_DATA_DIR") or os.environ.get(
+        "MACFABRIC_STATE_DIR",
         os.path.join(os.path.expanduser("~"), ".inferfabric"))
     path = os.path.join(state_dir, "packs", "policy.json")
     try:
@@ -126,8 +126,13 @@ def mem_used_mb() -> int | None:
 # ─── 预算 B（内存账本地基）─────────────────────────────────────
 
 def _reserve_mb() -> int:
-    """保留值优先级：env > packs policy > 默认 8192。"""
-    env = os.environ.get("IFF_RESERVE_MB", "").strip()
+    """保留值优先级：env > packs policy > 默认 8192。
+
+    env 双读：IFF_RESERVE_MB（上游名，PR#2 起两边文本一致）优先，
+    MACFABRIC_RESERVE_MB 为 fork 兼容别名。
+    """
+    env = (os.environ.get("IFF_RESERVE_MB")
+           or os.environ.get("MACFABRIC_RESERVE_MB", "")).strip()
     reserve = None
     if env:
         try:

@@ -39,10 +39,13 @@ _BACKENDS = {
 def detect() -> PlatformProfile:
     """Resolve the current platform profile.
 
-    IFF_FORCE_PLATFORM overrides the detected os ("darwin"|"linux"|
-    anything else) — a test hook; production code must never set it.
+    IFF_FORCE_PLATFORM / MACFABRIC_FORCE_PLATFORM (fork alias) overrides the
+    detected os ("darwin"|"linux"|anything else) — a test hook; production
+    code must never set it. IFF_* first: upstream name since PR#2, so the
+    two codebases stay textually identical apart from alias lines.
     """
-    forced = os.environ.get("IFF_FORCE_PLATFORM", "")
+    forced = (os.environ.get("IFF_FORCE_PLATFORM")
+              or os.environ.get("MACFABRIC_FORCE_PLATFORM", ""))
     if forced:  # explicit override wins, unknown values resolve to "other"
         os_name = forced if forced in _BACKENDS else "other"
     elif sys.platform == "darwin":
