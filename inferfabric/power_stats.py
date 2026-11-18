@@ -24,7 +24,6 @@ inferfabric/power_stats.py — GPU 板卡功耗时间序列 (v6.2 监控 TAB「�
 from __future__ import annotations
 
 import logging
-import subprocess
 import threading
 import time
 
@@ -44,35 +43,41 @@ SAMPLE_INTERVAL_SEC = 60.0        # PowerSampler 采样间隔（单样本能量�
 # ── 探针 ───────────────────────────────────────────────────────
 
 def probe_gpu_power_w() -> float | None:
-    """当前 GPU 板卡功耗（W）。nvidia-smi 不可用/无 GPU → None（本拍跳过）。"""
+    """DEPRECATED shim — 委托 DeviceTelemetry snapshot().power_w。
+
+    供采样器之外的旧调用方使用；不可用 → None（不伪造 0）。"""
     try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return round(float(r.stdout.strip().splitlines()[0].strip().split()[0]), 1)
+        from .platform import detect
+        from .platform.telemetry import telemetry_for_profile
+        return telemetry_for_profile(detect()).snapshot().power_w
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ── 采样器 ─────────────────────────────────────────────────────
 
 class PowerSampler:
-    """60s 后台线程采样 GPU 板卡功耗并落 SQLite。
+    """60s 后台线程采样设备功耗并落 SQLite（device_power_samples，v011）。
 
-    独立于前端轮询（页面关着也记账，历史才连续）。probe 失败（无 GPU）
-    跳过本拍、下一拍重试（nvidia-smi 单次 <20ms，代价可忽略）。
+    消费 DeviceTelemetry：每拍成功 snapshot 落一个聚合样本
+    (device_id='aggregate', source='device_telemetry')；power_w 为 None
+    （不可用）跳过本拍、下一拍重试 —— 不伪造 0（真实 0W 保留）。
     每天清理一次超期样本（RETENTION_DAYS，幂等）。
     """
 
     RETENTION_DAYS = 90
 
-    def __init__(self, db, interval: float = 60.0, probe=None):
+    def __init__(self, db, interval: float = 60.0, probe=None, telemetry=None):
         self._db = db
         self._interval = interval
-        self._probe = probe if probe is not None else probe_gpu_power_w
+        # DeviceTelemetry T4: probe 参数仅为向后兼容保留（不再使用）；
+        # telemetry 未注入时用工厂默认（按平台装配）。
+        self._probe = probe  # deprecated, unused
+        if telemetry is None:
+            from .platform import detect
+            from .platform.telemetry import telemetry_for_profile
+            telemetry = telemetry_for_profile(detect())
+        self._telemetry = telemetry
         self._stop = threading.Event()
         self._thread = None
         self._last_prune = 0.0
@@ -95,12 +100,19 @@ class PowerSampler:
             th.join(timeout=2.0)
 
     def sample_once(self):
-        """拍一拍：probe 成功落一行 (ts, watts)，失败返回 None 不落盘。"""
-        w = self._probe()
+        """拍一拍：snapshot.power_w 成功落一行，None 跳过不落盘。"""
+        snap = self._telemetry.snapshot()
+        w = snap.power_w
         if w is None:
             return None
-        ts = int(self._now())
-        self._db.insert_gpu_power_samples([{"ts": ts, "watts": round(float(w), 1)}])
+        self._db.insert_device_power_samples([{
+            "ts": int(snap.timestamp),
+            "platform": snap.platform,
+            "accelerator": snap.accelerator,
+            "device_id": "aggregate",
+            "watts": round(float(w), 1),
+            "source": "device_telemetry",
+        }])
         self.sample_count += 1
         return w
 
@@ -114,7 +126,7 @@ class PowerSampler:
                 now = self._now()
                 if now - self._last_prune >= 86400:
                     self._last_prune = now
-                    self._db.prune_gpu_power_samples(now - self.RETENTION_DAYS * 86400)
+                    self._db.prune_device_power_samples(now - self.RETENTION_DAYS * 86400)
             except Exception as e:
                 log.debug("power prune failed: %s", e)
             self._stop.wait(self._interval)
@@ -188,22 +200,25 @@ def bucket_stats(samples: list[tuple[int, float]],
     return buckets
 
 
-# ── 查询入口（handler /api/power 调用）────────────────────────
+# ── 查询入口（handler /api/power、/api/device_power 调用）────────
 
-def query_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH) -> dict:
-    """按档位返回分桶功耗/电费序列 + 窗口汇总。gran ∈ {hour, day, week, month}。"""
+def _power_series_from_stream(db, gran: str, price: float,
+                              device_id: str) -> dict:
+    """单流分桶序列（legacy 或 aggregate），流之间从不跨流积分。"""
     now = int(time.time())
     if gran == "day":
         slots = day_slots(now)
     elif gran == "week":
         slots = week_slots(now)
     elif gran == "month":
-        oldest = db.query_gpu_power_samples(since=0, limit=1)
+        oldest = db.query_device_power_samples(since=0, limit=1,
+                                               device_id=device_id)
         slots = month_slots(now, oldest[0]["ts"] if oldest else now)
     else:
         slots = hour_slots(now)
     since = slots[0][0]
-    rows = db.query_gpu_power_samples(since, until=now + 60)
+    rows = db.query_device_power_samples(since, until=now + 60,
+                                         device_id=device_id)
     samples = [(int(r["ts"]), float(r["watts"])) for r in rows]
     buckets = bucket_stats(samples, slots)
     avg_ws = [b["avg_w"] for b in buckets if b["avg_w"] is not None]
@@ -220,3 +235,18 @@ def query_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH
         },
         "available": len(rows) > 0,
     }
+
+
+def query_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH) -> dict:
+    """GET /api/power — legacy 流（unknown/unknown，v007 历史）分桶序列。
+
+    只读 legacy 流：v007 首卡样本永不与 v011 全卡样本跨流插值。
+    """
+    return _power_series_from_stream(db, gran, price, device_id="unknown")
+
+
+def query_device_power_series(db, gran: str = "hour", price: float = PRICE_YUAN_PER_KWH) -> dict:
+    """GET /api/device_power — 当前聚合流（accelerator/aggregate）分桶序列。
+
+    与 /api/power 同 shape {gran, buckets, totals, available}。"""
+    return _power_series_from_stream(db, gran, price, device_id="aggregate")

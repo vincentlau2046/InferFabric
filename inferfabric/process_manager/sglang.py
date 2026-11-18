@@ -139,7 +139,9 @@ class SGLangProcessManager(BaseProcessManager):
 
         if port:
             try:
-                wait_gpu_free()
+                # DeviceTelemetry T3: fail-closed — wait_gpu_free returns
+                # False on an unavailable reading, never reports free.
+                wait_gpu_free(telemetry=self.device_telemetry)
             except Exception as e:
                 log.error("GPU did not free after SGLang stop (port %s): %s", port, e)
         self._set_sglang_pid(None)

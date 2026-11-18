@@ -40,3 +40,7 @@ IFFDB.register_migration(9, "request_log", "backfill_agent")
 # v010: 诚实化历史数据 + 预留 x_app 列（v6.6 架构修正）
 from inferfabric.migrations import v010_honestize_and_x_app
 IFFDB.register_migration(10, "request_log", "honestize_and_x_app")
+
+# v011: device_power_samples（DeviceTelemetry T4 平台中立功耗序列）
+from inferfabric.migrations import v011_device_power_samples
+IFFDB.register_migration(11, "request_log", "device_power_samples")
