@@ -18,6 +18,9 @@ Usage:
   iff tune <model>        Show scenarios + current live values for a model
   iff tune <model> <preset>  Apply a preset (prints diff, confirms, restarts)
   iff tune <model> default   Roll back to pre-preset baseline
+  iff remove model <name> [--purge-pools] [--dry-run] [--yes]  卸载模型（停服务+删配置）
+  iff remove env <name> [--force] [--dry-run] [--yes]          卸载 conda env（引用计数门禁）
+  iff remove image <ref> [--dry-run] [--yes]                   卸载本项目拉取的镜像（台账门禁）
 """
 
 import sys
@@ -539,6 +542,88 @@ def cmd_tune(args):
     _print_tune_result(r, no_restart)
 
 
+def _print_remove_report(report: dict) -> None:
+    status = report.get("status")
+    kind = report.get("model") or report.get("env") or report.get("image")
+    icon = {"removed": "✅", "would-remove": "🔎",
+            "blocked": "⛔", "error": "❌"}.get(status, "•")
+    print(f"{icon} {status}: {kind}")
+    if report.get("message"):
+        print(f"  {report['message']}")
+    for k in ("prefix", "pool_refs", "referenced_by"):
+        if report.get(k):
+            print(f"  {k}: {report[k]}")
+    for a in report.get("actions") or []:
+        detail = a.get("path") or a.get("prefix") or a.get("ref") or \
+            a.get("candidates") or a.get("reason") or ""
+        print(f"  - {a.get('action')}: {detail}")
+    for w in report.get("weights_kept") or []:
+        print(f"  weights kept: {w}")
+    if report.get("note"):
+        print(f"  note: {report['note']}")
+
+
+def cmd_remove(args):
+    """iff remove <model|env|image> <target> [--dry-run] [--yes] ...
+
+    破坏性命令强制两段式：无 --yes 时只打印计划（零副作用）并退出 1，
+    确认后带 --yes 执行。--dry-run 打印同一计划并退出 0。
+    """
+    usage = (
+        "Usage:\n"
+        "  iff remove model <name> [--purge-pools] [--dry-run] [--yes]\n"
+        "  iff remove env <name> [--force] [--dry-run] [--yes]\n"
+        "  iff remove image <ref> [--dry-run] [--yes]"
+    )
+    flags = {"--dry-run", "--yes", "-y", "--purge-pools", "--force"}
+    positional = [a for a in args if a not in flags]
+    if len(positional) != 2 or positional[0] not in ("model", "env", "image"):
+        print(usage)
+        sys.exit(1)
+    kind, target = positional
+    dry_run = "--dry-run" in args
+    confirmed = ("--yes" in args) or ("-y" in args)
+    purge_pools = "--purge-pools" in args
+    force = "--force" in args
+
+    from inferfabric import uninstaller as un
+
+    plan_only = dry_run or not confirmed
+    if kind == "model":
+        from inferfabric.config import IFF_DATA_DIR, MODELS_DIR, load_models
+        models = load_models(MODELS_DIR)
+        name, _cfg = un.find_model(models, target)
+        if _cfg is None:
+            print(f"❌ unknown model: {target!r}")
+            sys.exit(1)
+        mgr = ModelManager()
+        report = un.remove_model(
+            target, models=models, models_dir=MODELS_DIR,
+            pools_path=IFF_DATA_DIR / "model_pools.yaml",
+            stop_fn=(lambda: mgr.stop_service(name)),
+            is_running_fn=(lambda: name in mgr.active_services),
+            purge_pools=purge_pools, dry_run=plan_only)
+    elif kind == "env":
+        from inferfabric.config import MODELS_DIR, load_models
+        report = un.remove_env(target, models=load_models(MODELS_DIR),
+                               force=force, dry_run=plan_only)
+    else:
+        from inferfabric.config import IFF_DATA_DIR, MODELS_DIR, load_models
+        from inferfabric.image_manager import ManagedImageLedger
+        report = un.remove_image(
+            target, models=load_models(MODELS_DIR),
+            ledger=ManagedImageLedger(IFF_DATA_DIR / "image_ledger.json"),
+            dry_run=plan_only)
+
+    _print_remove_report(report)
+
+    if report.get("status") in ("error", "blocked"):
+        sys.exit(1)
+    if plan_only and not dry_run:
+        print("\nNo changes made. Re-run with --yes to execute.")
+        sys.exit(1)
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__.strip())
@@ -573,6 +658,8 @@ def main():
         cmd_gpu_clear(rest)
     elif cmd == "tune":
         cmd_tune(rest)
+    elif cmd == "remove":
+        cmd_remove(rest)
     elif cmd == "keys":
         from inferfabric.security.cli import run_keys
         try:
@@ -582,7 +669,7 @@ def main():
             sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")
-        print("Available: status, models, switch, stop, pull, list-downloaded, sleep, wake, history, reset, reconcile, gpu-clear, tune")
+        print("Available: status, models, switch, stop, pull, list-downloaded, sleep, wake, history, reset, reconcile, gpu-clear, tune, remove")
         sys.exit(1)
 
 
