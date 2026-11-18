@@ -57,11 +57,11 @@ def test_login_cross_origin_denied(admin, headers):
 
 def test_create_list_revoke_and_policy(admin):
     headers = login(admin)
-    h = Handler({'name': 'client', 'models': ['iff/work']}, headers)
+    h = Handler({'name': 'client', 'models': ['fabric-work']}, headers)
     admin.handle(h, 'create')
     assert h.status == 201
     token, meta = h.response()['key'], h.response()['entry']
-    assert admin.store.check(token, 'iff/work')[0]
+    assert admin.store.check(token, 'fabric-work')[0]
     h = Handler(headers=headers, method='GET')
     admin.handle(h, 'list')
     assert h.status == 200 and token not in h.wfile.getvalue().decode()
@@ -74,7 +74,7 @@ def test_create_list_revoke_and_policy(admin):
     assert h.status == 200 and admin.store.get_policy() == 'all'
     h = Handler({'id': meta['id']}, headers)
     admin.handle(h, 'revoke')
-    assert h.status == 200 and not admin.store.check(token, 'iff/work')[0]
+    assert h.status == 200 and not admin.store.check(token, 'fabric-work')[0]
 
 
 def test_csrf_and_anonymous_rejected(admin):

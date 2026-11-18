@@ -85,11 +85,10 @@ class TestRunAttempts:
 
     def test_429_waits_within_budget_and_retries_same_target(self):
         sleeps = []
-        # start,check,t0,duration,remaining,check,t0,duration（F18 计时）
-        clock = iter([0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0])
+        # v2 循环计时点更多（耗时重算/探测回写），用恒定时钟保持预算恒定
         t = Recorder([AttemptResult(status=429, retry_after=1.0), _ok()])
         out = run_attempts(_pool(deadline_ms=5000), [_cand("c1")], t,
-                           monotonic=lambda: next(clock),
+                           monotonic=lambda: 0.0,
                            sleep=sleeps.append)
         assert out.ok is True
         assert t.calls == ["c1", "c1"]            # 同目标等待后重试
@@ -98,11 +97,10 @@ class TestRunAttempts:
     def test_429_over_budget_switches_candidate(self):
         # Retry-After=10s > 剩余 deadline=3s → 无法在预算内尊重 → 切候选
         sleeps = []
-        clock = iter([0.0] * 8)   # 同上：每次 attempt 消耗 3 个 mono
         t = Recorder([AttemptResult(status=429, retry_after=10.0), _ok()])
         out = run_attempts(_pool(deadline_ms=3000),
                            [_cand("c1"), _cand("c2")], t,
-                           monotonic=lambda: next(clock), sleep=sleeps.append)
+                           monotonic=lambda: 0.0, sleep=sleeps.append)
         assert out.ok is True
         assert t.calls == ["c1", "c2"]
         assert sleeps == []
@@ -180,7 +178,7 @@ class TestSelectorIntegration:
     def test_select_returns_ordered_eligible(self, registry):
         # 跨位置回退显式开启（F6 默认关闭：本地+云候选默认只保留 chosen 位置）
         cfg = _raw_config()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
@@ -188,7 +186,7 @@ class TestSelectorIntegration:
                     providers={"prov": SimpleNamespace(
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
-        sel = select(registry.snapshot().pools["fast"],
+        sel = select(registry.snapshot().pools["flash"],
                      RequestRequirements(protocol="openai"),
                      dispatch.runtime_view(pm))
         assert sel.ordered is not None
@@ -198,7 +196,7 @@ class TestSelectorIntegration:
     def test_cooldown_excludes_candidate(self, registry):
         # 跨位置回退显式开启（冷却本地 → 云备用可达需 opt-in）
         cfg = _raw_config()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
@@ -208,9 +206,9 @@ class TestSelectorIntegration:
                         anthropic_base="https://base/v1")})
         pm.pool_cooldowns = CooldownStore()
         # 冷却本地候选（fingerprint 与 registry 解析一致）
-        fp = registry.snapshot().pools["fast"].candidates[0].endpoint_fingerprint
+        fp = registry.snapshot().pools["flash"].candidates[0].endpoint_fingerprint
         pm.pool_cooldowns.add(fp)
-        sel = select(registry.snapshot().pools["fast"],
+        sel = select(registry.snapshot().pools["flash"],
                      RequestRequirements(protocol="openai"),
                      dispatch.runtime_view(pm))
         reasons = {d.candidate_id: d.reason for d in sel.decisions}
@@ -224,14 +222,18 @@ class TestDispatchFailover:
     def test_local_conn_fail_falls_to_cloud(self, registry, monkeypatch):
         # 跨本地/云回退需显式开启（用户约束：默认关闭，逐池开启）
         cfg = _raw_config()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         local_calls = []
 
         def fake_forward(handler, pm, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None, timeout=None):
+                         upstream_path=None, cache_body=None, timeout=None,
+                         suppress_client_errors=False):
             local_calls.append(target_port)
-            return False                       # 连接失败，headers 未发送
+            # v2 结构化契约：连接失败 = 未提交、无上游状态 → 切下一候选
+            return {"committed": False, "ok": False, "status": None,
+                    "stream_state": None, "usage": {}, "ttft_ms": None,
+                    "error": "connection failed"}
 
         cloud_calls = []
 
@@ -242,7 +244,7 @@ class TestDispatchFailover:
             return SimpleNamespace(status=200, usage={}, ttft_ms=None,
                                    duration_ms=1.0, error=None, committed=True)
 
-        monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
+        monkeypatch.setattr(dispatch, "_forward_request_ex", fake_forward)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()},
@@ -251,9 +253,9 @@ class TestDispatchFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeHandler()
-        data = {"model": "iff/fast", "messages": []}
+        data = {"model": "fabric-fast", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
         assert len(local_calls) == 1
         assert len(cloud_calls) == 1                    # 总 POST 数 = 2
         assert cloud_calls[0]["suppress"] is True       # 池路径必须抑制直发
@@ -276,7 +278,7 @@ class TestDispatchFailover:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         # 池只留云候选 → 401 冷却后无候选可用
         cfg = _raw_config()
-        cfg["pools"]["fast"]["candidates"] = [
+        cfg["pools"]["flash"]["candidates"] = [
             {"id": "cld", "priority": 1, "kind": "cloud",
              "provider": "prov", "model_id": "cloud-m",
              "declared_protocols": ["openai"]}]
@@ -288,8 +290,8 @@ class TestDispatchFailover:
         pm.pool_cooldowns = CooldownStore()
 
         h1 = FakeHandler()
-        assert dispatch.handle_pool_chat(h1, pm, {"model": "iff/fast",
-                                                  "messages": []}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h1, pm, {"model": "fabric-fast",
+                                                  "messages": []}, "fabric-fast") is True
         status, body, _ = h1.sent[-1]
         assert status == 503 and body["status"] == "pool_unavailable"
         assert len(cloud_calls) == 1
@@ -297,8 +299,8 @@ class TestDispatchFailover:
 
         # 第二次请求：冷却中 → 选择期排除，不再出网
         h2 = FakeHandler()
-        assert dispatch.handle_pool_chat(h2, pm, {"model": "iff/fast",
-                                                  "messages": []}, "iff/fast") is True
+        assert dispatch.handle_pool_chat(h2, pm, {"model": "fabric-fast",
+                                                  "messages": []}, "fabric-fast") is True
         status, body, _ = h2.sent[-1]
         assert status == 503 and body["status"] == "no_ready_target"
         assert len(cloud_calls) == 1                       # 零新上游调用
@@ -465,7 +467,7 @@ class TestCommittedStreamBoundary:
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
         result = forward_anthropic_local(
             h, pm, {"model": "x", "messages": [], "stream": True},
-            "key", model_obj, "iff/fast", suppress_client_errors=True)
+            "key", model_obj, "fabric-fast", suppress_client_errors=True)
         # 终审 #10 契约：CloudResult committed 信号（committed=False = 可重放）
         assert result.status == 200 and result.committed is True
         assert h.status == 200
@@ -611,12 +613,11 @@ class TestIncompatibleProbeAndGuard:
     def test_incompatible_with_429_keeps_wait_and_retry(self):
         # 状态守卫：incompatible=True 只对 400 生效；429 仍走等待重试动作表
         sleeps = []
-        clock = iter([0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0])
         t = Recorder([AttemptResult(status=429, retry_after=1.0,
                                     incompatible=True),
                       _ok()])
         out = run_attempts(_pool(deadline_ms=5000), [_cand("c1")], t,
-                           monotonic=lambda: next(clock), sleep=sleeps.append)
+                           monotonic=lambda: 0.0, sleep=sleeps.append)
         assert out.ok is True
         assert t.calls == ["c1", "c1"]                 # 同目标等待重试，未切候选
         assert sleeps == [1.0]

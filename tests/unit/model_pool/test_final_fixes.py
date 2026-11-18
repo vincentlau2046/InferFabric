@@ -59,6 +59,21 @@ def _pool(max_attempts=3, deadline_ms=60000, **kw):
     return SimpleNamespace(max_attempts=max_attempts, deadline_ms=deadline_ms, **kw)
 
 
+def _fx_ok(*_a, **_kw):
+    """v2 结构化传输契约（pool_forward._forward_request_ex）：成功 = 已完整交付。"""
+    return {"committed": True, "ok": True, "status": 200,
+            "stream_state": None,
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            "ttft_ms": None, "error": None}
+
+
+def _fx_conn_fail(*_a, **_kw):
+    """v2 结构化传输契约：连接失败 = 未提交、无上游状态 → 切下一候选。"""
+    return {"committed": False, "ok": False, "status": None,
+            "stream_state": None, "usage": {}, "ttft_ms": None,
+            "error": "connection failed"}
+
+
 # ── #20 字符串布尔不得静默开启安全开关 ──
 
 class TestStrictBool:
@@ -103,7 +118,7 @@ class TestMonotonicRevision:
 
     def test_second_unchanged_reload_keeps_revision(self, tmp_path):
         reg = _make_registry(tmp_path)
-        self._write_external(tmp_path, {"fast": {
+        self._write_external(tmp_path, {"flash": {
             "enabled": True, "allowed_locations": ["local"],
             "candidates": [{"id": "a", "priority": 1, "kind": "local",
                             "model_name": "qwen-small",
@@ -117,14 +132,14 @@ class TestMonotonicRevision:
 
     def test_stale_cas_rejected_after_external_pickup(self, tmp_path):
         reg = _make_registry(tmp_path)
-        reg.update({"schema_version": 1, "pools": {"fast": {
+        reg.update({"schema_version": 1, "pools": {"flash": {
             "enabled": True, "allowed_locations": ["local"],
             "candidates": [{"id": "a", "priority": 1, "kind": "local",
                             "model_name": "qwen-small",
                             "declared_protocols": ["openai"]}],
         }}}, expected_revision=0)   # → revision 1（文件写入 revision: 1）
         # 外部编辑：内容变化但原地保留 revision 键 1 → 拾取后 revision 2
-        self._write_external(tmp_path, {"fast": {
+        self._write_external(tmp_path, {"flash": {
             "enabled": True, "allowed_locations": ["local"],
             "candidates": [{"id": "a", "priority": 1, "kind": "local",
                             "model_name": "qwen-small",
@@ -163,7 +178,7 @@ class TestReloadTriState:
     def test_unchanged_content_is_none(self, tmp_path):
         reg = _make_registry(tmp_path)
         (tmp_path / "model_pools.yaml").write_text(
-            yaml.safe_dump({"schema_version": 1, "revision": 3, "pools": {"fast": {
+            yaml.safe_dump({"schema_version": 1, "revision": 3, "pools": {"flash": {
                 "enabled": True, "allowed_locations": ["local"],
                 "candidates": [{"id": "a", "priority": 1, "kind": "local",
                                 "model_name": "qwen-small",
@@ -181,13 +196,13 @@ class TestSnapshotRoute:
             tmp_path,
             provider_route=lambda p: {"openai_base": "https://o/v1",
                                       "anthropic_base": "https://a/v1"})
-        reg.update({"schema_version": 1, "pools": {"fast": {
+        reg.update({"schema_version": 1, "pools": {"flash": {
             "enabled": True, "allowed_locations": ["cloud"],
             "candidates": [{"id": "c", "priority": 1, "kind": "cloud",
                             "provider": "prov", "model_id": "m",
                             "declared_protocols": ["openai"]}],
         }}}, expected_revision=0)
-        cand = reg.snapshot().pools["fast"].candidates[0]
+        cand = reg.snapshot().pools["flash"].candidates[0]
         assert cand.route["openai_base"] == "https://o/v1"
         assert cand.route["anthropic_base"] == "https://a/v1"
 
@@ -195,7 +210,7 @@ class TestSnapshotRoute:
         bases = {"prov": {"openai_base": "https://old/v1",
                           "anthropic_base": "https://old-a/v1"}}
         reg = _make_registry(tmp_path, provider_route=lambda p: bases[p])
-        reg.update({"schema_version": 1, "pools": {"fast": {
+        reg.update({"schema_version": 1, "pools": {"flash": {
             "enabled": True, "allowed_locations": ["cloud"],
             "candidates": [{"id": "c", "priority": 1, "kind": "cloud",
                             "provider": "prov", "model_id": "m",
@@ -206,34 +221,34 @@ class TestSnapshotRoute:
                          "anthropic_base": "https://new-a/v1"}
         reg.reload_from_disk()
         # 旧快照引用不受影响（mid-flight 请求用编译时路由，终审 #5）
-        assert old_snap.pools["fast"].candidates[0].route["openai_base"] == "https://old/v1"
+        assert old_snap.pools["flash"].candidates[0].route["openai_base"] == "https://old/v1"
         # 新快照反映新端点
-        assert reg.snapshot().pools["fast"].candidates[0].route["openai_base"] == "https://new/v1"
+        assert reg.snapshot().pools["flash"].candidates[0].route["openai_base"] == "https://new/v1"
 
     def test_fingerprint_changes_on_anthropic_base_only(self, tmp_path):
         bases = {"prov": {"openai_base": "https://o/v1",
                           "anthropic_base": "https://old-a/v1"}}
         reg = _make_registry(tmp_path, provider_route=lambda p: bases[p])
-        reg.update({"schema_version": 1, "pools": {"fast": {
+        reg.update({"schema_version": 1, "pools": {"flash": {
             "enabled": True, "allowed_locations": ["cloud"],
             "candidates": [{"id": "c", "priority": 1, "kind": "cloud",
                             "provider": "prov", "model_id": "m",
                             "declared_protocols": ["openai", "anthropic"],
                             "features": ["tools"]}],
         }}}, expected_revision=0)
-        fp_before = reg.snapshot().pools["fast"].candidates[0].endpoint_fingerprint
+        fp_before = reg.snapshot().pools["flash"].candidates[0].endpoint_fingerprint
         # 注入一条旧指纹的 PROBED 证据（anthropic 协议）
         ev = Evidence(state=EvidenceState.PROBED, protocol="anthropic",
                       features=("tools",), fingerprint=fp_before,
                       recorded_at="", source="probe")
         reg.evidence.record("cloud:prov:m:anthropic", ev)
         reg.evidence.save()
-        assert "anthropic" in reg.snapshot().pools["fast"].candidates[0].evidence
+        assert "anthropic" in reg.snapshot().pools["flash"].candidates[0].evidence
         # 只改 anthropic_base（openai_base 不变）→ 指纹变化，旧 PROBED 证据
         # 不为新端点背书（declared 证据按新指纹重新推导，属正常）（终审 #6）
         bases["prov"]["anthropic_base"] = "https://new-a/v1"
         reg.reload_from_disk()
-        cand = reg.snapshot().pools["fast"].candidates[0]
+        cand = reg.snapshot().pools["flash"].candidates[0]
         assert cand.endpoint_fingerprint != fp_before
         ev_anthropic = cand.evidence.get("anthropic")
         assert ev_anthropic is not None
@@ -245,7 +260,7 @@ class TestSnapshotRoute:
 
 def _snap_with(pool_cfg, candidates):
     from inferfabric.model_pool.config import CandidateConfig, PoolConfig
-    pool = PoolConfig(name="fast", **pool_cfg)
+    pool = PoolConfig(name="flash", **pool_cfg)
     from inferfabric.model_pool.registry import PoolSnapshot
     return PoolSnapshot(revision=1, pool=pool, candidates=tuple(candidates))
 
@@ -341,7 +356,7 @@ class TestHistoryPassthroughWithCooldown:
     def test_tool_history_routes_with_cooling_backup(self, tmp_path, monkeypatch):
         import json as _json
         cfg = _raw_config()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         reg = _make_registry(tmp_path)
         reg.update(cfg, expected_revision=0)
         pm = FakePM(reg, active={"qwen-small"},
@@ -349,16 +364,16 @@ class TestHistoryPassthroughWithCooldown:
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
         # 云备用在冷却 → ordered 只剩本地 p1；工具历史不再被拒绝
-        fp = reg.snapshot().pools["fast"].candidates[1].endpoint_fingerprint
+        fp = reg.snapshot().pools["flash"].candidates[1].endpoint_fingerprint
         pm.pool_cooldowns = CooldownStore()
         pm.pool_cooldowns.add(fp)
-        monkeypatch.setattr(dispatch, "_forward_request", lambda *a, **kw: True)
-        data = {"model": "iff/fast", "messages": [
+        monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
+        data = {"model": "fabric-fast", "messages": [
             {"role": "tool", "tool_call_id": "t1", "content": "ok"},
             {"role": "user", "content": "hi"}]}
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, _json.loads(_json.dumps(data)),
-                                         "iff/fast") is True
+                                         "fabric-fast") is True
         assert h.sent == []                    # 正常转发，无错误信封
 
 
@@ -604,7 +619,7 @@ class _FailTargetGate:
 class TestDispatchFinal:
     def _registry_cross(self, tmp_path, provider_route=None):
         cfg = _raw_config()
-        cfg["pools"]["fast"]["allow_cross_location"] = True
+        cfg["pools"]["flash"]["allow_cross_location"] = True
         reg = _make_registry(tmp_path, provider_route=provider_route)
         reg.update(cfg, expected_revision=0)
         return reg
@@ -616,11 +631,11 @@ class TestDispatchFinal:
                     local_models={"qwen-small": _local_model()},
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
-        monkeypatch.setattr(dispatch, "_forward_request", lambda *a, **kw: True)
+        monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
-        assert pm.dual_gate.acquired == ["iff/fast"]          # 外层只一次全量 gate
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+        assert pm.dual_gate.acquired == ["fabric-fast"]          # 外层只一次全量 gate
         assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理门= acquire_target
 
     # #14：物理门失败 → 不预留副本端口
@@ -632,11 +647,11 @@ class TestDispatchFinal:
         port_calls = []
         orig = pm.get_target_port
         pm.get_target_port = lambda m: (port_calls.append(m), orig(m))[1]
-        monkeypatch.setattr(dispatch, "_forward_request",
-                            lambda *a, **kw: True)   # 若被调用说明门失效
+        monkeypatch.setattr(dispatch, "_forward_request_ex",
+                            _fx_ok)   # 若被调用说明门失效
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
         assert port_calls == []            # 门失败在端口预留之前
         assert h.sent and h.sent[0][0] in (400, 503)   # 明确失败信封
 
@@ -651,14 +666,17 @@ class TestDispatchFinal:
         forwarded = []
 
         def fake_forward(handler, pmb, target_port, body, stream, model_name="",
-                         upstream_path=None, cache_body=None, timeout=None):
+                         upstream_path=None, cache_body=None, timeout=None,
+                         suppress_client_errors=False):
             forwarded.append(upstream_path)
-            return True
+            return {"committed": True, "ok": True, "status": 200,
+                    "stream_state": None, "usage": {}, "ttft_ms": None,
+                    "error": None}
 
-        monkeypatch.setattr(dispatch, "_forward_request", fake_forward)
+        monkeypatch.setattr(dispatch, "_forward_request_ex", fake_forward)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
         assert native_calls == []                          # 原生分支已移除
         assert forwarded == ["/v1/chat/completions"]       # OpenAI 兼容端点
 
@@ -672,9 +690,8 @@ class TestDispatchFinal:
                         name="prov", openai_base="https://live/v1",
                         anthropic_base="https://live-a/v1")})
 
-        def fake_local(handler, pmb, target_port, body, stream, model_name="",
-                       upstream_path=None, cache_body=None, timeout=None):
-            return False   # 本地连接失败（未提交）
+        monkeypatch.setattr(dispatch, "_forward_request_ex",
+                            _fx_conn_fail)   # 本地连接失败（未提交）
 
         cloud_calls = []
 
@@ -686,17 +703,16 @@ class TestDispatchFinal:
                                    ttft_ms=None, duration_ms=1.0, error=None,
                                    committed=True, retry_after=None)
 
-        monkeypatch.setattr(dispatch, "_forward_request", fake_local)
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
         # 恰好一条 RequestLog（最终成功）；attempt 失败不产生额外行
         assert len(pm.logger.entries) == 1
         row = pm.logger.entries[0]
         assert row.model == "cloud-m"            # 物理模型（费用归属，终审 #15）
         assert row.cloud_provider == "prov"
-        assert row.route == "pool:fast/cloud:prov/cloud-m"
+        assert row.route == "pool:flash/cloud:prov/cloud-m"
 
     # #5：云候选用编译期快照路由，不读 live provider 配置
     def test_cloud_uses_snapshot_route(self, tmp_path, monkeypatch):
@@ -721,7 +737,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
         assert bases == ["https://snap/v1"]   # 快照路由，非 live 配置
 
     # #16：RequestLog 错误字段只用固定码，不携带上游错误体
@@ -745,7 +761,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "iff/fast", "messages": []}, "iff/fast") is True
+            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
         row = pm.logger.entries[-1]
         assert "SECRET-BODY" not in (row.error or "")
         assert row.error == "upstream_http_500"

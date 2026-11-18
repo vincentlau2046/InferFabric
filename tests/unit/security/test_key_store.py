@@ -14,7 +14,7 @@ def store(tmp_path):
 
 
 def test_random_key_digest_only_and_reopen(store):
-    meta, token = store.create_key('tool', ['iff/work'], None)
+    meta, token = store.create_key('tool', ['fabric-work'], None)
     _, other = store.create_key('tool2', None, None)
     assert token != other
     assert len(base64.urlsafe_b64decode(token.removeprefix('sk-iff-') + '=')) == 32
@@ -24,18 +24,18 @@ def test_random_key_digest_only_and_reopen(store):
         dump = '\n'.join(db.iterdump())
     assert token not in dump and other not in dump
     again = KeyStore(store.path)
-    assert again.check(token, 'iff/work') == (True, 'ok')
+    assert again.check(token, 'fabric-work') == (True, 'ok')
     assert again.key_name(token) == 'tool'
     assert token not in repr(again.list_keys())
 
 
 def test_exact_scope_expiry_and_revocation(store):
-    meta, token = store.create_key('pool', ['iff/work'], None)
-    assert store.check(token, 'iff/work')[0]
-    for model in ('iff/other', 'work', 'Qwen38-27B-TXT'):
+    meta, token = store.create_key('pool', ['fabric-work'], None)
+    assert store.check(token, 'fabric-work')[0]
+    for model in ('fabric-other', 'work', 'Qwen38-27B-TXT'):
         assert not store.check(token, model)[0]
     store.revoke_key(meta['id'])
-    assert not store.check(token, 'iff/work')[0]
+    assert not store.check(token, 'fabric-work')[0]
     assert store.key_name(token) == 'anonymous'
     with pytest.raises(KeyError):
         store.revoke_key('missing')
@@ -50,7 +50,7 @@ def test_expiry_boundary(store, monkeypatch):
 
 @pytest.mark.parametrize('name,models,expiry', [
     ('', None, None), ('x\nforged', None, None), ('x', [], None),
-    ('x', 'iff/a', None), ('x', [1], None),
+    ('x', 'fabric-a', None), ('x', [1], None),
     ('x', None, datetime(2030, 1, 1)), ('x', None, 'tomorrow'),
     ('x', None, datetime.now(timezone.utc) - timedelta(days=1)),
 ])

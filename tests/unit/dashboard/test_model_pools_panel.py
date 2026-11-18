@@ -1031,7 +1031,7 @@ class TestP2InlineEdit:
         assert body["expected_revision"] == 3          # 选中时刻 CAS 基点
         # 成功：条清空 + toast；目录缓存失效（下次手势重取）
         assert "mp-inline-diff" not in out["htmlFinal"]
-        assert any("已更新 iff/fast" in t["message"] for t in out["toasts"])
+        assert any("已更新 fabric-fast" in t["message"] for t in out["toasts"])
         cat_gets = [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools/catalog"]
         assert len(cat_gets) >= 2
@@ -1654,15 +1654,15 @@ def _zero_pool_routes(catalog=None):
 # - doMpSnippet(pool)：#mpModal 内 OpenAI + Anthropic 两段可复制代码，
 #   base_url 用 location.hostname（缺省 127.0.0.1）+ 8999
 # - OpenAI base_url 带 /v1；Anthropic 用裸端口（再加会叠成 /v1/v1）
-# - ACL 提示：API key 若配了 models ACL，需含 iff/<pool> 否则 401
+# - ACL 提示：API key 若配了 models ACL，需含 fabric-<pool> 否则 401
 # - doMpSnippetCopy(proto) → navigator.clipboard.writeText
 
 class TestSnippet:
     def test_snippet_renders_both_protocols(self, run_panel):
         out = run_panel(_routes(), actions=[{"fn": "doMpSnippet",
-                                             "args": ["fast"]}])
+                                             "args": ["flash"]}])
         m = out["modalHtml"]
-        assert "iff/fast" in m
+        assert "fabric-flash" in m
         assert "127.0.0.1:8999/v1" in m             # OpenAI base_url 带 /v1
         assert "from anthropic import Anthropic" in m
         assert "from openai import OpenAI" in m
@@ -1671,21 +1671,23 @@ class TestSnippet:
 
     def test_snippet_copy_uses_clipboard(self, run_panel):
         actions = [
-            {"fn": "doMpSnippet", "args": ["fast"]},
+            {"fn": "doMpSnippet", "args": ["flash"]},
             {"fn": "doMpSnippetCopy", "args": ["openai"]},
             {"fn": "doMpSnippetCopy", "args": ["anthropic"]},
         ]
         out = run_panel(_routes(), actions=actions)
         assert len(out["clipboardWrites"]) == 2
-        assert "iff/fast" in out["clipboardWrites"][0]
+        assert "fabric-flash" in out["clipboardWrites"][0]
         assert 'base_url="http://127.0.0.1:8999/v1"' in out["clipboardWrites"][0]
         assert 'base_url="http://127.0.0.1:8999"' in out["clipboardWrites"][1]
         assert any("复制" in t["message"] for t in out["toasts"])
 
     def test_snippet_pool_name_is_safe_literal(self, run_panel):
         # 敌意池名（含引号/分号/换行类负载）不得逃逸出 model 字面量 —
-        # 复制的 Python 代码必须仍是单个完整字符串参数（安全评审）
-        hostile = 'fast", max_tokens=1); import os; os.system("echo pwn'
+        # 复制的 Python 代码必须仍是单个完整字符串参数（安全评审）。
+        # 注：hostile 只是注入负载字符串（永不执行；测试进程无 shell 调用），
+        # 用于断言片段生成端 JSON 转义后它仍是纯数据。
+        hostile = 'flash", max_tokens=1); import os; os.system("echo pwn'
         actions = [
             {"fn": "doMpSnippet", "args": [hostile]},
             {"fn": "doMpSnippetCopy", "args": ["openai"]},
@@ -1698,7 +1700,7 @@ class TestSnippet:
             assert m, "snippet missing model arg"
             lit = m.group(1).rstrip(",")
             # JSON 字符串字面量（Python 兼容转义）round-trip 回原名 → 无法注入
-            assert json.loads(lit) == "iff/" + hostile
+            assert json.loads(lit) == "fabric-" + hostile
 
     def test_snippet_scheme_follows_dashboard_origin(self, run_panel):
         # dashboard 经 https 提供时（反代终结 TLS），片段不得降级成 http
@@ -1896,7 +1898,7 @@ class TestP3Spark:
         routes["/admin/model-pools/latency"] = {"status": 404, "body": None}
         out = run_panel(routes)
         html = out["htmlFinal"]
-        assert "iff/fast" in html                # 池列表照常
+        assert "fabric-fast" in html             # 池列表照常（额外池追加行）
         assert "<svg" not in html
         lat_gets = [c for c in out["calls"]
                     if c["url"] == "/admin/model-pools/latency"]
@@ -2094,10 +2096,10 @@ class TestP3Degrade:
 class TestCallTree:
     """大手术 T2：linkState 五态纯函数 + treeHtml 四行调用树。
 
-    树契约（用户 2026-10-25）：顶部「:8999 → iff/<角色> → 模型」四行；
+    树契约（用户 2026-10-25）：顶部「:8999 → fabric-<角色> → 模型」四行；
     绿色+数据流动 = 正在被调用（真实 ok 交换，非轮询探测）；断链 = 故障；
-    缺失组灰虚线 + 「未配置」不消失；四角色固定序 fast/premium/small/classifier，
-    四角色之外的额外池追加其后（R3）。
+    缺失组灰虚线 + 「未配置」不消失；四角色固定序 flash/max/lite/classifier
+    （池 v2 规范名，用户可见名 fabric-*），四角色之外的额外池追加其后（R3）。
     """
 
     # ── linkState 纯函数 ──────────────────────────────────────
@@ -2178,9 +2180,9 @@ class TestCallTree:
     # ── treeHtml 渲染 ─────────────────────────────────────────
 
     _TREE_DEFS = {"revision": 1, "pools": {
-        "small": {"enabled": True, "issues": [],
-                  "candidates": [{"id": "m1", "priority": 1, "kind": "local",
-                                  "target": "Qwen38-27B-TXT"}]},
+        "lite": {"enabled": True, "issues": [],
+                 "candidates": [{"id": "m1", "priority": 1, "kind": "local",
+                                 "target": "Qwen38-27B-TXT"}]},
     }}
 
     def _tree(self, run_panel, defs, rt=None):
@@ -2192,11 +2194,11 @@ class TestCallTree:
     def test_tree_four_rows_fixed_order(self, run_panel):
         html = self._tree(run_panel, json.loads(json.dumps(self._TREE_DEFS)))
         pos = {r: html.find('data-mp-tree-pool="%s"' % r)
-               for r in ("fast", "premium", "small", "classifier")}
+               for r in ("flash", "max", "lite", "classifier")}
         assert all(p >= 0 for p in pos.values()), "四角色行必须俱在"
-        assert (pos["fast"] < pos["premium"] < pos["small"]
-                < pos["classifier"]), "固定序 fast,premium,small,classifier"
-        assert html.count("未配置") == 3, "缺失组（fast/premium/classifier）灰显未配置"
+        assert (pos["flash"] < pos["max"] < pos["lite"]
+                < pos["classifier"]), "固定序 flash,max,lite,classifier"
+        assert html.count("未配置") == 3, "缺失组（flash/max/classifier）灰显未配置"
         assert "mp-link-unconfigured" in html, "未配置链路段走灰虚线态"
 
     def test_tree_extra_pool_appended(self, run_panel):
@@ -2209,22 +2211,22 @@ class TestCallTree:
         assert html.find('data-mp-tree-pool="custom-x"') \
             > html.find('data-mp-tree-pool="classifier"'), \
             "额外池必须追加四角色之后（R3 不隐藏）"
-        assert "iff/custom-x" in html
+        assert "fabric-custom-x" in html
 
     def test_tree_row_structure(self, run_panel):
         html = self._tree(run_panel, json.loads(json.dumps(self._TREE_DEFS)))
-        i = html.find('data-mp-tree-pool="small"')
+        i = html.find('data-mp-tree-pool="lite"')
         assert i >= 0
         row = html[i:html.find("</div>", i)]
         # 行契约：端口 → 角色 → 模型叶 + 链路段类
         assert ":8999" in row
-        assert "iff/small" in row
+        assert "fabric-lite" in row
         assert "Qwen38-27B-TXT" in row
         assert "mp-link mp-link-idle" in row, "配置且静默 → 实线 idle 链路段"
 
     def test_tree_link_state_wired_from_runtime(self, run_panel):
         # 树行链路态由 runtime 喂给 linkState — 真实交换 → flowing 链路
-        rt = {"pools": {"small": {"candidates": [
+        rt = {"pools": {"lite": {"candidates": [
             {"id": "m1", "last_attempt": {"ok": True, "age_s": 8}}]}}}
         html = self._tree(run_panel,
                           json.loads(json.dumps(self._TREE_DEFS)), rt)
@@ -2235,25 +2237,26 @@ class TestCallTree:
 class TestPersistentCards:
     """大手术 T3：四组常驻配置卡 — 面板只有一种形态，配置界面不再消失。
 
-    契约（用户 2026-10-25）：fast/premium/small/classifier 四卡永远在屏；
+    契约（用户 2026-10-25）：flash/max/lite/classifier 四卡永远在屏
+    （池 v2 规范角色名，用户可见名 fabric-*）；
     未配置卡同形态 + 「未配置」徽标 + 预填下拉（cardDefault 启发式）+
     data-mp-config-pool（首次 apply 建池，Task 5 接线）；已配置卡保留
     poolCard 全部动作；额外池追加四角色后。
     """
 
     _CARDS_DEFS = {"revision": 1, "pools": {
-        "small": {"enabled": True, "issues": [],
-                  "candidates": [{"id": "m1", "priority": 1, "kind": "local",
-                                  "target": "Qwen38-27B-TXT",
-                                  "features": ["tools"],
-                                  "evidence": {"openai": "declared"}}]},
+        "lite": {"enabled": True, "issues": [],
+                 "candidates": [{"id": "m1", "priority": 1, "kind": "local",
+                                 "target": "Qwen38-27B-TXT",
+                                 "features": ["tools"],
+                                 "evidence": {"openai": "declared"}}]},
         "custom-x": {"enabled": True, "issues": [],
                      "candidates": [{"id": "cx", "priority": 1, "kind": "cloud",
                                      "target": "prov/x-m"}]},
     }}
 
     _CARDS_ST = {"revision": 1, "pools": {
-        "small": {"enabled": True, "issues": [], "protocols": {
+        "lite": {"enabled": True, "issues": [], "protocols": {
             "openai": {"chosen": "m1", "error": None,
                        "decisions": [{"id": "m1", "included": True,
                                       "reason": "ok"}]},
@@ -2304,9 +2307,9 @@ class TestPersistentCards:
                            json.loads(json.dumps(self._CARDS_ST)),
                            catalog=self._catalog())
         pos = {n: html.find('data-mp-card="%s"' % n)
-               for n in ("fast", "premium", "small", "classifier", "custom-x")}
+               for n in ("flash", "max", "lite", "classifier", "custom-x")}
         assert all(p >= 0 for p in pos.values()), "四角色 + 额外池卡俱在"
-        assert (pos["fast"] < pos["premium"] < pos["small"]
+        assert (pos["flash"] < pos["max"] < pos["lite"]
                 < pos["classifier"] < pos["custom-x"]), \
             "固定序四角色在前，额外池追加其后（R3 不隐藏）"
 
@@ -2315,42 +2318,42 @@ class TestPersistentCards:
                            catalog=self._catalog())
         assert "mp-unconfigured" in html, "未配置卡有徽标类"
         assert html.count("未配置") >= 4, "四卡各带「未配置」徽标"
-        assert 'data-mp-config-pool="fast"' in html
+        assert 'data-mp-config-pool="flash"' in html
         # 未配置卡无『高级』入口（Task 5 ruling：池参数属已配置池）
         assert 'data-mp-params-toggle' not in html
-        # 预填 = cardDefault 启发式（active 优先）：fast→活跃最小
+        # 预填 = cardDefault 启发式（active 优先）：flash→活跃最小
         # local:qwen-turbo
-        i = html.find('data-mp-config-pool="fast"')
+        i = html.find('data-mp-config-pool="flash"')
         seg = html[i:html.find("</select>", i)]
         assert 'value="local:qwen-turbo" selected' in seg, \
-            "fast 卡下拉预填活跃最小模型"
-        # premium→最大「活跃」上下文 qwen-max（128k），非不活跃的 VL
+            "flash 卡下拉预填活跃最小模型"
+        # max→最大「活跃」上下文 qwen-max（128k），非不活跃的 VL
         # qwen-vl（204k，独占需 switch）— active 优先让文本池默认不落到
-        # 需切 GPU 的 VL 模型；按角色分异（premium≠fast），非同一默认
-        j = html.find('data-mp-config-pool="premium"')
+        # 需切 GPU 的 VL 模型；按角色分异（max≠flash），非同一默认
+        j = html.find('data-mp-config-pool="max"')
         segp = html[j:html.find("</select>", j)]
         assert 'value="local:qwen-max" selected' in segp
         assert 'local:qwen-vl' not in segp or \
             'value="local:qwen-vl" selected' not in segp, \
-            "premium 不得默认选中不活跃的 VL 模型"
+            "max 不得默认选中不活跃的 VL 模型"
         # 未配置卡无『高级』直通（Task 5 ruling：先建池，池参数后置）
-        assert 'data-mp-params-toggle="fast"' not in html
+        assert 'data-mp-params-toggle="flash"' not in html
 
     def test_configured_card_keeps_actions(self, run_panel):
         html = self._cards(run_panel,
                            json.loads(json.dumps(self._CARDS_DEFS)),
                            json.loads(json.dumps(self._CARDS_ST)),
                            catalog=self._catalog())
-        assert 'data-mp-params-toggle="small"' in html, "高级入口保留"
-        assert 'data-mp-snippet="small"' in html, "接入片段入口保留"
-        assert 'data-mp-pool="small"' in html, "启用开关保留"
-        assert 'data-mp-inline-replace="small|m1"' in html, "替换为…保留"
-        assert "小模型 — 分类/抽取/批量任务" in html, "角色描述进卡头"
+        assert 'data-mp-params-toggle="lite"' in html, "高级入口保留"
+        assert 'data-mp-snippet="lite"' in html, "接入片段入口保留"
+        assert 'data-mp-pool="lite"' in html, "启用开关保留"
+        assert 'data-mp-inline-replace="lite|m1"' in html, "替换为…保留"
+        assert "轻量任务 — 分类/抽取/批量任务" in html, "角色描述进卡头"
 
     def test_unconfigured_config_select_present(self, run_panel):
         html = self._cards(run_panel, {"revision": 0, "pools": {}},
                            catalog=self._catalog())
-        for role in ("fast", "premium", "small", "classifier"):
+        for role in ("flash", "max", "lite", "classifier"):
             assert 'data-mp-config-pool="%s"' % role in html
         assert "本地 · qwen-turbo" in html, "选项来自目录本地条目"
         assert "云 · prov/cloud-m" in html, "选项来自目录云条目"
@@ -2395,87 +2398,88 @@ class TestPersistentCards:
                 "load_error": None, "raw": None}
         routes = self._create_routes(pools_body=zero)
         out = run_panel(routes, actions=[{"fn": "doMpConfigSelect",
-                                          "args": ["fast",
+                                          "args": ["flash",
                                                    "local:qwen-turbo"]}])
         h = out["htmlFinal"]
-        assert 'data-mp-inline-bar="fast|fast-1"' in h
+        assert 'data-mp-inline-bar="flash|flash-1"' in h
         assert "（未配置）" in h and "qwen-turbo" in h
-        assert 'data-mp-inline-apply="fast|fast-1"' in h
+        assert 'data-mp-inline-apply="flash|flash-1"' in h
         assert 'disabled title="需先通过预览"' not in h, "预演通过 → 应用可用"
         val = next(c for c in out["calls"]
                    if c["url"] == "/admin/model-pools/validate")
-        sk = val["body"]["pools"]["fast"]
+        sk = val["body"]["pools"]["flash"]
         assert sk["strategy"] == "priority" and sk["max_attempts"] == 2
-        assert sk["candidates"][0] == {"id": "fast-1", "kind": "local",
+        assert sk["candidates"][0] == {"id": "flash-1", "kind": "local",
                                        "model_name": "qwen-turbo",
                                        "declared_protocols": ["openai"],
                                        "priority": 1}
         drys = [c for c in out["calls"]
                 if c["url"] == "/admin/model-pools/dry-run"]
         assert len(drys) == 2
-        assert all(c["body"]["config"]["pools"]["fast"]["candidates"][0]
+        assert all(c["body"]["config"]["pools"]["flash"]["candidates"][0]
                    ["model_name"] == "qwen-turbo" for c in drys)
 
     def test_unconfigured_apply_creates_pool_with_cas_base(self, run_panel):
-        # 用户实况：small 已配置（revision 3）、fast 缺失 → 未配置卡建 fast。
-        # POST = raw 基底 + 新池（small 防丢）；CAS 基点 = 当前 revision
+        # 用户实况：lite 已配置（revision 3）、flash 缺失 → 未配置卡建 flash。
+        # POST = raw 基底 + 新池（lite 防丢）；CAS 基点 = 当前 revision
         # （同编辑器语义 — 非旧向导整体替换的硬编码 expected_revision=0）
-        small_view = {"enabled": True, "issues": [], "candidates": [
+        lite_view = {"enabled": True, "issues": [], "candidates": [
             {"id": "m1", "priority": 1, "kind": "local",
              "target": "Qwen38-27B-TXT", "features": [],
              "evidence": {"openai": "declared"}}]}
-        small_raw = {"enabled": True, "strategy": "priority",
-                     "allowed_locations": ["local", "cloud"],
-                     "accept_declared": True, "allow_cross_location": False,
-                     "max_attempts": 2, "deadline_ms": 60000,
-                     "candidates": [{"id": "m1", "kind": "local",
-                                     "model_name": "Qwen38-27B-TXT",
-                                     "declared_protocols": ["openai"],
-                                     "features": [], "priority": 1}]}
-        fast_view = {"enabled": True, "issues": [], "candidates": [
-            {"id": "fast-1", "priority": 1, "kind": "local",
-             "target": "qwen-turbo", "features": [],
-             "evidence": {"openai": "declared"}}]}
-        fast_raw = {"enabled": True, "strategy": "priority",
+        lite_raw = {"enabled": True, "strategy": "priority",
                     "allowed_locations": ["local", "cloud"],
                     "accept_declared": True, "allow_cross_location": False,
                     "max_attempts": 2, "deadline_ms": 60000,
-                    "candidates": [{"id": "fast-1", "kind": "local",
-                                    "model_name": "qwen-turbo",
+                    "candidates": [{"id": "m1", "kind": "local",
+                                    "model_name": "Qwen38-27B-TXT",
                                     "declared_protocols": ["openai"],
                                     "features": [], "priority": 1}]}
+        flash_view = {"enabled": True, "issues": [], "candidates": [
+            {"id": "flash-1", "priority": 1, "kind": "local",
+             "target": "qwen-turbo", "features": [],
+             "evidence": {"openai": "declared"}}]}
+        flash_raw = {"enabled": True, "strategy": "priority",
+                     "allowed_locations": ["local", "cloud"],
+                     "accept_declared": True, "allow_cross_location": False,
+                     "max_attempts": 2, "deadline_ms": 60000,
+                     "candidates": [{"id": "flash-1", "kind": "local",
+                                     "model_name": "qwen-turbo",
+                                     "declared_protocols": ["openai"],
+                                     "features": [], "priority": 1}]}
 
         def base(rev):
             return {"revision": rev, "configured": True, "load_error": None,
-                    "pools": {"small": small_view},
+                    "pools": {"lite": lite_view},
                     "raw": {"schema_version": 1,
-                            "pools": {"small": small_raw}}}
+                            "pools": {"lite": lite_raw}}}
 
         after = {"revision": 4, "configured": True, "load_error": None,
-                 "pools": {"fast": fast_view, "small": small_view},
+                 "pools": {"flash": flash_view, "lite": lite_view},
                  "raw": {"schema_version": 1,
-                         "pools": {"fast": fast_raw, "small": small_raw}}}
+                         "pools": {"flash": flash_raw, "lite": lite_raw}}}
         routes = self._create_routes(
             pools_bodies=[base(3), base(3), base(3), after])
         actions = [{"fn": "doMpConfigSelect",
-                    "args": ["fast", "local:qwen-turbo"]},
+                    "args": ["flash", "local:qwen-turbo"]},
                    {"fn": "doMpInlineApply"}]
         out = run_panel(routes, actions=actions)
         posts = [c for c in out["calls"]
                  if c["url"] == "/admin/model-pools" and c["method"] == "POST"]
         body = posts[-1]["body"]
         assert body["expected_revision"] == 3, "CAS 基点 = 当前 revision"
-        assert body["pools"]["small"] == small_raw, "raw 基底防丢既有池"
-        fc = body["pools"]["fast"]["candidates"][0]
-        assert fc["id"] == "fast-1" and fc["model_name"] == "qwen-turbo"
+        assert body["pools"]["lite"] == lite_raw, "raw 基底防丢既有池"
+        fc = body["pools"]["flash"]["candidates"][0]
+        assert fc["id"] == "flash-1" and fc["model_name"] == "qwen-turbo"
         assert fc["priority"] == 1
-        assert body["pools"]["fast"]["strategy"] == "priority"
+        assert body["pools"]["flash"]["strategy"] == "priority"
         h = out["htmlFinal"]
-        assert 'data-mp-pool="fast"' in h, "卡转已配置"
-        assert 'data-mp-config-pool="fast"' not in h
+        assert 'data-mp-pool="flash"' in h, "卡转已配置"
+        assert 'data-mp-config-pool="flash"' not in h
         assert h.count("mp-tree-state-unconfigured") == 2, \
-            "树仅剩 premium/classifier 未配置"
-        assert any("已更新 iff/fast" in t["message"] for t in out["toasts"])
+            "树仅剩 max/classifier 未配置"
+        assert any("已更新 fabric-flash" in t["message"]
+                   for t in out["toasts"])
 
     def test_live_prime_prefills_unconfigured_by_role(self, run_panel):
         # 终审 I1：活路径（mpPrimeInline → ensureCatalog → _catalog → 渲染）
@@ -2495,22 +2499,22 @@ class TestPersistentCards:
 
         # active 优先启发式（目录：qwen-turbo 活跃 32k、qwen-max 活跃
         # 128k、qwen-vl 不活跃 204k 独占 VL）：
-        # fast=活跃最小 / premium=最大「活跃」上下文 / small=活跃最小 /
-        # classifier=首个活跃。premium 不得默认选中不活跃的 VL（204k）
-        assert 'value="local:qwen-turbo" selected' in sel_seg("fast"), \
-            "fast 预填非活跃最小本地模型"
-        assert 'value="local:qwen-max" selected' in sel_seg("premium"), \
-            "premium 预填非最大活跃上下文本地模型"
-        assert 'value="local:qwen-vl" selected' not in sel_seg("premium"), \
-            "premium 不得默认选中不活跃的独占 VL 模型"
-        assert 'value="local:qwen-turbo" selected' in sel_seg("small")
+        # flash=活跃最小 / max=最大「活跃」上下文 / lite=活跃最小 /
+        # classifier=首个活跃。max 不得默认选中不活跃的 VL（204k）
+        assert 'value="local:qwen-turbo" selected' in sel_seg("flash"), \
+            "flash 预填非活跃最小本地模型"
+        assert 'value="local:qwen-max" selected' in sel_seg("max"), \
+            "max 预填非最大活跃上下文本地模型"
+        assert 'value="local:qwen-vl" selected' not in sel_seg("max"), \
+            "max 不得默认选中不活跃的独占 VL 模型"
+        assert 'value="local:qwen-turbo" selected' in sel_seg("lite")
         assert 'value="local:qwen-turbo" selected' in sel_seg("classifier")
 
 
 class TestInlineSessionRace:
     """终审 C1：并发行内会话 — 迟到预演不得写入当前会话。
 
-    startInlineSession 曾在首个 await（renderModelPools）之后才捕获会话
+    doMpConfigSelect 曾在首个 await（renderModelPools）之后才捕获会话
     令牌：A 预演在途时用户再选一次（B 已同步接管 _inline），A 恢复时
     令牌成了 B → A 的迟到结果写进 B（validated/previewHtml 与 work 错
     位）→ 三段门禁被绕过（B 的 work 借 A 的验证状态上应用）。
@@ -2535,19 +2539,19 @@ class TestInlineSessionRace:
         routes["POST /admin/model-pools/dry-run"] = {
             "status": 200,
             "bodies": [
-                {"chosen": "premium-1", "error": None, "decisions": [],
-                 "pool": "premium", "protocol": "openai"},      # B（即时）
-                {"chosen": "premium-1", "error": None, "decisions": [],
-                 "pool": "premium", "protocol": "anthropic"},  # B（即时）
+                {"chosen": "max-1", "error": None, "decisions": [],
+                 "pool": "max", "protocol": "openai"},          # B（即时）
+                {"chosen": "max-1", "error": None, "decisions": [],
+                 "pool": "max", "protocol": "anthropic"},       # B（即时）
                 {"chosen": None, "error": "no_ready_target", "decisions": [],
-                 "pool": "premium", "protocol": "openai"},      # A 迟到
+                 "pool": "max", "protocol": "openai"},          # A 迟到
                 {"chosen": None, "error": "no_ready_target", "decisions": [],
-                 "pool": "premium", "protocol": "anthropic"},  # A 迟到
+                 "pool": "max", "protocol": "anthropic"},       # A 迟到
             ]}
         actions = [
-            {"fn": "doMpConfigSelect", "args": ["premium", "local:qwen-turbo"],
+            {"fn": "doMpConfigSelect", "args": ["max", "local:qwen-turbo"],
              "noAwait": True},   # A：在途（并发开第二个会话）
-            {"fn": "doMpConfigSelect", "args": ["premium", "local:qwen-max"]},
+            {"fn": "doMpConfigSelect", "args": ["max", "local:qwen-max"]},
             {"fn": "_drain", "args": [300]},   # A 链确定性收尾后取终态
         ]
         out = run_panel(routes, actions=actions)
@@ -2559,14 +2563,14 @@ class TestInlineSessionRace:
         drys = [c for c in out["calls"]
                 if c["url"] == "/admin/model-pools/dry-run"]
         assert len(vals) == 2 and len(drys) == 4, (len(vals), len(drys))
-        assert vals[0]["body"]["pools"]["premium"]["candidates"][0] \
+        assert vals[0]["body"]["pools"]["max"]["candidates"][0] \
             ["model_name"] == "qwen-max"
-        assert vals[1]["body"]["pools"]["premium"]["candidates"][0] \
+        assert vals[1]["body"]["pools"]["max"]["candidates"][0] \
             ["model_name"] == "qwen-turbo"
         # 终态 = 后选会话 B：diff 条在、预演通过、应用可用
         h = out["htmlFinal"]
-        assert 'data-mp-inline-bar="premium|premium-1"' in h
-        assert 'data-mp-inline-apply="premium|premium-1"' in h
+        assert 'data-mp-inline-bar="max|max-1"' in h
+        assert 'data-mp-inline-apply="max|max-1"' in h
         assert "已阻止应用" not in h, "A 的迟到「已阻止」写进了 B 会话（C1）"
         assert 'disabled title="需先通过预览"' not in h, \
             "A 的迟到结果禁用了 B 的应用按钮（C1）"
@@ -2577,7 +2581,7 @@ class TestSingleFormRender:
 
     面板只有一种形态：零池 = 四张未配置卡（不再有一次性向导/空态分支）；
     向导全套符号（函数/状态/DOM 属性/CSS）从源码清零；
-    现有 YAML（small/classifier）在新布局下无损渲染。
+    现有 YAML（lite/classifier）在新布局下无损渲染。
     """
 
     def test_fragment_contains_modal_container(self):
@@ -2597,28 +2601,28 @@ class TestSingleFormRender:
         assert "尚未配置" not in html
 
     def test_render_configured_tree_and_cards(self, run_panel):
-        # small/classifier 已配置 → 树两行配置（实线 idle）+ 两行未配置；
+        # lite/classifier 已配置 → 树两行配置（实线 idle）+ 两行未配置；
         # 卡区两配置卡 + 两未配置卡 — 树/卡对缺失组都不消失
         out = run_panel(self._sc_routes())
         html = out["html"]
         assert html.count("mp-link-idle") == 4, "两配置行 ×2 段链路"
         assert html.count("mp-link-unconfigured") == 4
-        for role in ("fast", "premium", "small", "classifier"):
+        for role in ("flash", "max", "lite", "classifier"):
             assert 'data-mp-tree-pool="%s"' % role in html, role
         assert html.count("Qwen38-27B-TXT") >= 2, "树模型叶 ×2"
-        assert 'data-mp-pool="small"' in html, "配置卡带启用开关"
-        assert 'data-mp-config-pool="fast"' in html
-        assert 'data-mp-config-pool="premium"' in html
+        assert 'data-mp-pool="lite"' in html, "配置卡带启用开关"
+        assert 'data-mp-config-pool="flash"' in html
+        assert 'data-mp-config-pool="max"' in html
 
     def test_existing_yaml_rendered_lossless(self, run_panel):
-        # Review Focus #4：现有 small/classifier YAML 在新布局下候选链/
+        # Review Focus #4：现有 lite/classifier YAML 在新布局下候选链/
         # 替换为…/编辑/接入片段/双协议视图无损
         out = run_panel(self._sc_routes())
         html = out["html"]
-        for frag in ('data-mp-inline-replace="small|m1"',
-                     'data-mp-snippet="small"',
-                     'data-mp-params-toggle="small"',
-                     'data-mp-inuse="m1"', "小模型 — 分类/抽取/批量任务"):
+        for frag in ('data-mp-inline-replace="lite|m1"',
+                     'data-mp-snippet="lite"',
+                     'data-mp-params-toggle="lite"',
+                     'data-mp-inuse="m1"', "轻量任务 — 分类/抽取/批量任务"):
             assert frag in html, frag
         # 2026-11-04：chosen=m1 → m1 卡高亮（在役标记取代文字行）
         m = re.search(r'<div class="mp-cand-card[^"]*"[^>]*'
@@ -2629,16 +2633,16 @@ class TestSingleFormRender:
         # 轮询中 last_attempt 变新鲜 → 树链路态 by-id 翻转（idle→flowing），
         # 零整写 — 与 C3 光带同哲学（类翻转非结构变化）
         routes = self._sc_routes()
-        rt_fresh = {"revision": 5, "pools": {"small": {"candidates": [
+        rt_fresh = {"revision": 5, "pools": {"lite": {"candidates": [
             {"id": "m1", "last_attempt": {"ok": True, "age_s": 5.0}}]}}}
         routes["/admin/model-pools/runtime"] = {"status": 200, "bodies": [
             {"revision": 5, "pools": {}}, rt_fresh]}
         out = run_panel(routes, poll_ticks=1,
                         store_state={"tab_active": "tab-model-pools"})
         assert out["writeCounts"].get("mpPools") == 1, "链路态翻转零重建"
-        assert out["dyn"]["mp-tlink-a-small"]["className"] \
+        assert out["dyn"]["mp-tlink-a-lite"]["className"] \
             == "mp-link mp-link-flowing"
-        assert out["dyn"]["mp-tstate-small"]["textContent"] == "调用中"
+        assert out["dyn"]["mp-tstate-lite"]["textContent"] == "调用中"
 
     def test_source_has_no_wizard_symbols(self):
         # 向导全套符号清零（函数/状态/DOM 属性/CSS）— 含注释、大小写不敏感
@@ -2653,17 +2657,17 @@ class TestSingleFormRender:
     @staticmethod
     def _sc_routes():
         defs = {"revision": 5, "pools": {
-            "small": {"enabled": True, "issues": [],
-                      "candidates": [{"id": "m1", "priority": 1,
-                                      "kind": "local",
-                                      "target": "Qwen38-27B-TXT"}]},
+            "lite": {"enabled": True, "issues": [],
+                     "candidates": [{"id": "m1", "priority": 1,
+                                     "kind": "local",
+                                     "target": "Qwen38-27B-TXT"}]},
             "classifier": {"enabled": True, "issues": [],
                            "candidates": [{"id": "c1", "priority": 1,
                                            "kind": "local",
                                            "target": "Qwen38-27B-TXT"}]},
         }}
         status = {"revision": 5, "pools": {
-            "small": {"protocols": {
+            "lite": {"protocols": {
                 "openai": {"chosen": "m1", "error": None, "decisions": []},
                 "anthropic": {"chosen": None, "error": "no_evidence",
                               "decisions": []}}},

@@ -51,7 +51,7 @@ def test_recover_damaged_store_stays_enforced(tmp_path, monkeypatch, capsys, dam
     run_keys(['recover'], data_dir=tmp_path)
     recovered = KeyStore(store.path)
     assert recovered.get_policy() == 'all'
-    assert not recovered.check(old_token, 'iff/work')[0]
+    assert not recovered.check(old_token, 'fabric-work')[0]
     assert recovered.list_keys() == []
     assert ConsoleAuth(recovered).login('test-password-long')
     assert (tmp_path / 'security.enabled').exists()

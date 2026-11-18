@@ -1,10 +1,10 @@
 """model_pool — /v1/models 列出启用逻辑名（Task 10）。
 
 契约：
-- 启用且有可解析候选的池以 {"id": "iff/<name>", "object": "model",
+- 启用且有可解析候选的池以 {"id": "fabric-<name>", "object": "model",
   "owned_by": "iff-pool"} 出现 — 不合并候选能力（无 capability union）
 - 禁用池 / 无可解析候选（全悬空）的池不出现
-- registry 空时输出与现状完全一致（无 iff/ 条目）
+- registry 空时输出与现状完全一致（无 fabric- 条目）
 - 直连模型 / 云模型条目不变
 """
 
@@ -65,22 +65,22 @@ def registry(tmp_path):
 
 
 class TestV1ModelsListsPools:
-    def test_enabled_pool_listed_as_iff_pool(self, registry):
+    def test_enabled_pool_listed_as_fabric_pool(self, registry):
         h = FakeHandler()
         handler_mod.ProxyHandler._handle_v1_models(h, _pm(registry))
         entries = {m["id"]: m for m in _models_data(h)}
-        assert "iff/fast" in entries
+        assert "fabric-flash" in entries
         # 不合并候选能力：条目只含 id/object/owned_by
-        assert entries["iff/fast"] == {"id": "iff/fast", "object": "model",
+        assert entries["fabric-flash"] == {"id": "fabric-flash", "object": "model",
                                        "owned_by": "iff-pool"}
 
     def test_disabled_pool_not_listed(self, registry):
         cfg = _raw_config()
-        cfg["pools"]["fast"]["enabled"] = False
+        cfg["pools"]["flash"]["enabled"] = False
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         h = FakeHandler()
         handler_mod.ProxyHandler._handle_v1_models(h, _pm(registry))
-        assert all(m["id"] != "iff/fast" for m in _models_data(h))
+        assert all(m["id"] != "fabric-flash" for m in _models_data(h))
 
     def test_pool_without_resolvable_candidates_not_listed(self, tmp_path):
         # 全部候选悬空（models.d / provider 均不存在）→ 有 issues 无 candidates → 不列出
@@ -90,7 +90,7 @@ class TestV1ModelsListsPools:
         reg.update(_raw_config(), expected_revision=0)
         h = FakeHandler()
         handler_mod.ProxyHandler._handle_v1_models(h, _pm(reg))
-        assert all(m["id"] != "iff/fast" for m in _models_data(h))
+        assert all(m["id"] != "fabric-flash" for m in _models_data(h))
 
     def test_direct_and_cloud_entries_unchanged(self, registry):
         h = FakeHandler()
@@ -107,6 +107,6 @@ class TestV1ModelsListsPools:
         h = FakeHandler()
         handler_mod.ProxyHandler._handle_v1_models(h, _pm(reg))
         data = _models_data(h)
-        # 无任何 iff/ 条目；本地 + 云条目与现状一致
+        # 无任何 fabric- 条目；本地 + 云条目与现状一致
         assert [m["id"] for m in data] == ["qwen-small", "cloud-m"]
-        assert all(not m["id"].startswith("iff/") for m in data)
+        assert all(not m["id"].startswith("fabric-") for m in data)
