@@ -69,6 +69,36 @@ class TestManagedImageLedger:
         monkeypatch.setenv("IFF_DATA_DIR", str(tmp_path))
         assert default_ledger_path() == tmp_path / LEDGER_FILENAME
 
+    def test_digest_recorded_and_kept_on_digestless_rerecord(self, tmp_path):
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("img:a", digest="repo@sha256:aaa", now=1.0)
+        assert led.digest("img:a") == "repo@sha256:aaa"
+        led.record("img:a", now=2.0)              # 本次拿不到 digest ≠ 忘记 digest
+        assert led.digest("img:a") == "repo@sha256:aaa"
+        led.record("img:a", digest="repo@sha256:bbb", now=3.0)
+        assert led.digest("img:a") == "repo@sha256:bbb"
+
+    def test_revision_persisted_and_bumped_per_write(self, tmp_path):
+        p = tmp_path / LEDGER_FILENAME
+        led = ManagedImageLedger(p)
+        assert led.revision == 0
+        led.record("img:a", now=1.0)
+        assert led.revision == 1
+        led.record("img:b", now=1.0)
+        led.forget("img:a")
+        assert led.revision == 3
+        assert ManagedImageLedger(p).revision == 3   # 持久化
+        led.forget("img:absent")                     # 无变化 → 不写、不推进
+        assert led.revision == 3
+
+    def test_external_writer_advance_is_resynced_not_clobbered(self, tmp_path):
+        p = tmp_path / LEDGER_FILENAME
+        led_a = ManagedImageLedger(p)
+        led_b = ManagedImageLedger(p)            # 两个写者各自加载
+        led_a.record("img:a", now=1.0)           # 磁盘 revision=1
+        led_b.record("img:b", now=2.0)           # 写前同步 → 不覆盖 a
+        assert ManagedImageLedger(p).refs() == {"img:a", "img:b"}
+
 
 class TestRecordImage:
 
@@ -88,18 +118,24 @@ class TestRecordImage:
 
 # ── ensure_image_pulled ─────────────────────────────────────────
 
-def _run_map(responses):
-    """fake subprocess.run：按命令首段（inspect/pull）返回预设 CompletedProcess。"""
+def _run_map(responses, digests=None):
+    """fake subprocess.run：按命令首段（inspect/pull）返回预设 CompletedProcess。
+
+    digests: image ref → `docker image inspect --format …` 的 RepoDigests 输出
+    （None/缺省 → 空串，模拟拿不到 digest）。
+    """
     calls = []
 
     class R:
-        def __init__(self, returncode, stderr=""):
+        def __init__(self, returncode, stderr="", stdout=""):
             self.returncode = returncode
             self.stderr = stderr
-            self.stdout = ""
+            self.stdout = stdout
 
     def run(cmd, **kw):
         calls.append(list(cmd))
+        if "--format" in cmd:
+            return R(0, "", (digests or {}).get(cmd[-1], ""))
         key = "inspect" if "inspect" in cmd else "pull"
         rc, err = responses[key]
         return R(rc, err)
@@ -112,19 +148,23 @@ class TestEnsureImagePulled:
 
     def test_image_present_skips_pull_and_records(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        run = _run_map({"inspect": (0, ""), "pull": (0, "")})
+        run = _run_map({"inspect": (0, ""), "pull": (0, "")},
+                       digests={"img:1": "repo@sha256:1"})
         res = ensure_image_pulled("img:1", ledger=led, run=run)
         assert res == {"status": "ok", "pulled": False, "image": "img:1"}
         assert not any("pull" in c for c in run.calls)
         assert led.refs() == {"img:1"}
+        assert led.digest("img:1") == "repo@sha256:1"   # digest 一并记账
 
     def test_image_missing_pulls_and_records(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        run = _run_map({"inspect": (1, ""), "pull": (0, "")})
+        run = _run_map({"inspect": (1, ""), "pull": (0, "")},
+                       digests={"img:2": "repo@sha256:2"})
         res = ensure_image_pulled("img:2", ledger=led, run=run)
         assert res["pulled"] is True and res["status"] == "ok"
         assert any("pull" in c for c in run.calls)
         assert led.refs() == {"img:2"}
+        assert led.digest("img:2") == "repo@sha256:2"
 
     def test_pull_failure_fail_visible_not_recorded(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
@@ -162,24 +202,47 @@ class TestPruneManaged:
 
     def test_referenced_kept_unreferenced_removed(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("img:keep", now=1.0)
-        led.record("img:gone", now=1.0)
-        run = _run_map({"inspect": (0, ""), "pull": (0, "")})
+        led.record("img:keep", digest="repo@sha256:keep", now=1.0)
+        led.record("img:gone", digest="repo@sha256:gone", now=1.0)
+        run = _run_map({"inspect": (0, ""), "pull": (0, "")},
+                       digests={"img:gone": "repo@sha256:gone"})
         report = prune_managed(led, {"img:keep"}, run=run)
         actions = {r["ref"]: r["action"] for r in report}
         assert actions == {"img:keep": "kept", "img:gone": "removed"}
         assert led.refs() == {"img:keep"}
         assert ["docker", "rmi", "img:gone"] in run.calls
 
+    def test_digest_mismatch_skipped_and_kept(self, tmp_path):
+        # tag 被重指：台账 digest 与当前 digest 不符 → 不 rmi，条目保留
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("img:moved", digest="repo@sha256:old", now=1.0)
+        run = _run_map({"inspect": (0, ""), "pull": (0, "")},
+                       digests={"img:moved": "repo@sha256:new"})
+        report = prune_managed(led, set(), run=run)
+        assert report[0]["action"] == "skipped"
+        assert "digest changed" in report[0]["reason"]
+        assert not any("rmi" in c for c in run.calls)
+        assert led.refs() == {"img:moved"}
+
+    def test_no_digest_recorded_skipped_unverifiable(self, tmp_path):
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("img:legacy", now=1.0)        # 无 digest（旧条目/取不到）
+        run = _run_map({"inspect": (0, ""), "pull": (0, "")})
+        report = prune_managed(led, set(), run=run)
+        assert report[0]["action"] == "skipped"
+        assert "unverifiable" in report[0]["reason"]
+        assert not any("rmi" in c for c in run.calls)
+        assert led.refs() == {"img:legacy"}
+
     def test_rmi_failure_fail_visible_ref_stays(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("img:stuck", now=1.0)
+        led.record("img:stuck", digest="repo@sha256:s", now=1.0)
 
         def failing_rmi(cmd, **kw):
             class R:
-                returncode = 1
+                returncode = 0 if "--format" in cmd else 1
                 stderr = "image is in use"
-                stdout = ""
+                stdout = "repo@sha256:s" if "--format" in cmd else ""
             return R()
 
         report = prune_managed(led, set(), run=failing_rmi)
@@ -189,7 +252,7 @@ class TestPruneManaged:
 
     def test_dry_run_touches_nothing(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("img:d", now=1.0)
+        led.record("img:d", digest="repo@sha256:d", now=1.0)
         calls = []
 
         def run(cmd, **kw):
@@ -202,12 +265,12 @@ class TestPruneManaged:
 
         report = prune_managed(led, set(), run=run, dry_run=True)
         assert report[0]["action"] == "would-remove"
-        assert calls == []                        # 零 docker 调用
+        assert calls == []                        # 零 docker 调用（执行时才复核 digest）
         assert led.refs() == {"img:d"}
 
     def test_never_issues_global_image_prune(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
-        led.record("img:x", now=1.0)
+        led.record("img:x", digest="repo@sha256:x", now=1.0)
         calls = []
 
         def run(cmd, **kw):
@@ -215,7 +278,7 @@ class TestPruneManaged:
             class R:
                 returncode = 0
                 stderr = ""
-                stdout = ""
+                stdout = "repo@sha256:x" if "--format" in cmd else ""
             return R()
 
         prune_managed(led, set(), run=run)
