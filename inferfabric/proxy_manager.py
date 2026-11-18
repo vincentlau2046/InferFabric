@@ -82,6 +82,10 @@ class ProxyManager:
         # PR-D: Cloud discovery (must init before aggregator for price config)
         self.cloud = CloudDiscovery(IFF_DATA_DIR / "cloud_provider.yaml")
         self._cloud_discovered = False
+        # 后台发现单飞 — 池路径的冷请求只确保一个发现线程，
+        # 不阻塞请求关键路径
+        self._discovery_lock = threading.Lock()
+        self._discovery_thread: threading.Thread | None = None
         # v4.6.2: Runtime config (iff.yaml overrides)
         self._runtime_config = self._load_runtime_config()
         # v4.6.3: DualGateLimiter — 可配置流控 (PR-G4/G1/G3)
@@ -198,9 +202,36 @@ class ProxyManager:
         """
         return f"{next(self._req_counter):08x}-{uuid.uuid4().hex[:8]}"
 
-    def ensure_cloud_discovered(self):
-        """首次请求时触发云端模型发现（懒加载）+ 启动后台轮询。"""
-        if not self._cloud_discovered and self.cloud.providers:
+    def ensure_cloud_discovered(self, background: bool = False):
+        """首次请求时触发云端模型发现（懒加载）+ 启动后台轮询。
+
+        background=False（默认）：同步发现，既有行为逐字节不变。
+        background=True（池路径）：发现移出请求关键路径 — 已发现/无
+        provider 则立即返回；否则确保单个后台线程执行发现 + 轮询衔接 +
+        价格刷新。发现失败不置位（下次请求可重试）；并发调用单飞
+        （同一时刻至多一个发现线程）。
+        """
+        if self._cloud_discovered or not self.cloud.providers:
+            return
+        if not background:
+            self._discover_and_start_polling()
+            return
+        with self._discovery_lock:
+            if self._cloud_discovered or self._discovery_thread is not None:
+                return
+            t = threading.Thread(target=self._discover_and_start_polling,
+                                 daemon=True, name="cloud-discovery")
+            self._discovery_thread = t
+            t.start()
+
+    def _discover_and_start_polling(self):
+        """发现 + 轮询/价格衔接（同步路径直呼；后台线程经此执行）。
+
+        失败：记日志、不置 _cloud_discovered、清理线程句柄 — 下次请求
+        可重试。发现使用启动已有 specs/enabled_models floor（discover_all
+        既有语义），不唤醒本地、不扩大本地白名单。
+        """
+        try:
             self.cloud.discover_all()
             self._cloud_discovered = True
             log.info("Cloud discovery completed: %d models", len(self.cloud.cloud_models))
@@ -208,6 +239,12 @@ class ProxyManager:
             self.cloud.start_polling()
             # G-2: Update price config now that cloud models are available
             self.metrics.update_prices(self._load_price_config())
+        except Exception as e:
+            log.warning("cloud discovery failed (%s) — retryable on next "
+                        "request", e)
+        finally:
+            with self._discovery_lock:
+                self._discovery_thread = None
 
     @staticmethod
     def _resolve_auto_switch(runtime_config: dict) -> tuple:
