@@ -3,7 +3,7 @@
 配置文件 IFF_DATA_DIR/model_pools.yaml：
   schema_version: 1
   pools:
-    fast:
+    flash:
       enabled: true
       strategy: priority_failover
       allowed_locations: [cloud]        # 空或缺省 = 不启用任何位置
@@ -12,7 +12,7 @@
       max_attempts: 2
       deadline_ms: 60000
       candidates:
-        - id: fast_primary
+        - id: flash_primary
           priority: 10                  # 越小越优先，池内唯一
           kind: cloud                   # local | cloud
           provider: provider_a          # cloud 必填
@@ -37,6 +37,43 @@ VALID_KINDS = {"local", "cloud"}
 VALID_FEATURES = {"tools", "stream", "vision", "structured"}
 VALID_PROTOCOLS = {"openai", "anthropic"}
 VALID_LOCATIONS = {"local", "cloud"}
+
+# 新写入范围（PLAN-2026-11-15 v2 Task 6 技术建议，非用户裁决）：
+# max_attempts 1..10，deadline_ms 1000..300000。磁盘存量超界容忍载入
+# （log 告警待显式迁移），CAS 新写入/编辑拒绝。
+MAX_ATTEMPTS_RANGE = (1, 10)
+DEADLINE_MS_RANGE = (1000, 300000)
+
+
+def _strict_int(value, field_name: str, where: str, issues: list[str],
+                *, default: int | None = None,
+                value_range: tuple[int, int] | None = None,
+                strict: bool = True) -> int | None:
+    """严格 int 校验（Task 6）：bool/float/str 一律拒绝，不靠 int() 强转
+    （int(True)=1、int("3")=3、int(2.5)=2 全是静默畸变）。
+
+    value_range 给出时做范围校验：strict=True 超界记 issue（拒绝）；
+    strict=False 超界 log 告警并保留原值（磁盘存量容忍，不自动裁剪）。"""
+    if value is None:
+        if default is None:
+            issues.append(f"{where}: {field_name} is required")
+            return None
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        issues.append(f"{where}: {field_name} must be an integer, got {value!r}")
+        return None
+    if value_range is not None:
+        lo, hi = value_range
+        if not (lo <= value <= hi):
+            if strict:
+                issues.append(
+                    f"{where}: {field_name} must be in [{lo}, {hi}], got {value}")
+                return None
+            log.warning(
+                "%s: %s=%d outside recommended [%d, %d] — tolerated for "
+                "legacy config, explicit migration required to change",
+                where, field_name, value, lo, hi)
+    return value
 
 
 def _str_seq(value, field_name: str, where: str, issues: list[str]) -> tuple[str, ...] | None:
@@ -132,13 +169,13 @@ def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateC
     if kind == "cloud" and not model_id:
         issues.append(f"pool '{pool_name}' candidate '{cid}': cloud candidate requires model_id")
 
-    # 禁池引用池：目标名不得落在 iff/ 逻辑命名空间
+    # 禁池引用池：目标名不得落在 fabric- 逻辑命名空间（2026-11-16 硬切 fabric-）
     target_names = [model_name, model_id] if kind == "cloud" else [model_name]
     for t in target_names:
-        if t.startswith("iff/"):
+        if t.startswith("fabric-"):
             issues.append(
-                f"pool '{pool_name}' candidate '{cid}': target '{t}' is in the iff/ "
-                f"logical namespace — pools must not reference pools")
+                f"pool '{pool_name}' candidate '{cid}': target '{t}' is in the "
+                f"fabric- logical namespace — pools must not reference pools")
             return None
 
     where = f"pool '{pool_name}' candidate '{cid}'"
@@ -170,7 +207,8 @@ def _parse_candidate(raw: dict, pool_name: str, issues: list[str]) -> CandidateC
     )
 
 
-def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
+def _parse_pool(name: str, raw: dict, issues: list[str],
+                *, strict: bool = True) -> PoolConfig | None:
     if "/" in name:
         issues.append(f"pool name '{name}' must not contain '/'")
         return None
@@ -211,7 +249,11 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
     allow_cross = _strict_bool(raw.get("allow_cross_location"), "allow_cross_location",
                                f"pool '{name}'", issues)
     enabled = _strict_bool(raw.get("enabled"), "enabled", f"pool '{name}'", issues)
-    accept_declared = _strict_bool(raw.get("accept_declared"), "accept_declared",
+    # MacFabric 裁决（2026-11-15）：accept_declared 默认 true — 证据五态里
+    # DECLARED 本就是"管理员明确声明"，App 配置服务商端点+模型入池即是声明；
+    # 默认 false 曾让全部池卡死在 no_evidence（探测端点不存在，声明无人写入）。
+    # YAML 显式 false 仍然尊重（需要实测证据强约束的池可显式收紧）。
+    accept_declared = _strict_bool(raw.get("accept_declared", True), "accept_declared",
                                    f"pool '{name}'", issues)
     if allow_cross is None or enabled is None or accept_declared is None:
         return None
@@ -224,12 +266,15 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
     if not candidates:
         enabled = False
 
-    try:
-        max_attempts = int(raw.get("max_attempts", 2))
-        deadline_ms = int(raw.get("deadline_ms", 60000))
-    except (TypeError, ValueError):
-        issues.append(f"pool '{name}': max_attempts/deadline_ms must be integers")
+    ma = _strict_int(raw.get("max_attempts"), "max_attempts",
+                     f"pool '{name}'", issues, default=2,
+                     value_range=MAX_ATTEMPTS_RANGE, strict=strict)
+    dm = _strict_int(raw.get("deadline_ms"), "deadline_ms",
+                     f"pool '{name}'", issues, default=60000,
+                     value_range=DEADLINE_MS_RANGE, strict=strict)
+    if ma is None or dm is None:
         return None
+    max_attempts, deadline_ms = ma, dm
 
     return PoolConfig(
         name=name,
@@ -244,8 +289,14 @@ def _parse_pool(name: str, raw: dict, issues: list[str]) -> PoolConfig | None:
     )
 
 
-def load_pools_dict(raw: dict, current_revision: int) -> tuple[PoolsFile | None, list[str]]:
-    """解析 + 静态校验。返回 (配置, 问题列表)；问题非空时配置为 None。"""
+def load_pools_dict(raw: dict, current_revision: int,
+                    *, strict: bool = True) -> tuple[PoolsFile | None, list[str]]:
+    """解析 + 静态校验。返回 (配置, 问题列表)；问题非空时配置为 None。
+
+    strict=True（默认，CAS 新写入/编辑）：max_attempts/deadline_ms 范围
+    超界即拒绝。strict=False（磁盘存量载入）：类型错误仍拒绝，范围超界
+    告警容忍（不自动裁剪 — 显式迁移另行决定）。
+    """
     issues: list[str] = []
     if not isinstance(raw, dict):
         return None, ["model_pools config root must be a mapping"]
@@ -261,7 +312,7 @@ def load_pools_dict(raw: dict, current_revision: int) -> tuple[PoolsFile | None,
         if not isinstance(praw, dict):
             issues.append(f"pool '{name}': config must be a mapping")
             continue
-        pool = _parse_pool(str(name), praw, issues)
+        pool = _parse_pool(str(name), praw, issues, strict=strict)
         if pool is not None:
             pools[pool.name] = pool
 

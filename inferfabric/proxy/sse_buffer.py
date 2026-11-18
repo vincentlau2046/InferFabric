@@ -49,7 +49,8 @@ class SSELineBuffer:
     不触发。未传回调时仅维护 first_token_seen 标志，行为与原来一致。
     """
 
-    __slots__ = ("_buffer", "usage", "first_token_seen", "_on_first_token")
+    __slots__ = ("_buffer", "usage", "first_token_seen", "_on_first_token",
+                 "saw_done", "saw_error")
 
     def __init__(self, on_first_token=None):
         self._buffer = b""
@@ -57,6 +58,10 @@ class SSELineBuffer:
                       "completion_tokens": 0}
         self.first_token_seen = False
         self._on_first_token = on_first_token
+        # 流终止观测（PLAN-2026-11-15 v2 Task 3）：[DONE] / 显式 error 事件。
+        # 纯观察，不改转发行为。
+        self.saw_done = False
+        self.saw_error = False
 
     def feed(self, chunk: bytes):
         """喂入原始 chunk。在 resp.read() → _safe_write() 之间调用。
@@ -96,8 +101,9 @@ class SSELineBuffer:
             else:
                 continue
 
-            # [DONE] 标记 — 跳过不解析
+            # [DONE] 标记 — 跳过不解析（记录终止观测）
             if data_str.strip() == b"[DONE]":
+                self.saw_done = True
                 continue
 
             # 解析 JSON
@@ -105,6 +111,10 @@ class SSELineBuffer:
                 obj = json.loads(data_str)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+
+            # 显式错误事件（OpenAI 兼容引擎的流内错误信封）
+            if isinstance(obj, dict) and obj.get("error") is not None:
+                self.saw_error = True
 
             # 提取 usage（按字段合并：各字段独立 last-wins，零值不覆盖）
             usage = obj.get("usage")

@@ -1,7 +1,7 @@
-"""inferfabric/model_pool/dispatch.py — OpenAI/Anthropic 入口的 iff/ 池调度。
+"""inferfabric/model_pool/dispatch.py — OpenAI/Anthropic 入口的 fabric- 池调度。
 
 在既有入口（handle_chat / _handle_messages）的鉴权段之前调用：
-- `iff/` 前缀检查（非池请求原样放行，返回 False）
+- `fabric-` 前缀检查（非池请求原样放行，返回 False）
 - 完整逻辑名鉴权（不做 split("/")[-1]，guest 白名单不自动扩权）
 - 捕获不可变快照 → select() → run_attempts 预算内回退（P2，spec §6.2–§6.4）
 - 池请求跳过响应缓存（GET/PUT 均不触碰）
@@ -26,7 +26,7 @@ from inferfabric.model_pool.selector import (
 )
 from inferfabric.proxy.chat_handlers import (
     _ENGINE_API_PATHS,
-    _forward_request,
+    _forward_request_ex,
     _normalize_tools_for_openai,
     handle_ollama_native,
 )
@@ -34,7 +34,22 @@ from inferfabric.proxy.request_logger import RequestLog
 
 log = logging.getLogger("inferfabric.model_pool.dispatch")
 
-POOL_PREFIX = "iff/"
+POOL_PREFIX = "fabric-"   # 硬切 fabric-（用户裁决 2026-11-16：slash 命名客户端兼容差，不留别名）
+
+# 池名 v2（用户裁决 2026-11-17）：对外逻辑名与池键升级为 flash/lite/max，
+# 更贴合中国模型档位命名。旧名 fast/small/premium 保留只读入站别名 —
+# 已分发客户端（AtlasCode 等）仍用 fabric-fast 等旧名，网关解析到新池，
+# 日志/摘要按解析后的新名记录（池身份单一，便于统计聚合）。
+POOL_ALIASES = {
+    "fast": "flash",
+    "small": "lite",
+    "premium": "max",
+}
+
+
+def canonical_pool_name(name: str) -> str:
+    """历史池名 → 当前池名；非别名原样返回。"""
+    return POOL_ALIASES.get(name, name)
 
 # 错误码 → (HTTP status, 是否带 Retry-After)
 _ERROR_CONTRACT = {
@@ -58,7 +73,7 @@ def is_pool_name(model: str) -> bool:
 
 
 def pool_name_of(model: str) -> str:
-    return model[len(POOL_PREFIX):]
+    return canonical_pool_name(model[len(POOL_PREFIX):])
 
 
 # ── 请求能力提取 ──
@@ -160,14 +175,21 @@ def _pool_has_cloud_candidates(pool_snap) -> bool:
 
 
 def _ensure_cloud_discovered(pm, pool_snap) -> None:
-    """池含云候选时补一次云发现（惰性；pm 未提供入口则跳过，评审 #14）。"""
+    """池含云候选时确保云发现（Task 5：后台单飞，不阻塞请求关键路径）。
+
+    发现失败/未完成时云候选按 last-known 状态路由；无 last-known 的
+    云候选在 select/transport 层快速明确失败，不等待发现。pm 只提供
+    旧签名（无 background 参数）时退回同步调用（兼容）。"""
     ecd = getattr(pm, "ensure_cloud_discovered", None)
     if ecd is None or not _pool_has_cloud_candidates(pool_snap):
         return
     try:
-        ecd()
+        try:
+            ecd(background=True)
+        except TypeError:
+            ecd()
     except Exception as e:
-        log.warning("cloud discovery failed on pool path (%s) — "
+        log.warning("cloud discovery dispatch failed (%s) — "
                     "cloud candidates use last known state", type(e).__name__)
 
 
@@ -204,6 +226,8 @@ def _log(pm, handler, *, req_id, key_name, model, status, error=None,
     ))
 
 
+
+
 # ── OpenAI 入口 ──
 
 def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, message):
@@ -231,7 +255,7 @@ def _no_eligible_message(model: str, sel) -> str:
 
 
 def handle_pool_chat(handler, pm, data, model) -> bool:
-    """OpenAI /v1/chat/completions 的 iff/ 池分支。
+    """OpenAI /v1/chat/completions 的 fabric- 池分支。
 
     Returns:
         True  — 请求已完整处理（含错误响应已发）
@@ -291,7 +315,10 @@ def handle_pool_chat(handler, pm, data, model) -> bool:
     # 统一限流：gate 以逻辑名为键、覆盖所有转发分支（local/ollama/cloud），
     # 避免任何分支绕过 RPM/并发限制（安全审查 2026-10-23 #1）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
-    gate = pm.dual_gate.acquire(model)
+    # Task 4：逻辑 gate 等待受池预算约束（不超 deadline，上限仍 30s）—
+    # OpenAI 路径此前无 timeout（无界排队可绕过硬截止）
+    logical_gate_timeout = _gate_timeout(pool_snap.pool.deadline_ms / 1000.0)
+    gate = pm.dual_gate.acquire(model, timeout=logical_gate_timeout)
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}")
@@ -347,7 +374,7 @@ def _send_pool_error_anthropic(handler, pm, *, req_id, key_name, model, code, me
 
 
 def handle_pool_messages(handler, pm, data, model) -> bool:
-    """Anthropic /v1/messages 的 iff/ 池分支。
+    """Anthropic /v1/messages 的 fabric- 池分支。
 
     Returns:
         True  — 请求已完整处理（含错误响应已发）
@@ -398,7 +425,9 @@ def handle_pool_messages(handler, pm, data, model) -> bool:
 
     # 统一限流（同 OpenAI 路径；Anthropic 直连路径带 30s 等待语义，保持一致）
     budget_start = time.monotonic()   # 排队等待计入预算（§6.3，评审 #7）
-    gate = pm.dual_gate.acquire(model, timeout=30)
+    # Task 4：逻辑 gate 等待受池预算约束（Anthropic 路径原固定 30s）
+    gate = pm.dual_gate.acquire(
+        model, timeout=_gate_timeout(pool_snap.pool.deadline_ms / 1000.0))
     if not gate.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
              status=429, error=gate.reason, route=f"pool:{pool_snap.pool.name}")
@@ -454,27 +483,30 @@ def _log_failed_attempts(pm, handler, outcome, *, req_id, key_name, model):
                     rec.retry_after, rec.error, rec.route)
 
 
-def _gate_timeout(remaining: float | None) -> float | None:
-    """物理门等待上限：受剩余预算约束（终审 #7），不超过默认 30s。"""
+def _gate_timeout(remaining: float | None) -> float:
+    """物理/逻辑门等待上限：受剩余预算约束（终审 #7 + Task 4 绝对截止）。
+
+    剩余耗尽 → 0（立即失败，不再保底 1s — 那会让每段等待超出总预算）；
+    remaining=None（非池路径）保持 30s 兼容默认。"""
     if remaining is None:
         return 30.0
-    return max(1.0, min(30.0, float(remaining)))
+    return max(0.0, min(30.0, float(remaining)))
 
 
 def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
                           remaining=None) -> AttemptResult:
     """本地候选（OpenAI 入站）：ready_only，绝不调用 ensure_service。
 
-    _forward_request 单次语义：True=响应已完整交付（committed）；False=连接
-    失败、headers 未发送（未提交 → 池层切下一候选）。上游错误响应会被直发
-    （committed → 终止不回退）— 这是 PR-14 冻结核心路径的既有语义。
-    ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，终审 #13）—
-    不再调 handle_ollama_native（该路径无返回信号，无法区分已交付/未提交）。
+    suppress 模式（终审 I6）：动作表状态（401/403/429/5xx，501 除外）不
+    直发客户端，未提交携带真实状态返回 → run_attempts 冷却/等待/回退；
+    非回退类（400/404/413/422/501）保留 PR-14 直发 committed 语义（终止
+    不回退）。ollama 引擎走同一 OpenAI 兼容端点（/v1/chat/completions，
+    终审 #13）— 不再调 handle_ollama_native（该路径无返回信号）。
 
     已知不对称（cross-review 2026-11-04，文档化不改码）：OpenAI 本地候选
-    没有 parallel_tool_use_not_supported 故障转移 — _forward_request 把引擎
-    400 直发客户端并记为成功提交（PR-14 冻结）；不兼容信号机制仅存在于
-    Anthropic 本地路径（forward_anthropic_local suppress 契约）。
+    没有 parallel_tool_use_not_supported 故障转移 — 引擎 400 直发客户端并
+    记为成功提交（PR-14 冻结）；不兼容信号机制仅存在于 Anthropic 本地路径
+    （forward_anthropic_local suppress 契约）。
     """
     route = f"pool:{pool}/local:{cand.candidate.model_name}"
     c = cand.candidate
@@ -507,15 +539,36 @@ def _attempt_local_openai(handler, pm, data, *, model, pool, cand,
         upstream_path = _ENGINE_API_PATHS.get(model_obj.type, "/v1/chat/completions")
 
         # 池请求不写响应缓存（映射变化后旧答案不可复用，spec §9.3）。
-        # model_name 必须是真实模型名 — _forward_request 以它释放副本配额
-        if _forward_request(handler, pm, target_port, body, stream,
-                            model_name=model_obj.name, upstream_path=upstream_path,
-                            cache_body=None, timeout=remaining):
-            return AttemptResult(ok=True, status=200, committed=True, route=route,
-                                 usage=getattr(handler, "_usage", {}) or {},
-                                 ttft_ms=getattr(handler, "_ttft_ms", None))
-        return AttemptResult(status=None, route=route,
-                             error=f"local target '{c.model_name}' unreachable")
+        # model_name 必须是真实模型名 — _forward_request 以它释放副本配额。
+        # Task 3：结构化结果 — 布尔"已交付"不再等同 ok（非 2xx 直发/流中断
+        # 如实分类），真实状态/流分类保留给动作表。
+        # 终审 I6：suppress 模式 — 动作表状态（401/403/429/5xx-except-501）
+        # 不直发客户端，未提交返回交动作表冷却/等待/回退；与云候选及
+        # Anthropic 本地路径契约对齐。PR-14 非回退类直发语义不变。
+        fx = _forward_request_ex(handler, pm, target_port, body, stream,
+                                 model_name=model_obj.name,
+                                 upstream_path=upstream_path,
+                                 cache_body=None, timeout=remaining,
+                                 suppress_client_errors=True)
+        if not fx["committed"]:
+            if fx["status"] is not None:
+                # 动作表状态被抑制：携带真实状态/Retry-After 供回退决策
+                return AttemptResult(ok=False, committed=False,
+                                     status=fx["status"], route=route,
+                                     error=fx["error"],
+                                     retry_after=fx.get("retry_after"))
+            return AttemptResult(status=None, route=route, error=fx["error"])
+        if fx["ok"]:
+            return AttemptResult(ok=True, status=fx["status"], committed=True,
+                                 route=route, usage=fx["usage"] or {},
+                                 ttft_ms=fx["ttft_ms"],
+                                 stream_state=fx["stream_state"])
+        # 已提交失败（非 2xx 直发/流中断）→ 终止不回退，不写第二信封
+        return AttemptResult(ok=False, committed=True, status=fx["status"],
+                             route=route,
+                             error=fx["error"] or "upstream_error",
+                             usage=fx["usage"] or {}, ttft_ms=fx["ttft_ms"],
+                             stream_state=fx["stream_state"])
     finally:
         gate.release()
 

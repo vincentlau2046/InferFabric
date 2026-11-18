@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Union
 
@@ -196,7 +196,10 @@ class PoolRegistry:
             # 否则持有旧 revision 的编辑者可 CAS 覆盖掉他人的修改（评审 #2）
             revision = current + 1
         try:
-            parsed, issues = load_pools_dict(raw, current_revision=revision)
+            # 磁盘存量载入 tolerant（strict=False）：范围超界告警容忍不裁剪；
+            # CAS 新写入（update/flip）走默认 strict
+            parsed, issues = load_pools_dict(raw, current_revision=revision,
+                                             strict=False)
         except Exception as e:
             # 解析崩溃（畸形类型逃逸静态校验等）→ 保留最后有效快照，不抛出
             log.error("model_pools.yaml parse crashed (%s) — keeping last good snapshot",
@@ -247,6 +250,7 @@ class PoolRegistry:
             self._configured = True
             self._load_error = None
             return self._snapshot
+
 
     def compile_pool(self, config: dict, pool_name: str) -> PoolSnapshot:
         """dry-run 编辑态预览：把传入配置编译为单池快照（只读，不发布）。
@@ -366,6 +370,16 @@ class PoolRegistry:
                         "cloud", cand.provider,
                         f"openai={route['openai_base']}|anthropic={route['anthropic_base']}",
                         cand.model_id)
+                    # MacFabric 开箱即路由（2026-11-15 用户实测：池配置正确但
+                    # 恒 no_evidence — declared_protocols 无人写入、探测端点
+                    # 不存在，证据门槛成死锁）。候选未显式声明协议时从服务商
+                    # 配置推导：启用 provider + 模型入池 = 管理员已声明走该端点；
+                    # 显式声明优先，推导只兜底。
+                    if not cand.declared_protocols:
+                        protocols = ["openai"]
+                        if route.get("anthropic_base"):
+                            protocols.append("anthropic")
+                        cand = replace(cand, declared_protocols=tuple(protocols))
                 resolved.append(ResolvedCandidate(
                     candidate=cand, endpoint_fingerprint=fp,
                     evidence=self._evidence_for(cand, fp),

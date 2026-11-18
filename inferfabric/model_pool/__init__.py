@@ -1,4 +1,4 @@
-"""inferfabric.model_pool — 逻辑模型池（iff/fast 等稳定逻辑名 → 优先级候选映射）。
+"""inferfabric.model_pool — 逻辑模型池（fabric-flash 等稳定逻辑名 → 优先级候选映射）。
 
 设计文档：docs/superpowers/specs/2026-10-23-logical-model-pools-design.md
 - config.py    配置数据模型 + 静态校验（纯函数）
