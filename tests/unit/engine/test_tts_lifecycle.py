@@ -23,6 +23,28 @@ from unittest.mock import MagicMock, patch, call
 import pytest
 
 
+def _ok_telemetry():
+    """Roomy fake device telemetry — deploy paths must not fail the VRAM guard.
+
+    PR #5 评审修复：`check_vram_budget` 对 telemetry=None 严格 fail-closed，
+    所以直接构造 ModelLifecycle 的生命周期测试必须注入遥测，否则在 Linux
+    上（守卫生效）部署会在守卫处被拒，测试语义被平台左右。
+    """
+    from types import SimpleNamespace
+    from inferfabric.platform.telemetry import DeviceSnapshot
+    snap = DeviceSnapshot(
+        platform="linux", accelerator="nvidia", memory_kind="vram",
+        memory_used_mb=0, memory_total_mb=32768, memory_budget_mb=31785,
+        utilization_pct=None, power_w=None, temperature_c=None,
+        clock_mhz=None, pressure_level=None, timestamp=0.0, sources={})
+    return SimpleNamespace(snapshot=lambda: snap)
+
+
+def _pin_non_macos(monkeypatch):
+    """固定离 macOS 路径：统一内存机器上也能确定性地覆盖 VRAM 守卫（C2 纪律）。"""
+    monkeypatch.setattr("inferfabric.platform.probe.IS_MACOS", False)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 1. _switch_to_idle() tts_port full chain
 # ═══════════════════════════════════════════════════════════════════
@@ -48,7 +70,8 @@ class TestSwitchToIdleTtsPort:
         mock_gpu = MagicMock()
         mock_gpu.reconcile.return_value = {"actions": []}
 
-        lc = ModelLifecycle(mock_state, mock_proc, mock_health, mock_lock, mock_gpu, models or {})
+        lc = ModelLifecycle(mock_state, mock_proc, mock_health, mock_lock, mock_gpu,
+                            models or {}, device_telemetry=_ok_telemetry())
         return lc, mock_state, mock_proc
 
     def test_switch_to_idle_tts_only(self):
@@ -637,7 +660,7 @@ tts_server:
 class TestDeployModelFailureTts:
     """Verify _deploy_model failure cleanup handles tts_port + tts_pid."""
 
-    def test_deploy_tts_failure_stops_tts_port(self):
+    def test_deploy_tts_failure_stops_tts_port(self, monkeypatch):
         """When TTS deployment fails, the failed model is stopped via
         _stop_model_process (adapter → proc.stop_tts_server); stop_all only
         receives active_services (PID cleanup, Task 2.3 demotes the facade)."""
@@ -661,8 +684,10 @@ class TestDeployModelFailureTts:
             gpu_role="shared", tts=TTSConfig(conda_env="test", port=8880),
         )
 
+        _pin_non_macos(monkeypatch)
         lc = ModelLifecycle(mock_state, mock_proc, mock_health, mock_lock, mock_gpu,
-                            {"tts-qwen3": tts_model})
+                            {"tts-qwen3": tts_model},
+                            device_telemetry=_ok_telemetry())
 
         # Mock load_models to return the same dict
         with patch("inferfabric.model_lifecycle.load_models", return_value={"tts-qwen3": tts_model}):
@@ -680,7 +705,7 @@ class TestDeployModelFailureTts:
         assert kwargs == {"active_services": []}, \
             f"stop_all should receive only active_services, got {kwargs}"
 
-    def test_deploy_tts_failure_clears_tts_pid(self):
+    def test_deploy_tts_failure_clears_tts_pid(self, monkeypatch):
         """When TTS deployment fails, tts_pid is cleared in state."""
         from inferfabric.model_lifecycle import ModelLifecycle
         from inferfabric.config import ModelConfig, TTSConfig, load_models
@@ -700,8 +725,10 @@ class TestDeployModelFailureTts:
             gpu_role="shared", tts=TTSConfig(conda_env="test", port=8880),
         )
 
+        _pin_non_macos(monkeypatch)
         lc = ModelLifecycle(mock_state, mock_proc, mock_health, mock_lock, mock_gpu,
-                            {"tts-qwen3": tts_model})
+                            {"tts-qwen3": tts_model},
+                            device_telemetry=_ok_telemetry())
 
         with patch("inferfabric.model_lifecycle.load_models", return_value={"tts-qwen3": tts_model}):
             lc._deploy_model(tts_model, "shared")
@@ -722,7 +749,7 @@ class TestDeployModelFailureNinfer:
     stop_all receives only active_services (PID cleanup; Task 2.3 demotes
     the facade)."""
 
-    def test_deploy_ninfer_failure_stops_via_stop_model_process(self):
+    def test_deploy_ninfer_failure_stops_via_stop_model_process(self, monkeypatch):
         """When NInfer deployment fails, cleanup routes through _stop_model_process
         (not an inlined docker stop) and stop_all gets only active_services."""
         import subprocess as _subprocess
@@ -747,8 +774,10 @@ class TestDeployModelFailureNinfer:
                                  docker_image="ninfer:test"),
         )
 
+        _pin_non_macos(monkeypatch)
         lc = ModelLifecycle(mock_state, mock_proc, mock_health, mock_lock, mock_gpu,
-                            {"qwen38-ninfer": ninfer_model})
+                            {"qwen38-ninfer": ninfer_model},
+                            device_telemetry=_ok_telemetry())
 
         # Simulate NInfer start failure — patch the adapter's start so no real
         # docker/Popen/sleep runs. Spy on _stop_model_process so the real

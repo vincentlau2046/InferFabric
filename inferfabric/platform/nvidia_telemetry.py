@@ -29,9 +29,12 @@ QUERY_CMD = [
     "--format=csv,noheader,nounits",
 ]
 
-# Per-card memory used at or below this = idle for reset purposes
-# (conservative platform-layer constant; gateway config stays out of here).
-RESET_IDLE_THRESHOLD_MB = 1024
+# Per-card memory used at or below this = idle for reset purposes. Aligned
+# with the gateway's GPU_FREE_THRESHOLD_MB (config.py) so the system can
+# never report "GPU free" while a (non-force) reset refuses — that window
+# was a real review finding. platform layer keeps its own constant (no
+# upward config import).
+RESET_IDLE_THRESHOLD_MB = 2048
 
 _COLUMNS = ("memory_used_mb", "memory_total_mb", "utilization_pct",
             "power_w", "temperature_c", "clock_mhz")
@@ -173,7 +176,14 @@ class NvidiaDeviceControl:
         except Exception:
             return None
 
-    def reset(self) -> OperationResult:
+    def reset(self, force: bool = False) -> OperationResult:
+        """Scoped GPU reset; ``force`` = caller-intentional clear.
+
+        占用门禁只挡非 force 调用：gpu-clear / 切换前清理 / ComfyUI 退出后
+        整理 都是在"停掉旧引擎、残留显存尚未释放"的瞬间调用的 —— 此时残留
+        是预期状态，不是"卡被占用"。未限定范围的 fallback（pm toggle、
+        nvidia-smi -r 影响全部卡）继续要求其他卡空闲，force 也不放宽。
+        """
         used = self._per_card_used_mb()
         if used is None:
             return OperationResult(
@@ -184,11 +194,12 @@ class NvidiaDeviceControl:
                 ok=False, status="error",
                 message=f"gpu_index {self._gpu_index} out of range "
                         f"({len(used)} cards)")
-        if used[self._gpu_index] > RESET_IDLE_THRESHOLD_MB:
+        if used[self._gpu_index] > RESET_IDLE_THRESHOLD_MB and not force:
             return OperationResult(
                 ok=False, status="error",
                 message=f"card {self._gpu_index} busy "
-                        f"({used[self._gpu_index]} MB used) — reset refused")
+                        f"({used[self._gpu_index]} MB used) — reset refused "
+                        f"(force=True for an intentional clear)")
 
         others_busy = [i for i, u in enumerate(used)
                        if i != self._gpu_index and u > RESET_IDLE_THRESHOLD_MB]

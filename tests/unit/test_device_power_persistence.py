@@ -245,15 +245,29 @@ def test_power_series_does_not_interpolate_across_streams(tmp_path):
     legacy_series = query_power_series(db, gran="hour")
     device_series = query_device_power_series(db, gran="hour")
 
-    # each stream integrated on its own: totals differ, counts split
-    assert legacy_series["totals"]["count"] == 2
+    # PR #5 评审：/api/power 升级后不得冻结在 legacy 流 —— 窗口内有 aggregate
+    # 样本时整段返回 aggregate（绝不与 legacy 合并），并标明 stream。
+    assert legacy_series["stream"] == "aggregate"
+    assert device_series["stream"] == "aggregate"
+    assert legacy_series["totals"]["avg_w"] == 350.0      # 不是 50/350 的混合
     assert device_series["totals"]["count"] == 2
-    assert legacy_series["totals"]["avg_w"] == 50.0
-    assert device_series["totals"]["avg_w"] == 350.0
-    # same response shape on both endpoints
+    # 同响应 shape（含 stream）
     assert set(legacy_series.keys()) == set(device_series.keys())
-    assert {"gran", "buckets", "totals", "available"} <= set(device_series.keys())
+    assert {"gran", "buckets", "totals", "available", "stream"} <= set(device_series.keys())
     assert legacy_series["available"] and device_series["available"]
+
+
+def test_power_series_legacy_fallback_only_when_no_aggregate(tmp_path):
+    """升级前数据：窗口内无 aggregate 样本 → /api/power 整段回落 legacy 流。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = int(time.time())
+    db.insert_device_power_samples([
+        {"ts": now - 60, "platform": "unknown", "accelerator": "unknown",
+         "device_id": "unknown", "watts": 55.0, "source": "legacy_gpu_power_samples"},
+    ])
+    res = query_power_series(db, gran="hour")
+    assert res["stream"] == "unknown"
+    assert res["totals"]["avg_w"] == 55.0
 
 
 def test_v011_tolerates_view_from_concurrent_migration():

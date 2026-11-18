@@ -102,9 +102,15 @@ class DeviceTelemetry(Protocol):
 
 @runtime_checkable
 class DeviceControl(Protocol):
-    """Destructive device operations; separate from telemetry by design."""
+    """Destructive device operations; separate from telemetry by design.
 
-    def reset(self) -> OperationResult: ...
+    ``force`` marks caller-intentional clears (operator gpu-clear, post-stop
+    fragmentation) where residual VRAM is expected — backends may skip their
+    occupancy refusal for the scoped reset, but never for unscoped fallbacks
+    that would widen the blast radius.
+    """
+
+    def reset(self, force: bool = False) -> OperationResult: ...
 
 
 # ── serialization helpers (JSON null contract) ───────────────────
@@ -171,7 +177,7 @@ class NullTelemetry:
 class NullDeviceControl:
     """Explicit unsupported — never a substitute dangerous command."""
 
-    def reset(self) -> OperationResult:
+    def reset(self, force: bool = False) -> OperationResult:
         return OperationResult(
             ok=False, status="unsupported",
             message="device reset not supported on this platform",
