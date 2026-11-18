@@ -118,7 +118,7 @@ class TestRecordImage:
 
 # ── ensure_image_pulled ─────────────────────────────────────────
 
-def _run_map(responses, digests=None):
+def _run_map(responses, digests=None, ids=None):
     """fake subprocess.run：按命令首段（inspect/pull）返回预设 CompletedProcess。
 
     digests: image ref → `docker image inspect --format …` 的 RepoDigests 输出
@@ -135,6 +135,8 @@ def _run_map(responses, digests=None):
     def run(cmd, **kw):
         calls.append(list(cmd))
         if "--format" in cmd:
+            if "{{.Id}}" in cmd:
+                return R(0, "", (ids or {}).get(cmd[-1], ""))
             return R(0, "", (digests or {}).get(cmd[-1], ""))
         key = "inspect" if "inspect" in cmd else "pull"
         rc, err = responses[key]
@@ -220,9 +222,19 @@ class TestPruneManaged:
                        digests={"img:moved": "repo@sha256:new"})
         report = prune_managed(led, set(), run=run)
         assert report[0]["action"] == "skipped"
-        assert "digest changed" in report[0]["reason"]
+        assert "identity changed" in report[0]["reason"]
         assert not any("rmi" in c for c in run.calls)
         assert led.refs() == {"img:moved"}
+
+    def test_locally_built_image_pruned_by_image_id(self, tmp_path):
+        # 本地构建镜像无 RepoDigests：以 .Id 记账，同样在复核后 rmi
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        led.record("ninfer:latest", digest="sha256:localid", now=1.0)
+        run = _run_map({"inspect": (0, ""), "pull": (0, "")},
+                       ids={"ninfer:latest": "sha256:localid"})
+        report = prune_managed(led, set(), run=run)
+        assert report[0]["action"] == "removed"
+        assert ["docker", "rmi", "ninfer:latest"] in run.calls
 
     def test_no_digest_recorded_skipped_unverifiable(self, tmp_path):
         led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)

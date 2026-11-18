@@ -12,9 +12,11 @@ removable objects, one discipline:
 - **Images: ledger-scoped.** Only refs recorded in the managed-image ledger
   (image_manager, L3b) are "ours"; a user-pulled image is never removed,
   referenced or not.
-- **Envs: contained.** The prefix must resolve inside CONDA_ENVS; the canonical
-  removal is `conda env remove -p <prefix> -y`. A direct directory delete is
-  opt-in (`force=True`) and still contained.
+- **Envs: contained in the project root.** The prefix must resolve inside
+  `<IFF_DATA_DIR>/envs` (project-managed prefixes); `~/miniconda3/envs` is
+  user-level legacy and never removable here. The canonical removal is
+  `conda env remove -p <prefix> -y`; a direct directory delete is opt-in
+  (`force=True`) and still contained.
 - **Q5 (final): `~/miniconda3/pkgs` is a user-level shared cache — never
   touched here, not even on env removal.**
 - **Model weights are user assets.** `remove model` deletes the models.d YAML
@@ -27,10 +29,14 @@ actions and performs zero side effects (no stop, no file writes, no docker).
 from __future__ import annotations
 
 import copy
+import json
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,8 +45,19 @@ import yaml
 from inferfabric.image_manager import (
     ManagedImageLedger,
     default_ledger_path,
-    image_digest,
+    image_identity_value,
 )
+
+log = logging.getLogger("inferfabric.uninstaller")
+
+
+class PoolsConfigError(RuntimeError):
+    """model_pools.yaml unreadable/invalid — the reference gate must fail closed.
+
+    The live pool registry keeps its last good snapshot in memory; silently
+    treating an unreadable file as "no references" would delete a model the
+    proxy still routes to (PR #7 review, blocking 2).
+    """
 
 
 # ── Engine reference index ─────────────────────────────────────
@@ -155,43 +172,33 @@ def weight_paths(cfg) -> list[str]:
 
 # ── model pools (IFF_DATA_DIR/model_pools.yaml) ────────────────
 
-def pool_refs(pools_path, model_names: set[str]) -> list[dict]:
-    """Local pool candidates that name any of `model_names`."""
-    pools_path = Path(pools_path) if pools_path else None
-    if pools_path is None or not pools_path.exists():
-        return []
-    try:
-        raw = yaml.safe_load(pools_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    rows = []
-    for pool, p in ((raw or {}).get("pools") or {}).items():
-        if not isinstance(p, dict):
-            continue
-        for c in (p.get("candidates") or []):
-            if isinstance(c, dict) and c.get("kind") == "local" \
-                    and c.get("model_name") in model_names:
-                rows.append({"pool": pool, "candidate_id": c.get("id"),
-                             "model_name": c.get("model_name")})
-    return rows
+def _read_pools_strict(pools_path) -> dict:
+    """Read + shape-check model_pools.yaml; any problem raises PoolsConfigError.
 
-
-def purge_pool_candidates(pools_path, model_names: set[str]) -> list[dict]:
-    """Drop local candidates naming `model_names`, keeping everything else.
-
-    Read-modify-write with an atomic replace and a revision bump (the file is
-    CAS-managed by the registry; a stale writer must not overwrite newer
-    edits). Invalid resulting config is rejected, not written.
+    Fail-visible on purpose: "unreadable" must never degrade to "no
+    references" (that path deletes a model the live registry still routes).
     """
-    pools_path = Path(pools_path)
-    if not pools_path.exists():
-        return []
-    raw = yaml.safe_load(pools_path.read_text(encoding="utf-8"))
+    try:
+        raw = yaml.safe_load(Path(pools_path).read_text(encoding="utf-8"))
+    except Exception as e:
+        raise PoolsConfigError(f"model pool config {pools_path} unreadable: {e}") from e
     if not isinstance(raw, dict):
-        return []
+        raise PoolsConfigError(
+            f"model pool config {pools_path} is not a mapping — refusing to "
+            f"treat it as reference-free")
+    pools = raw.get("pools")
+    if pools is not None and not isinstance(pools, dict):
+        raise PoolsConfigError(
+            f"model pool config {pools_path} has a non-mapping 'pools' key — "
+            f"refusing to treat it as reference-free")
+    return raw
+
+
+def _drop_candidates(raw: dict, model_names: set[str]) -> tuple[dict, list[dict]]:
     new_raw = copy.deepcopy(raw)
     removed = []
-    for pool, p in (new_raw.get("pools") or {}).items():
+    for pool, p in ((new_raw.get("pools") or {}) if isinstance(
+            new_raw.get("pools"), dict) else {}).items():
         if not isinstance(p, dict):
             continue
         keep = []
@@ -203,20 +210,49 @@ def purge_pool_candidates(pools_path, model_names: set[str]) -> list[dict]:
             else:
                 keep.append(c)
         p["candidates"] = keep
-    if not removed:
+    return new_raw, removed
+
+
+def pool_refs(pools_path, model_names: set[str]) -> list[dict]:
+    """Local pool candidates that name any of `model_names`.
+
+    Raises PoolsConfigError when the file exists but cannot be trusted.
+    """
+    pools_path = Path(pools_path) if pools_path else None
+    if pools_path is None or not pools_path.exists():
         return []
-    # 写前校验（strict=False：沿用磁盘存量的容忍语义）；非法结果绝不落盘
+    raw = _read_pools_strict(pools_path)
+    rows = []
+    for pool, p in (raw.get("pools") or {}).items():
+        if not isinstance(p, dict):
+            continue
+        for c in (p.get("candidates") or []):
+            if isinstance(c, dict) and c.get("kind") == "local" \
+                    and c.get("model_name") in model_names:
+                rows.append({"pool": pool, "candidate_id": c.get("id"),
+                             "model_name": c.get("model_name")})
+    return rows
+
+
+def _write_pools_local(pools_path: Path, new_raw: dict) -> int:
+    """Atomic local write with revision bump + pre-write validation.
+
+    Used only when no live registry is reachable (the writer is then the
+    single writer). With a live proxy the purge goes through its CAS instead.
+    """
     from inferfabric.model_pool.config import load_pools_dict
     try:
-        rev = int(raw.get("revision") or 0) + 1
+        rev = int(new_raw.get("revision") or 0) + 1
     except (TypeError, ValueError):
         rev = 1
     new_raw["revision"] = rev
     parsed, issues = load_pools_dict(new_raw, current_revision=rev, strict=False)
     if parsed is None:
-        raise ValueError("refusing to write invalid model_pools.yaml after "
-                         "candidate purge: " + "; ".join(issues))
-    fd, tmp = tempfile.mkstemp(dir=str(pools_path.parent), prefix=".model_pools.", suffix=".tmp")
+        raise PoolsConfigError(
+            "refusing to write invalid model_pools.yaml after candidate purge: "
+            + "; ".join(issues))
+    fd, tmp = tempfile.mkstemp(dir=str(pools_path.parent),
+                               prefix=".model_pools.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             yaml.safe_dump(new_raw, f, sort_keys=False, allow_unicode=True)
@@ -227,16 +263,146 @@ def purge_pool_candidates(pools_path, model_names: set[str]) -> list[dict]:
         except OSError:
             pass
         raise
-    return removed
+    return rev
+
+
+def _admin_request(method: str, path: str, *, host, port, token,
+                   payload=None, timeout: float = 10.0):
+    url = f"http://{host}:{port}{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Content-Type": "application/json"} if data is not None else {}
+    if token:
+        headers["X-Admin-Token"] = token
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode() or "{}"
+        return resp.status, json.loads(body)
+
+
+def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
+                          port=None, token=None,
+                          timeout: float = 10.0) -> dict:
+    """Drop local candidates naming `model_names`; returns removed + reload state.
+
+    Order of preference (PR #7 review, blocking 3):
+    1. **Live registry CAS** — GET current raw+revision, PUT the purged raw
+       with `expected_revision`. The registry validates, bumps revision and
+       writes the file itself, so the running proxy picks the change up
+       immediately and a concurrent dashboard save cannot be silently lost.
+    2. **No reachable proxy** — the CLI is the single writer: local atomic
+       write with revision bump + validation; reload state is reported as
+       pending (takes effect at next proxy start / reload).
+
+    An unreadable/invalid config raises PoolsConfigError either way.
+    """
+    pools_path = Path(pools_path)
+    if not pools_path.exists():
+        return {"removed": [], "reload": {"status": "absent"}}
+    raw = _read_pools_strict(pools_path)
+    new_raw, removed = _drop_candidates(raw, model_names)
+    if not removed:
+        return {"removed": [], "reload": {"status": "noop"}}
+
+    host = host or os.environ.get("EDGE_PROXY_HOST", "127.0.0.1")
+    port = int(port or os.environ.get("EDGE_PROXY_PORT", "8999"))
+    token = token if token is not None else os.environ.get("IFF_ADMIN_TOKEN", "")
+
+    last_err = None
+    for _attempt in range(2):   # one refresh+retry on revision conflict
+        try:
+            _s, view = _admin_request("GET", "/admin/model-pools", host=host,
+                                      port=port, token=token, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            raise PoolsConfigError(
+                f"pool admin API refused the read (HTTP {e.code}) — refusing "
+                f"to rewrite model_pools.yaml behind a live registry") from e
+        except (urllib.error.URLError, OSError):
+            rev = _write_pools_local(pools_path, new_raw)
+            return {"removed": removed,
+                    "reload": {"status": "pending", "revision": rev,
+                               "detail": "proxy not reachable — file written; "
+                                         "applies on next proxy start or "
+                                         "/reload-config"}}
+        except ValueError as e:
+            # 有 HTTP 应答但 JSON 损坏：绝不回落本地写（活 registry 在跑）
+            raise PoolsConfigError(
+                f"pool admin API returned invalid JSON: {e} — refusing purge") from e
+        live_raw = view.get("raw") if isinstance(view, dict) else None
+        live_rev = view.get("revision") if isinstance(view, dict) else None
+        if not isinstance(live_raw, dict) or not isinstance(live_rev, int):
+            raise PoolsConfigError(
+                "pool admin API returned an unexpected shape — refusing purge")
+        live_new, live_removed = _drop_candidates(live_raw, model_names)
+        if not live_removed:
+            return {"removed": [], "reload": {"status": "noop"}}
+        payload = dict(live_new)
+        payload.pop("revision", None)
+        payload["expected_revision"] = live_rev
+        try:
+            _s, res = _admin_request("PUT", "/admin/model-pools", host=host,
+                                     port=port, token=token, payload=payload,
+                                     timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code == 409:
+                last_err = e
+                continue
+            raise PoolsConfigError(
+                f"pool admin API rejected the purge (HTTP {e.code}) — "
+                f"model_pools.yaml left untouched") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise PoolsConfigError(
+                f"pool admin API became unreachable during the purge: {e} — "
+                f"model_pools.yaml left untouched") from e
+        except ValueError as e:
+            raise PoolsConfigError(
+                f"pool admin API returned invalid JSON during the purge: {e} — "
+                f"model_pools.yaml left untouched") from e
+        return {"removed": live_removed,
+                "reload": {"status": "applied-live",
+                           "revision": (res or {}).get("revision")}}
+    raise PoolsConfigError(
+        "pool revision conflict persisted after a refresh — a concurrent "
+        "writer keeps winning; model_pools.yaml left untouched") from last_err
+
+
+def scenario_refs(models_dir, applied_path, model_names: set[str]) -> list[dict]:
+    """Drifting scenario references after a model config is deleted.
+
+    `models.d/scenarios.yaml` (manual sidecar) and the applied overlay
+    (`~/.inferfabric/active_scenarios.yaml`, tune-written) are keyed by model
+    name. Neither is purged here — they are user/derived config — but the
+    removal report must show the drift instead of leaving it warning-only on
+    the next load.
+    """
+    out: list[dict] = []
+    candidates = [(Path(models_dir) / "scenarios.yaml", "scenarios.yaml")]
+    if applied_path:
+        candidates.append((Path(applied_path), "active_scenarios.yaml"))
+    for path, label in candidates:
+        if not path.exists():
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            out.append({"file": label, "status": "unreadable"})
+            continue
+        if not isinstance(raw, dict):
+            continue
+        for key in raw:
+            if key in model_names:
+                out.append({"file": label, "model": key})
+    return out
 
 
 def remove_model(target: str, *, models: dict, models_dir, pools_path=None,
+                 applied_scenarios_path=None,
                  stop_fn=None, is_running_fn=None, purge_pools: bool = False,
                  dry_run: bool = False) -> dict:
     """Remove a model: stop if running, delete its models.d YAML.
 
     Blocked when any local pool candidate references the model, unless
-    `purge_pools=True` (then those candidates are dropped in the same run).
+    `purge_pools=True` (then those candidates are dropped in the same run,
+    through the live registry's CAS when the proxy is reachable).
     Weights are reported, never deleted. A failed stop aborts the removal —
     deleting config under a live process would orphan it invisibly.
     """
@@ -255,13 +421,19 @@ def remove_model(target: str, *, models: dict, models_dir, pools_path=None,
     except Exception:
         pass
 
-    refs = pool_refs(pools_path, names) if pools_path else []
+    try:
+        refs = pool_refs(pools_path, names) if pools_path else []
+    except PoolsConfigError as e:
+        return {"status": "error", "model": name,
+                "message": f"pool reference gate unavailable: {e}"}
     if refs and not purge_pools:
         return {"status": "blocked",
                 "model": name,
                 "message": "model is referenced by model pools — remove those "
                            "candidates first or re-run with --purge-pools",
                 "pool_refs": refs}
+
+    drift = scenario_refs(models_dir, applied_scenarios_path, names)
 
     actions: list[dict] = []
     running = None
@@ -297,9 +469,18 @@ def remove_model(target: str, *, models: dict, models_dir, pools_path=None,
             actions.append({"action": "would-purge-pool-candidates",
                             "candidates": refs})
         else:
-            removed = purge_pool_candidates(pools_path, names)
+            try:
+                purged = purge_pool_candidates(pools_path, names)
+            except PoolsConfigError as e:
+                return {"status": "error", "model": name,
+                        "message": f"pool purge failed, config kept: {e}",
+                        "actions": actions}
             actions.append({"action": "purged-pool-candidates",
-                            "candidates": removed})
+                            "candidates": purged["removed"]})
+            actions.append({"action": "pool-reload",
+                            "status": purged["reload"]["status"],
+                            "detail": purged["reload"].get("detail")
+                            or f"revision {purged['reload'].get('revision')}"})
 
     if dry_run:
         actions.append({"action": "would-delete-config", "path": str(yaml_path)})
@@ -314,18 +495,31 @@ def remove_model(target: str, *, models: dict, models_dir, pools_path=None,
         actions.append({"action": "deleted-config", "path": str(yaml_path)})
         status = "removed"
 
-    return {"status": status, "model": name, "actions": actions,
-            "weights_kept": weight_paths(cfg),
-            "note": "weights are user assets — never deleted by this command"}
+    out = {"status": status, "model": name, "actions": actions,
+           "weights_kept": weight_paths(cfg),
+           "note": "weights are user assets — never deleted by this command"}
+    if drift:
+        out["scenario_refs"] = drift
+        out["note"] += ("; scenario files still name this model — remove those "
+                        "entries manually (drift would be skipped on load)")
+    return out
 
 
 # ── Conda env removal ─────────────────────────────────────────
 
 def _envs_root(envs_root) -> Path:
+    """Root for removable env prefixes: project data dir (issue #3 ruling).
+
+    `~/miniconda3/envs` is user-level legacy and read-only for this tool;
+    removable envs are the project-managed prefixes under <IFF_DATA_DIR>/envs
+    (L2 env-prefix layout). No such prefix exists yet, so the default root is
+    safe and forward-compatible: an explicit `envs_root` stays injectable for
+    tests and future layouts.
+    """
     if envs_root is not None:
         return Path(envs_root).expanduser()
-    from inferfabric.config import CONDA_ENVS
-    return Path(CONDA_ENVS).expanduser()
+    from inferfabric.config import IFF_DATA_DIR
+    return Path(IFF_DATA_DIR).expanduser() / "envs"
 
 
 def remove_env(env: str, *, models: dict, envs_root=None, run=None,
@@ -333,8 +527,10 @@ def remove_env(env: str, *, models: dict, envs_root=None, run=None,
                conda_bin=None, extra_sources=()) -> dict:
     """Remove a conda env that no model config references.
 
-    `force=True` allows deleting the prefix directory directly when conda is
-    unavailable; the prefix must still be a direct child of CONDA_ENVS.
+    The prefix must be a direct child of the project env root
+    (`<IFF_DATA_DIR>/envs` by default) — user-level conda envs are never
+    removable here. `force=True` allows deleting the prefix directory
+    directly when conda is unavailable; containment still applies.
     `~/miniconda3/pkgs` is never touched (Q5, declared final).
     """
     if not env or "/" in env or env in (".", ".."):
@@ -361,7 +557,10 @@ def remove_env(env: str, *, models: dict, envs_root=None, run=None,
                 "message": f"env prefix {prefix_r} escapes {root_r} — refusing"}
     if not prefix_r.exists():
         return {"status": "error", "env": env,
-                "message": f"env prefix does not exist: {prefix_r}"}
+                "message": f"env prefix does not exist: {prefix_r} — removable "
+                           f"envs are project-managed prefixes under {root_r}; "
+                           f"user-level conda envs (~/miniconda3/envs) are "
+                           f"read-only legacy (issue #3 ruling)"}
 
     if dry_run:
         return {"status": "would-remove", "env": env, "prefix": str(prefix_r),
@@ -409,9 +608,10 @@ def remove_image(ref: str, *, models: dict, ledger: ManagedImageLedger | None = 
     """Remove a project-managed image that no model config references.
 
     "Managed" = recorded in the image ledger (image_manager L3b) *and* its
-    digest still matches the recorded one — a repointed tag is refused, not
-    deleted. User-pulled images are never touched; `docker image prune` is
-    never issued.
+    recorded identity (repo digest for pulled images, image ID for locally
+    built ones) still matches — a repointed tag is refused, not deleted.
+    User-pulled images are never touched; `docker image prune` is never
+    issued.
     """
     if not ref:
         return {"status": "error", "message": "image ref required"}
@@ -431,22 +631,26 @@ def remove_image(ref: str, *, models: dict, ledger: ManagedImageLedger | None = 
                 "message": f"image {ref!r} is not in the managed-image ledger — "
                            f"only images this project pulled are removable"}
 
-    # digest 门禁（与 prune_managed 同一纪律）：台账记录的是 pull 时的镜像
-    # 身份；tag 可被重指，不复核 digest 就可能删掉台账从未见过的镜像。
+    # identity 门禁（与 prune_managed 同一纪律）：台账记录的是 pull/build 时的
+    # 镜像身份（repo digest，或本地构建镜像的 image ID）；tag 可被重指，不
+    # 复核身份就可能删掉台账从未见过的镜像。
     want = ledger.digest(ref)
+    if not want:
+        # dry-run 必须是忠实计划：执行会 blocked 的条目不能报 would-remove
+        return {"status": "blocked", "image": ref,
+                "message": "no image identity recorded for this ref "
+                           "(unverifiable) — re-pull or redeploy it so the "
+                           "ledger records its digest/image ID"}
     if dry_run:
         return {"status": "would-remove", "image": ref,
                 "actions": [{"action": "would-rmi", "ref": ref,
-                             "digest_recorded": bool(want)}]}
-    if not want:
-        return {"status": "blocked", "image": ref,
-                "message": "no digest recorded for this image (unverifiable) — "
-                           "re-pull it so the ledger can record the digest"}
-    current = image_digest(ref, run)
+                             "identity_recorded": want}]}
+    current = image_identity_value(ref, run)
     if current != want:
         return {"status": "blocked", "image": ref,
-                "message": f"digest changed (ledger {want!r} != current {current!r}) — "
-                           f"the tag now points at a different image; refusing"}
+                "message": f"image identity changed (ledger {want!r} != current "
+                           f"{current!r}) — the tag now points at a different "
+                           f"image; refusing"}
 
     if dry_run:
         return {"status": "would-remove", "image": ref,
