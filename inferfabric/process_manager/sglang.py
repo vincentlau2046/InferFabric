@@ -10,6 +10,7 @@ from typing import Optional
 
 from inferfabric.config import HEALTH_CHECK_TIMEOUT
 from inferfabric.health import check_http_status, wait_gpu_free
+from inferfabric.image_manager import ensure_image_pulled
 from inferfabric.process_manager.base import BaseProcessManager
 
 
@@ -52,6 +53,9 @@ class SGLangProcessManager(BaseProcessManager):
 
         cmd = cfg.build_docker_cmd(container_name)
         env = os.environ.copy()
+
+        # issue #3 L3b: 显式拉取 + 管理台账（拉取失败仅告警，docker run 自会显性失败）
+        ensure_image_pulled(cfg.docker_image)
 
         log.info("Starting SGLang container %s: %s", container_name, " ".join(cmd))
         with open(log_file, "w") as f:

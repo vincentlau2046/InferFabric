@@ -14,6 +14,10 @@ import subprocess
 from pathlib import Path
 
 from inferfabric.health import wait_http, check_http_status
+from inferfabric.image_manager import (
+    MANAGED_LABEL,
+    ensure_image_pulled,
+)
 from inferfabric.process_manager.base import BaseProcessManager
 
 
@@ -218,11 +222,18 @@ class NInferProcessManager(BaseProcessManager):
                        capture_output=True, check=False)
         time.sleep(2)
 
+        # issue #3 L3b: 显式拉取 + 管理台账（镜像 label 无法 pull 后补写，
+        # "managed" 以容器 label + 台账表达；拉取失败仅告警，docker run 自会
+        # 显性失败）
+        ensure_image_pulled(cfg.docker_image)
+
         weight_path = Path(cfg.weight_path).expanduser()
         weight_dir = str(weight_path.parent)
 
         cmd = [
             "docker", "run", "-d", "--gpus", "all", "--rm",
+            # 管理标签（issue #3 L3b）：网关所启容器一律可辨
+            "--label", MANAGED_LABEL,
             "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
             # 权重只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
             "-v", f"{weight_dir}:/workspace:ro",
