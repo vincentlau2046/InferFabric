@@ -422,6 +422,9 @@ class ModelConfig:
     name: str
     description: str
     gpu_role: str = "exclusive"  # 'exclusive' | 'shared' | 'none'
+    # 内存账本分层（platform resource ledger）：'' | 'on_demand' | 'resident'
+    # — 独立于 gpu_role（YAML 键 ledger_mode，勿用 mode/ 旧 gpu_role 别名）
+    ledger_mode: str = ""
 
     @property
     def mode(self) -> str:
@@ -874,11 +877,14 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
                 ninfer_cfg = NInferConfig(**ninfer_fields)
 
         # Backward compat: YAML 'mode' → gpu_role
+        # （注意：mode 是 gpu_role 的旧别名， exclusive/shared 语义——内存账本
+        # 分层走独立的 ledger_mode 键，二者不得混用）
         mode_val = raw.get("mode", raw.get("gpu_role", "none"))
         result[model_name] = ModelConfig(
             name=model_name,
             description=raw.get("description", model_name),
             gpu_role=mode_val,
+            ledger_mode=raw.get("ledger_mode", ""),
             type=model_type,
             vllm=vllm_cfg,
             sglang=sglang_cfg,

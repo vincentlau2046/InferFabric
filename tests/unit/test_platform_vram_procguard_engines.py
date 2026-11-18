@@ -98,6 +98,8 @@ def test_launchd_install_fails_when_launchctl_rejects(monkeypatch, tmp_path):
         return m
 
     monkeypatch.setattr(pg.subprocess, "run", fake_run)
+    # 评审 nit（PR#2）：plist 落点钉到 tmp_path，不写真实 ~/Library/LaunchAgents
+    monkeypatch.setattr(pg.Path, "home", lambda: tmp_path)
     g = pg.LaunchdProcGuard("com.test.guard", ["/bin/true"])
     assert g.install() is False
 

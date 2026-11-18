@@ -5,6 +5,8 @@ system_reserved_memory_mb > default 8192. The source fork's legacy
 mac_platform shim-compat cases are intentionally not carried here —
 upstream has no shim.
 """
+import subprocess
+
 import pytest
 
 from inferfabric.platform import probe
@@ -50,11 +52,17 @@ def test_is_macos_follows_profile(monkeypatch):
     monkeypatch.setenv("IFF_FORCE_PLATFORM", "linux")
     from inferfabric.platform import probe as p2
     import importlib
-    importlib.reload(p2)
-    assert p2.IS_MACOS is False
-    monkeypatch.setenv("IFF_FORCE_PLATFORM", "darwin")
-    importlib.reload(p2)
-    assert p2.IS_MACOS is True
+    try:
+        importlib.reload(p2)
+        assert p2.IS_MACOS is False
+        monkeypatch.setenv("IFF_FORCE_PLATFORM", "darwin")
+        importlib.reload(p2)
+        assert p2.IS_MACOS is True
+    finally:
+        # 评审 nit（PR#2）：reload 改写模块级 IS_MACOS 会遥留到后续用例 —
+        # 清 env 后按本机真实平台重载，恢复自然状态
+        monkeypatch.delenv("IFF_FORCE_PLATFORM", raising=False)
+        importlib.reload(p2)
 
 
 def test_iff_env_alias_read(monkeypatch, tmp_path):
@@ -75,3 +83,61 @@ def test_iff_env_alias_read(monkeypatch, tmp_path):
     monkeypatch.delenv("IFF_FORCE_PLATFORM", raising=False)
     monkeypatch.setenv("MACFABRIC_FORCE_PLATFORM", "darwin")
     assert detect().os == "darwin"
+
+
+# ─── pid_on_port 直测（评审 PR#2：Linux 契约与上游 v1 _port_pid 一致）───
+
+def test_pid_on_port_linux_parses_fuser(monkeypatch):
+    monkeypatch.setattr(probe, "IS_MACOS", False)
+
+    def fake_run(cmd, timeout=10):
+        assert cmd == ["fuser", "8080/tcp"]
+        assert timeout == 5   # v1 契约：5s，不得静默放宽
+        return subprocess.CompletedProcess(cmd, 0, stdout="1234 tcp\n", stderr="")
+
+    monkeypatch.setattr(probe, "_run", fake_run)
+    assert probe.pid_on_port(8080) == 1234
+
+
+def test_pid_on_port_linux_no_owner_returns_none(monkeypatch):
+    monkeypatch.setattr(probe, "IS_MACOS", False)
+    monkeypatch.setattr(probe, "_run", lambda cmd, timeout=10: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""))
+    assert probe.pid_on_port(9) is None
+
+
+def test_pid_on_port_linux_fuser_missing_propagates(monkeypatch):
+    """fail-visible：fuser 缺失（FileNotFoundError）不被吞成 None —
+    否则 GPU 态推导会把在跑引擎误报 idle（评审 PR#2-3）。"""
+    monkeypatch.setattr(probe, "IS_MACOS", False)
+
+    def fake_run(cmd, timeout=10):
+        raise FileNotFoundError("fuser")
+
+    monkeypatch.setattr(probe, "_run", fake_run)
+    with pytest.raises(FileNotFoundError):
+        probe.pid_on_port(8080)
+
+
+def test_pid_on_port_linux_timeout_propagates(monkeypatch):
+    monkeypatch.setattr(probe, "IS_MACOS", False)
+
+    def fake_run(cmd, timeout=10):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(probe, "_run", fake_run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        probe.pid_on_port(8080)
+
+
+def test_pid_on_port_macos_lsof(monkeypatch):
+    monkeypatch.setattr(probe, "IS_MACOS", True)
+
+    def fake_run(cmd, timeout=10):
+        assert cmd[0] == "lsof" and timeout == 5
+        return subprocess.CompletedProcess(cmd, 0, stdout="4242\n", stderr="")
+
+    monkeypatch.setattr(probe, "_run", fake_run)
+    assert probe.pid_on_port(8080) == 4242
+
+    monkeypatch.setattr(probe, "_run", lambda cmd, timeout=10: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""))
+    assert probe.pid_on_port(8080) is None

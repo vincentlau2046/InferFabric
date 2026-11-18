@@ -345,12 +345,6 @@ class ModelManager:
         if not model:
             return {"status": "error", "message": f"Unknown model: {target}. Available: {list(self._models.keys())}"}
 
-        # ── Memory-ledger admission (force = user confirmed "load anyway") ──
-        decision = self._admit_memory(model, force=force)
-        if decision is not None and not decision.ok:
-            return {"status": "memory_insufficient", "message": decision.reason,
-                    "available_mb": decision.available_mb, "needed_mb": decision.needed_mb}
-
         # Already running? (P0-1: check config drift before skipping)
         if target in self.active_services:
             if model.is_vllm and model.vllm:
@@ -368,6 +362,15 @@ class ModelManager:
                     return {"status": "already_active", "model": target}
             else:
                 return {"status": "already_active", "model": target}
+
+        # ── Memory-ledger admission (force = user confirmed "load anyway") ──
+        # 评审修复（PR#2 Blocking-2）：闸放在 already-running 检查之后——
+        # 已驻留模型不重复准入（否则账本把 freshly-registered STOPPED 候选
+        # 当新负载，低内存时对已加载模型误报 memory_insufficient）
+        decision = self._admit_memory(model, force=force)
+        if decision is not None and not decision.ok:
+            return {"status": "memory_insufficient", "message": decision.reason,
+                    "available_mb": decision.available_mb, "needed_mb": decision.needed_mb}
 
         # ── Dispatch by gpu_role ────────────────────────────────────
         # Path A: GPU-independent models — do not touch the GPU state machine.
