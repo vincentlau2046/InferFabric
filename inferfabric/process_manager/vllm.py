@@ -23,6 +23,7 @@ from inferfabric.config import (
     ConfigError,
 )
 from inferfabric.health import wait_http, check_http_status
+from inferfabric.image_manager import ensure_image_pulled
 from inferfabric.process_manager.base import BaseProcessManager
 
 
@@ -159,6 +160,9 @@ class VLLMProcessManager(BaseProcessManager):
 
         cmd = cfg.build_docker_cmd(container_name)
         env = os.environ.copy()
+
+        # issue #3 L3b: 显式拉取 + 管理台账（拉取失败仅告警，docker run 自会显性失败）
+        ensure_image_pulled(cfg.docker_image)
 
         log.info("Starting vLLM container %s: %s", container_name, " ".join(cmd[:8]) + "...")
         with open(log_file, "w") as f:

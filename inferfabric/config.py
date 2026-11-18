@@ -16,6 +16,8 @@ import dataclasses
 import logging
 import threading
 
+from .image_manager import MANAGED_LABEL
+
 log = logging.getLogger("inferfabric")
 
 
@@ -130,6 +132,9 @@ class VLLMConfig:
 
         docker_flags = [
             "docker", "run", "--rm",
+            # 管理标签（issue #3 L3b）：网关所启容器一律可辨 →
+            # docker container prune --filter label=… 作用域清理可用
+            "--label", MANAGED_LABEL,
             "--gpus", "all",
             "--ipc=host",
             "--ulimit", "memlock=-1",
@@ -238,6 +243,9 @@ class SGLangConfig:
         container_cmd = self.build_cmd()
         docker_flags = [
             "docker", "run", "--rm",
+            # 管理标签（issue #3 L3b）：网关所启容器一律可辨 →
+            # docker container prune --filter label=… 作用域清理可用
+            "--label", MANAGED_LABEL,
             "--gpus", "all",
             "--ipc=host",
             "--ulimit", "memlock=-1",
