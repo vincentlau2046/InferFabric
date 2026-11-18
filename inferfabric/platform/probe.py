@@ -49,23 +49,22 @@ def _run(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess:
 # ─── 端口 → PID ──────────────────────────────────────────────────
 
 def pid_on_port(port: int) -> int | None:
-    """返回占用 TCP 监听端口的 PID；探测失败返回 None。
+    """返回占用 TCP 监听端口的 PID；探测失败（端口无人监听）返回 None。
 
     macOS: lsof -ti tcp:PORT -sTCP:LISTEN（fuser 不存在于 macOS）
-    Linux: fuser PORT/tcp（上游行为不变）
+    Linux: fuser PORT/tcp — 契约与上游 v1 _port_pid 一致（评审 PR#2-3）：
+    timeout=5；TimeoutExpired / FileNotFoundError（fuser 缺失）向上传播
+    fail-visible，不吞异常（否则 GPU 态推导会把在跑引擎误报 idle）。
     """
-    try:
-        if IS_MACOS:
-            r = _run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"])
-            if r.returncode == 0 and r.stdout.strip():
-                return int(r.stdout.strip().splitlines()[0])
-            return None
-        r = _run(["fuser", str(port) + "/tcp"])
-        if r.returncode == 0:
-            m = re.search(r"(\d+)", r.stdout)
-            return int(m.group(1)) if m else None
-    except Exception:
+    if IS_MACOS:
+        r = _run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return int(r.stdout.strip().splitlines()[0])
         return None
+    r = _run(["fuser", str(port) + "/tcp"], timeout=5)
+    if r.returncode == 0:
+        m = re.search(r"(\d+)", r.stdout)
+        return int(m.group(1)) if m else None
     return None
 
 

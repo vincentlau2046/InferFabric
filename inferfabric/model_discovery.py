@@ -207,7 +207,7 @@ type: llama_cpp
 gpu_role: shared
 model_type: {label}
 # Ledger tri-fields: do not auto-start; first request wakes the model
-mode: on_demand
+ledger_mode: on_demand
 idle_timeout_min: 30
 llama_cpp:
   model_path: {gguf}
@@ -250,6 +250,7 @@ llama_cpp:
 def auto_deploy(name: str, model_type: str, models_dir: Path, existing_models: dict, switch_fn) -> dict:
     """Auto-generate YAML and deploy a discovered model (legacy path: installs then switches)."""
     result = install_yaml(name, model_type, models_dir, existing_models)
-    if result.get("status") not in ("installed", "already_configured"):
-        return result
-    return switch_fn(name)
+    # 已配置（YAML 已存在）→ 与上游 v1 一致：直接返回，不触发 switch
+    if result.get("status") == "installed":
+        return switch_fn(name)
+    return result
