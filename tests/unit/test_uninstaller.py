@@ -619,19 +619,21 @@ class TestFindScenarioDrift:
         mdir.mkdir()
         (mdir / "scenarios.yaml").write_text("m1:\n  short-ctx: {}\n")
         applied = tmp_path / "active_scenarios.yaml"
-        applied.write_text("fabric-m1:\n  active_preset: short-ctx\n")
+        applied.write_text("m1:\n  active_preset: short-ctx\n")
         from inferfabric.uninstaller import find_scenario_drift
         assert find_scenario_drift(self._models(), mdir, applied) == []
 
-    def test_removed_model_reported_served_name_matched(self, tmp_path):
-        """侧车键可以是 config 名或 served_name：后者不算漂移。"""
+    def test_served_name_keyed_sidecar_is_drift(self, tmp_path):
+        """loader 严格按 config 名取侧车（models.get()）——served_name 键
+        是 loader 会警告并忽略的死条目，必须上报为漂移（评审 B1）。"""
         mdir = tmp_path / "models.d"
         mdir.mkdir()
         (mdir / "scenarios.yaml").write_text(
             "gone-model:\n  short-ctx: {}\nfabric-m1:\n  short-ctx: {}\n")
         from inferfabric.uninstaller import find_scenario_drift
         drift = find_scenario_drift(self._models(), mdir, None)
-        assert drift == [{"file": "scenarios.yaml", "model": "gone-model"}]
+        assert {"file": "scenarios.yaml", "model": "gone-model"} in drift
+        assert {"file": "scenarios.yaml", "model": "fabric-m1"} in drift
 
     def test_applied_overlay_drift_reported(self, tmp_path):
         mdir = tmp_path / "models.d"
@@ -654,6 +656,16 @@ class TestFindScenarioDrift:
         from inferfabric.uninstaller import find_scenario_drift
         assert find_scenario_drift(self._models(), tmp_path / "models.d", None) == []
 
+    def test_non_dict_sidecar_shapes_skipped(self, tmp_path):
+        """顶层 YAML list / 空文件：loader 同样忽略，静默跳过（评审 N3）。"""
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text("- a\n- b\n")
+        applied = tmp_path / "active_scenarios.yaml"
+        applied.write_text("")
+        from inferfabric.uninstaller import find_scenario_drift
+        assert find_scenario_drift(self._models(), mdir, applied) == []
+
 
 class TestCmdModelsDriftWarning:
 
@@ -672,9 +684,37 @@ class TestCmdModelsDriftWarning:
                          "active": False, "description": "d"}]
 
         monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        # 密闭：cmd_models 在调用时从 config 读 APPLIED_SCENARIOS_FILE，
+        # 必须指向 tmp——否则真机上的 ~/.inferfabric/active_scenarios.yaml
+        # 会泄漏进 FakeMgr 的模型集合（评审 B2）。
+        monkeypatch.setattr("inferfabric.config.APPLIED_SCENARIOS_FILE",
+                            tmp_path / "active_scenarios.yaml")
         cli.cmd_models([])
         out = capsys.readouterr().out
         assert "场景侧车漂移" in out and "gone-model" in out
+
+    def test_both_sidecars_drifting_reported_together(self, monkeypatch, tmp_path, capsys):
+        import inferfabric.cli as cli
+
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text("gone-a:\n  short-ctx: {}\n")
+        applied = tmp_path / "active_scenarios.yaml"
+        applied.write_text("gone-b:\n  active_preset: x\n")
+
+        class FakeMgr:
+            models_dir = mdir
+            _models = {"m1": _model(served_name="m1")}
+            def list_models(self):
+                return [{"name": "m1", "mode": "idle", "type": "vllm",
+                         "active": False, "description": "d"}]
+
+        monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        monkeypatch.setattr("inferfabric.config.APPLIED_SCENARIOS_FILE", applied)
+        cli.cmd_models([])
+        out = capsys.readouterr().out
+        assert "gone-a" in out and "gone-b" in out
+        assert "scenarios.yaml" in out and "active_scenarios.yaml" in out
 
     def test_no_drift_no_warning(self, monkeypatch, tmp_path, capsys):
         import inferfabric.cli as cli
@@ -690,5 +730,7 @@ class TestCmdModelsDriftWarning:
                          "active": False, "description": "d"}]
 
         monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        monkeypatch.setattr("inferfabric.config.APPLIED_SCENARIOS_FILE",
+                            tmp_path / "active_scenarios.yaml")
         cli.cmd_models([])
         assert "漂移" not in capsys.readouterr().out

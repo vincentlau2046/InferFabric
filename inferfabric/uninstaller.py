@@ -399,7 +399,10 @@ def find_scenario_drift(models: dict, models_dir, applied_path=None) -> list[dic
 
     Compares the top-level keys of `models.d/scenarios.yaml` (manual sidecar)
     and the applied overlay (`~/.inferfabric/active_scenarios.yaml`) against
-    the live models.d keys **and served names** (a sidecar may key either).
+    the live models.d **config names only** — both loaders key sidecars by
+    config name (`config._merge_scenarios` / `_merge_applied_layers` do
+    `models.get(name)`), so a sidecar keyed by served name is dead weight the
+    loader warns about and must be reported as drift.
     Report-only: both files are user/derived config and are never modified
     here; the loader already skips unknown keys with a warning (issue #8
     item 2). Any purge stays an explicit, user-driven edit.
@@ -409,13 +412,6 @@ def find_scenario_drift(models: dict, models_dir, applied_path=None) -> list[dic
     and any sidecar key outside it is drift.
     """
     names = set(models or {})
-    for m in (models or {}).values():
-        try:
-            served = m.served_name
-        except Exception:
-            served = None
-        if served:
-            names.add(served)
     out: list[dict] = []
     candidates = [(Path(models_dir) / "scenarios.yaml", "scenarios.yaml")]
     if applied_path:

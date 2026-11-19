@@ -97,10 +97,16 @@ def cmd_models(args):
         active = " ← active" if m["active"] else ""
         print(f"{m['name']:<20} {m['mode']:<12} {m['type']:<10} {m.get('model_type','llm'):<10} {m['description']}{active}")
 
-    # issue #8-②: 检测式漂移上报（report-only，永不改侧车文件）
-    from inferfabric.uninstaller import find_scenario_drift
-    from inferfabric.config import APPLIED_SCENARIOS_FILE
-    drift = find_scenario_drift(mgr._models, mgr.models_dir, APPLIED_SCENARIOS_FILE)
+    # issue #8-②: 检测式漂移上报（report-only，永不改侧车文件）。
+    # fail-open：漂移检查是附赠信息，任何意外异常都不得让 `iff models`
+    # 在表格已打印后非零退出。
+    try:
+        from inferfabric.uninstaller import find_scenario_drift
+        from inferfabric.config import APPLIED_SCENARIOS_FILE
+        drift = find_scenario_drift(mgr._models, mgr.models_dir, APPLIED_SCENARIOS_FILE)
+    except Exception as e:
+        log.debug("scenario drift check skipped: %s", e)
+        drift = None
     if drift:
         print("\n⚠ 场景侧车漂移（引用不存在/已移除的模型，加载时会被忽略）:")
         for d in drift:
