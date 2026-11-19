@@ -62,7 +62,7 @@ check_python() {
   command -v python3 >/dev/null || { echo "[install] ERROR: python3 not found" >&2; exit 1; }
   local ver
   ver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-  python3 - "$ver" <<'EOF' || { echo "[install] ERROR: python3 >= 3.10 required (got $1)" >&2; exit 1; }
+  python3 - "$ver" <<'EOF' || { echo "[install] ERROR: python3 >= 3.10 required (got $ver)" >&2; exit 1; }
 import sys
 major, minor = (int(x) for x in sys.argv[1].split("."))
 sys.exit(0 if (major, minor) >= (3, 10) else 1)
@@ -83,8 +83,18 @@ build_deps() {
 }
 
 smoke_import() {
+  if [[ "${IFF_SKIP_SMOKE:-}" == "1" ]]; then
+    log "skip import smoke (IFF_SKIP_SMOKE=1)"
+    return
+  fi
   (cd "$REPO_ROOT" && python3 -c "import inferfabric; print('[install] import ok', inferfabric.__version__)")
 }
+
+# ── 解释器固化（评审 PR#14 B2，mac端真机实证）：install 时的 python3 与
+# 守护进程运行时的 python3 必须是同一个——launchd/systemd 均不继承交互式
+# PATH，`/usr/bin/env python3` 会解析到系统旧解释器（如 macOS 自带 3.9），
+# install 期检查通过而服务每次 KeepAlive 重启都崩。安装时烘焙绝对路径。
+PY_BIN="$(command -v python3)"
 
 # ── Linux：systemd user unit ──
 SYSTEMD_UNIT_DIR="${IFF_INSTALL_UNIT_DIR:-$HOME/.config/systemd/user}"
@@ -102,7 +112,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 -m inferfabric.proxy.handler --async
+ExecStart=$PY_BIN -m inferfabric.proxy.handler --async
 Restart=always
 RestartSec=5
 WorkingDirectory=$REPO_ROOT
@@ -126,13 +136,24 @@ EOF
 # ── macOS：launchd plist（语义由 Mac 端真机验证/修正）──
 LAUNCHD_PLIST_DIR="${IFF_INSTALL_PLIST_DIR:-$HOME/Library/LaunchAgents}"
 LAUNCHD_LABEL="${IFF_INSTALL_LABEL:-com.inferfabric.proxy}"
+LOG_DIR="${IFF_INSTALL_LOG_DIR:-$HOME/Library/Logs/inferfabric}"
+
+xml_escape() {
+  # 评审 PR#14 N3：REPO_ROOT/路径插值进 XML 前转义 & < >
+  local s="$1"
+  s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"
+  printf '%s' "$s"
+}
+
 write_launchd_plist() {
   local target="$LAUNCHD_PLIST_DIR/$LAUNCHD_LABEL.plist"
   if [[ -f "$target" && "$FORCE_SERVICE" != "1" ]]; then
     log "plist exists, skip: $target (--force-service to overwrite)"
     return 0
   fi
-  mkdir -p "$LAUNCHD_PLIST_DIR"
+  mkdir -p "$LAUNCHD_PLIST_DIR" "$LOG_DIR"
+  local repo_xml
+  repo_xml="$(xml_escape "$REPO_ROOT")"
   cat > "$target" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -141,13 +162,12 @@ write_launchd_plist() {
   <key>Label</key><string>$LAUNCHD_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>python3</string>
+    <string>$PY_BIN</string>
     <string>-m</string>
     <string>inferfabric.proxy.handler</string>
     <string>--async</string>
   </array>
-  <key>WorkingDirectory</key><string>$REPO_ROOT</string>
+  <key>WorkingDirectory</key><string>$repo_xml</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>EDGE_PROXY_HOST</key><string>127.0.0.1</string>
@@ -155,8 +175,8 @@ write_launchd_plist() {
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/inferfabric-proxy.log</string>
-  <key>StandardErrorPath</key><string>/tmp/inferfabric-proxy.err.log</string>
+  <key>StandardOutPath</key><string>$LOG_DIR/proxy.log</string>
+  <key>StandardErrorPath</key><string>$LOG_DIR/proxy.err.log</string>
 </dict>
 </plist>
 EOF
