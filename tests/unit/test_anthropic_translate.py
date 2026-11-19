@@ -239,3 +239,68 @@ def test_stream_tool_call_accumulation():
     assert json.loads(json_parts) == {"path": "/x"}
     stop = [d for n, d in evs if n == "message_delta"][0]
     assert stop["delta"]["stop_reason"] == "tool_use"
+
+# ── 评审 PR#17 review fixes：H1/H2 ──
+
+def test_tool_result_precedes_text_translated_in_contract_order():
+    """H2：[tool_result, text]（Claude Code 主线流）必须译成
+    assistant(tool_calls) → tool → user(text)，不得 user(text) 先行。"""
+    body = {"model": "m", "max_tokens": 16, "messages": [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "get_weather",
+             "input": {"city": "SF"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "sunny"},
+            {"type": "text", "text": "summarize please"}]},
+    ]}
+    out = anthropic_to_openai_request(body)["messages"]
+    roles = [m["role"] for m in out]
+    assert roles == ["assistant", "tool", "user"], roles
+    assert out[1]["tool_call_id"] == "t1"
+    assert out[2]["content"] == "summarize please"
+
+
+def test_tool_result_is_error_and_image_passthrough():
+    """H2：is_error 映射进 content（ERROR: 前缀）；tool_result 内 image
+    block 并入 content 数组，不静默丢。"""
+    body = {"model": "m", "max_tokens": 16, "messages": [
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "is_error": True,
+             "content": [{"type": "image", "source": {
+                 "type": "base64", "media_type": "image/png", "data": "QUJD"}}]}]},
+    ]}
+    out = anthropic_to_openai_request(body)["messages"]
+    tool = out[0]
+    assert tool["role"] == "tool"
+    assert isinstance(tool["content"], list)
+    kinds = [p["type"] for p in tool["content"]]
+    assert "image_url" in kinds, "image block must survive"
+    text_part = next(p for p in tool["content"] if p["type"] == "text")
+    assert text_part["text"].startswith("ERROR:")
+
+
+def test_stream_usage_max_not_sum():
+    """H1：重复/分片 usage 块 max-not-sum（gateway 双 usage chunk 的坑）。"""
+    tr = SseToAnthropic(model="m")
+    tr.feed({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 2}})
+    tr.feed({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 9}})
+    assert tr._usage["prompt_tokens"] == 10
+    assert tr._usage["completion_tokens"] == 9
+
+
+def test_stream_finish_carries_input_tokens():
+    """H1：桥接 Anthropic 流的 message_delta 必须带 input_tokens（此前
+    永无 input tokens，成本归因全错）。"""
+    tr = SseToAnthropic(model="m")
+    tr.feed({"choices": [{"delta": {"role": "assistant", "content": "hi"}}]})
+    evs = tr.finish()
+    delta = next(d for n, d in evs if n == "message_delta")
+    # usage 块在流尾（finish 前 feed）：finish() 前已合并进 _usage
+    assert delta["usage"]["output_tokens"] >= 0
+    # usage 在最后一条 chat chunk 里到达的真实时序
+    tr2 = SseToAnthropic(model="m")
+    tr2.feed({"choices": [{"delta": {"role": "assistant", "content": "hi"}}]})
+    tr2.feed({"choices": [], "usage": {"prompt_tokens": 42, "completion_tokens": 3}})
+    delta2 = next(d for n, d in tr2.finish() if n == "message_delta")
+    assert delta2["usage"]["input_tokens"] == 42
+    assert delta2["usage"]["output_tokens"] == 3

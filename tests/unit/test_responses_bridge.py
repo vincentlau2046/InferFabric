@@ -412,3 +412,203 @@ def test_negative_control_open_fallback_gate(tmp_path):
         _scenario_never_fallback(rb_m, 429)
     with pytest.raises(AssertionError):
         _scenario_never_fallback(rb_m, 500)
+
+# ── 评审 PR#17 review fixes：B1/B2/B3/H1 ──
+
+class _FakeGate:
+    def __init__(self):
+        self.ok = True
+        self.reason = ""
+        self.released = 0
+
+    def release(self):
+        self.released += 1
+
+
+class _FakeDualGate:
+    def __init__(self):
+        self.target_gates = []
+        self.model_calls = []
+
+    def acquire_target(self, key, timeout=None):
+        g = _FakeGate()
+        self.target_gates.append((key, g))
+        return g
+
+    def acquire(self, model, timeout=None):
+        g = _FakeGate()
+        self.model_calls.append((model, g))
+        return g
+
+
+def _fake_pm_for_probe(kind="local"):
+    """_probe_native 直连单测的最小 pm 面（本地活跃目标）。"""
+    model_obj = types.SimpleNamespace(name="m1", served_name="srv-x")
+    pm = types.SimpleNamespace()
+    pm.mgr = types.SimpleNamespace(
+        find_model_by_served_name=lambda n: model_obj,
+        active_services={"m1"})
+    pm.dual_gate = _FakeDualGate()
+    pm.get_target_port = lambda n: 8123
+    pm.cloud = types.SimpleNamespace(
+        get_provider_config=lambda name: types.SimpleNamespace(
+            openai_base="https://api.x.test/v1", api_key="sk-t", timeout=5)
+        if name == "prov" else None,
+        cloud_models={"prov/mdl-x": object()})
+    return pm, model_obj
+
+
+class _FakeResp:
+    def __init__(self, body=b"{}", status=200, ctype="application/json"):
+        self._body = body
+        self.status = status
+        self._ctype = ctype
+
+    def getheader(self, k):
+        return self._ctype if k == "Content-Type" else None
+
+    def read(self, n=-1):
+        b, self._body = self._body, b""
+        return b
+
+    def close(self):
+        pass
+
+
+def test_probe_native_cloud_provider_bare_name_resolves(monkeypatch):
+    """B1：native 候选 provider 必须用裸名——带 cloud: 前缀时
+    get_provider_config 查不到，status=None 使 fallback 永不触发。"""
+    pm, _ = _fake_pm_for_probe()
+    seen = []
+    real_cfg = pm.cloud.get_provider_config
+    pm.cloud.get_provider_config = lambda n: (seen.append(n), real_cfg(n))[1]
+    cand = _RB._DirectCandidate(provider="prov", model_id="mdl-x", kind="cloud")
+
+    class _Boom(Exception):
+        pass
+
+    def _fail_urlopen(req, timeout=None):
+        raise OSError("conn refused")
+
+    monkeypatch.setattr(_RB, "urlopen", _fail_urlopen)
+    h = _FakeHandler()
+    res = _RB._probe_native(h, pm, {"model": "mdl-x"}, cand, pool=None,
+                            remaining=None, client_stream=False)
+    assert seen == ["prov"], "config must be looked up by bare provider name"
+    assert res.status is None and not res.ok  # 连接失败语义，非 target unavailable
+
+
+def test_probe_native_gate_held_through_delivery(monkeypatch):
+    """B2a：gate 持有到交付完毕——urlopen 前/交付中不得 release。"""
+    pm, _ = _fake_pm_for_probe()
+    body = json.dumps({"id": "r1", "usage": {"input_tokens": 7,
+                                             "output_tokens": 3}}).encode()
+    monkeypatch.setattr(_RB, "urlopen",
+                        lambda req, timeout=None: _FakeResp(body=body))
+    cand = _RB._DirectCandidate(provider="prov", model_id="mdl-x", kind="cloud")
+    h = _FakeHandler()
+    res = _RB._probe_native(h, pm, {"model": "mdl-x"}, cand, pool=None,
+                            remaining=None, client_stream=False)
+    gate = pm.dual_gate.target_gates[0][1]
+    assert res.ok and res.committed
+    assert gate.released == 1, "gate must release exactly once, after delivery"
+
+
+def test_probe_native_nonstream_usage_parsed(monkeypatch):
+    """H1：非流式 native 响应解析 Responses usage（此前恒 {}）。"""
+    pm, _ = _fake_pm_for_probe()
+    body = json.dumps({
+        "id": "r1", "status": "completed",
+        "usage": {"input_tokens": 12, "output_tokens": 34,
+                  "input_tokens_details": {"cached_tokens": 5}},
+    }).encode()
+    monkeypatch.setattr(_RB, "urlopen",
+                        lambda req, timeout=None: _FakeResp(body=body))
+    cand = _RB._DirectCandidate(provider="prov", model_id="mdl-x", kind="cloud")
+    res = _RB._probe_native(_FakeHandler(), pm, {"model": "mdl-x"}, cand,
+                            pool=None, remaining=None, client_stream=False)
+    assert res.usage == {"prompt_tokens": 12, "prompt_tokens_cached": 5,
+                         "completion_tokens": 34}
+
+
+class _FakeDirectHandler(_FakeHandler):
+    """handle_responses_direct 需要的极简 headers 面。"""
+
+    def __init__(self):
+        super().__init__()
+        self.headers = {}
+        self._agent_hit = types.SimpleNamespace(agent="", ua="", x_app="")
+
+
+def _fake_pm_for_direct():
+    pm = types.SimpleNamespace()
+    pm.new_request_id = lambda: "req-1"
+    pm.auth = types.SimpleNamespace(enabled=False, key_name=lambda a: "anon")
+    pm.dual_gate = _FakeDualGate()
+    pm.ensure_cloud_discovered = lambda: None
+    pm.cloud = types.SimpleNamespace(
+        resolve_route=lambda m, local: "cloud:prov",
+        get_provider_config=lambda n: types.SimpleNamespace(
+            openai_base="https://api.x.test/v1", api_key="sk-t", timeout=5),
+        resolve_cloud_model=lambda p, m: object())
+    logs = []
+    pm.logger = types.SimpleNamespace(log=logs.append)
+    pm.model_to_service = lambda m: None
+    pm.mgr = types.SimpleNamespace(_models={})
+    return pm, logs
+
+
+def test_direct_cloud_transport_failure_sends_envelope(monkeypatch):
+    """B3：直连未交付失败（status=None）→ 502 信封，不再静默 return。"""
+    pm, logs = _fake_pm_for_direct()
+    monkeypatch.setattr(_RB, "_probe_native", lambda *a, **k: _RB.AttemptResult(
+        ok=False, committed=False, status=None, route="cloud:prov",
+        error="conn refused"))
+    h = _FakeDirectHandler()
+    handled = _RB.handle_responses_direct(h, pm, {"model": "mdl-x"}, "mdl-x")
+    assert handled is True
+    assert h.json_errors and h.json_errors[0][1] == 502
+    assert h.json_errors[0][0]["status"] == "upstream_unavailable"
+    assert len(logs) == 1, "RequestLog 仍要记"
+    # B2b：逻辑级 gate 必须被 acquire 且释放
+    assert pm.dual_gate.model_calls and pm.dual_gate.model_calls[0][0] == "mdl-x"
+    assert pm.dual_gate.model_calls[0][1].released == 1
+
+
+def test_direct_cloud_upstream_status_envelope(monkeypatch):
+    """B3：非回退类上游错误（如 5xx 重试耗尽）→ 按上游状态发声封。"""
+    pm, _ = _fake_pm_for_direct()
+    monkeypatch.setattr(_RB, "_probe_native", lambda *a, **k: _RB.AttemptResult(
+        ok=False, committed=False, status=502, route="cloud:prov",
+        error="upstream_http_502"))
+    h = _FakeDirectHandler()
+    _RB.handle_responses_direct(h, pm, {"model": "mdl-x"}, "mdl-x")
+    assert h.json_errors and h.json_errors[0][1] == 502
+    assert h.json_errors[0][0]["status"] == "upstream_error"
+
+
+def test_direct_logic_gate_429(monkeypatch):
+    """B2b：逻辑级限流失败 → 429 信封（此前 /v1/responses 直连零限流）。"""
+    pm, logs = _fake_pm_for_direct()
+
+    class _Full:
+        ok = False
+        reason = "rpm exceeded"
+
+    pm.dual_gate.acquire = lambda m, timeout=None: _Full()
+    h = _FakeDirectHandler()
+    _RB.handle_responses_direct(h, pm, {"model": "mdl-x"}, "mdl-x")
+    assert h.json_errors and h.json_errors[0][1] == 429
+    assert h.json_errors[0][0]["status"] == "rate_limit"
+    assert logs and logs[0].status == 429
+
+def test_direct_pack_gate_503(monkeypatch):
+    """N1：responses 直连补 pack gate（auth 之后）——chat 503 的模型
+    不得从 responses 侧门进。"""
+    pm, _ = _fake_pm_for_direct()
+    pm.pack_manager = types.SimpleNamespace(is_model_disabled=lambda m: True)
+    h = _FakeDirectHandler()
+    handled = _RB.handle_responses_direct(h, pm, {"model": "mdl-x"}, "mdl-x")
+    assert handled is True
+    assert h.json_errors == [({"error": "pack_uninstalling",
+                               "status": "pack_uninstalling"}, 503)]

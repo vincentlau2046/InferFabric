@@ -729,16 +729,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         original_model = data.get("model", "")
         auth_header = self.headers.get("Authorization", "") or self.headers.get("x-api-key", "")
 
-        # PK4 T1: pack uninstall in flight → 503 pack_uninstalling
-        # (before auth/pool/local dispatch)
-        _pack_pm = getattr(pm, "pack_manager", None)
-        if _pack_pm is not None and original_model and \
-                _pack_pm.is_model_disabled(original_model):
-            self._send_json(
-                {"error": "pack_uninstalling",
-                 "status": "pack_uninstalling"}, 503)
-            return
-
         # PR-B: Request context for logging
         req_id = pm.new_request_id()
         req_start = time.monotonic()
@@ -789,6 +779,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 ))
                 self._send_json({"error": auth_reason, "status": "unauthorized"}, 401)
                 return
+
+        # PK4 T1: pack uninstall in flight → 503 pack_uninstalling
+        # （评审 PR#17 N1：移到 auth 之后——未鉴权客户端不得探测卸载状态）
+        _pack_pm = getattr(pm, "pack_manager", None)
+        if _pack_pm is not None and original_model and \
+                _pack_pm.is_model_disabled(original_model):
+            self._send_json(
+                {"error": "pack_uninstalling",
+                 "status": "pack_uninstalling"}, 503)
+            return
 
         # R5: 响应缓存查找（stream=false + temperature=0 的请求）
         cache_enabled = getattr(pm, '_runtime_config', {}).get("cache", {}).get("enabled", True)

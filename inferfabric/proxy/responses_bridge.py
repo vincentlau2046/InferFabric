@@ -402,15 +402,16 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
         if not gate.ok:
             return AttemptResult(admitted=False, route=route,
                                  error="physical target rate limited")
-        try:
-            port = pm.get_target_port(c.model_name)
-            if not port:
-                return AttemptResult(status=None, route=route,
-                                     error="local target has no available port")
-            url = _native_url(None, port)
-            headers = _auth_headers(None, port)
-        finally:
+        # 评审 PR#17 B2a：gate 持有到上游返回/交付完毕（对齐 chat 直连）——
+        # 原先 try/finally 在 urlopen 之前就 release，per-target 并发
+        # 信号量对在途 native 流量零约束。统一在交付段 finally 释放。
+        port = pm.get_target_port(c.model_name)
+        if not port:
             gate.release()
+            return AttemptResult(status=None, route=route,
+                                 error="local target has no available port")
+        url = _native_url(None, port)
+        headers = _auth_headers(None, port)
         provider_cfg = None
     else:
         route = ("pool:" + pool + "/cloud:" + c.provider + "/" + c.model_id) if pool \
@@ -430,11 +431,8 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
         if not gate.ok:
             return AttemptResult(admitted=False, route=route,
                                  error="cloud target rate limited")
-        try:
-            url = _native_url(provider_cfg, None)
-            headers = _auth_headers(provider_cfg, None)
-        finally:
-            gate.release()
+        url = _native_url(provider_cfg, None)
+        headers = _auth_headers(provider_cfg, None)
 
     body = json.dumps(data).encode("utf-8")
     try:
@@ -443,7 +441,8 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
             provider_cfg.timeout if provider_cfg is not None else 60)
         resp = urlopen(req, timeout=timeout)
     except _HTTPError as e:
-        # 明确失败 → 兜底信号（未提交任何字节）
+        # 明确失败 → 兜底信号（未提交任何字节）；B2a：先释放 gate
+        gate.release()
         try:
             e.read(); e.close()
         except Exception:
@@ -462,6 +461,7 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
         return AttemptResult(ok=False, committed=True, status=e.code,
                              route=route, error="upstream_http_" + str(e.code))
     except Exception as e:
+        gate.release()
         return AttemptResult(status=None, route=route, error=str(e))
 
     # 2xx → 原生交付（headers/字节直通；committed 起点同 forwarder 契约）
@@ -494,10 +494,20 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
             handler.end_headers()
             handler._safe_write(raw)
         usage = {}
-        try:
-            handler._usage and None
-        except Exception:
-            pass
+        if not client_stream:
+            # 评审 PR#17 H1：非流式完整 JSON 已在手——解析 Responses usage
+            # （input_tokens/output_tokens；cached 取 input_tokens_details）。
+            # 此前恒 {}，RequestLog 成本归因全错。流式直通不缓冲，usage 留空。
+            try:
+                u = (json.loads(raw) or {}).get("usage") or {}
+                usage = {
+                    "prompt_tokens": int(u.get("input_tokens") or 0),
+                    "prompt_tokens_cached": int(
+                        (u.get("input_tokens_details") or {}).get("cached_tokens") or 0),
+                    "completion_tokens": int(u.get("output_tokens") or 0),
+                }
+            except Exception:
+                usage = {}
         return AttemptResult(ok=True, status=resp.status, committed=True,
                              route=route, usage=usage, ttft_ms=None)
     except Exception as e:
@@ -505,6 +515,7 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
                              if committed else None, route=route,
                              error="native delivery error: " + str(e))
     finally:
+        gate.release()
         resp.close()
 
 
@@ -553,6 +564,14 @@ def handle_pool_responses(handler, pm, data, model) -> bool:
                             model=model, error=auth_reason)
             return True
 
+    # PK4 T1 + 评审 PR#17 N1：pack gate（auth 之后；responses 池路径
+    # 此前完全缺失）
+    _pack_pm = getattr(pm, "pack_manager", None)
+    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        handler._send_json(
+            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
+        return True
+
     registry = getattr(pm, "pool_registry", None)
     snapshot = registry.snapshot() if registry is not None else None
     pool_snap = (snapshot.pools.get(pool_name_of(model))
@@ -570,7 +589,10 @@ def handle_pool_responses(handler, pm, data, model) -> bool:
         return True
 
     _ensure_cloud_discovered(pm, pool_snap)
-    req = extract_requirements("openai", {"messages": []})
+    # 评审 PR#17 N2：需求提取吃真实消息（Responses→chat 翻译后的
+    # messages）——空消息提取使 tools/vision 能力约束在 responses 路径
+    # 空转，同逻辑请求在 chat 路径生效、responses 路径失效。
+    req = extract_requirements("openai", responses_to_chat(copy.deepcopy(data)))
     sel = select(pool_snap, req, runtime_view(pm))
     if sel.chosen is None:
         _send_pool_error_openai(
@@ -662,7 +684,33 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
             handler._send_json({"error": auth_reason, "status": "unauthorized"}, 401)
             return True
 
+    # 评审 PR#17 B2b：逻辑级限流（对齐 chat 直连 chat_handlers 的
+    # pm.dual_gate.acquire）——此前 /v1/responses 直连完全不消耗
+    # model 级 RPM/并发预算，本地引擎可被无限制流量压垮。
+    _logic_gate = pm.dual_gate.acquire(model)
+    if not _logic_gate.ok:
+        pm.logger.log(RequestLog(
+            req_id=req_id, key_name=key_name, model=model,
+            status=429, error=_logic_gate.reason, route="direct",
+            agent=handler._agent_hit.agent if hasattr(handler, "_agent_hit") else "",
+            ua=handler._agent_hit.ua if hasattr(handler, "_agent_hit") else "",
+            x_app=getattr(handler, "_agent_hit", None) and handler._agent_hit.x_app or "",
+            duration_ms=(time.monotonic() - handler._req_start) * 1000,
+        ))
+        handler._send_json(
+            {"error": "Rate limited: " + str(_logic_gate.reason),
+             "status": "rate_limit"}, 429)
+        return True
+
     client_stream = bool(data.get("stream", False))
+
+    # PK4 T1 + 评审 PR#17 N1：pack gate（auth 之后；chat/messages 路径
+    # 有、responses 路径此前完全缺失——chat 503 的模型可从 responses 侧门进）
+    _pack_pm = getattr(pm, "pack_manager", None)
+    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        handler._send_json(
+            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
+        return True
 
     # 云直连路由（与 chat 直连同判定顺序）
     pm.ensure_cloud_discovered()
@@ -673,7 +721,10 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
         provider_cfg = pm.cloud.get_provider_config(provider_name)
         cloud_model = pm.cloud.resolve_cloud_model(provider_name, model)
         if provider_cfg and cloud_model:
-            cand = _DirectCandidate(provider="cloud:" + provider_name,
+            # 评审 PR#17 B1：provider 用裸名——_probe_native 云分支以
+            # cand.provider 直查 get_provider_config，带 "cloud:" 前缀必
+            # None → status=None → fallback 条件永不满足 → 客户端空响应。
+            cand = _DirectCandidate(provider=provider_name,
                                     model_id=model, kind="cloud")
             # 直连用单候选 AttemptResult 路径：原生 → 显式不支持 → chat 兜底
             res = _probe_native(handler, pm, data, cand, pool=None,
@@ -683,10 +734,27 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
                 chat_data = responses_to_chat(copy.deepcopy(data))
                 chat_data["model"] = model
                 dc = _DirectCandidate(provider=provider_name, model_id=model, kind="cloud")
-                dc._openai_base = provider_cfg.openai_base
+                # 评审 PR#17 N3：快照端点走 cand.route（_resolve_chat_target
+                # 只读 route["openai_base"]；_openai_base 属性无人消费，
+                # 违反池路径遵守的快照端点规则）
+                dc.route = {"openai_base": provider_cfg.openai_base}
                 res = attempt_chat_fallback(handler, pm, chat_data, dc,
                                             requested_model=model, pool=None,
                                             remaining=None, client_stream=client_stream)
+            if not res.ok and not res.committed:
+                # 评审 PR#17 B3：直连未交付失败必须发声封（对齐池路径
+                # _finish_outcome_openai 协议）：status 非 None → 按上游
+                # 状态明确错误；None（连接拒/gate 超时/引擎重启）→ 502。
+                # 此前只写 RequestLog 就 return，客户端 curl (52) 空响应。
+                if res.status is not None:
+                    handler._send_json(
+                        {"error": "upstream returned HTTP " + str(res.status),
+                         "status": "upstream_error"}, res.status)
+                else:
+                    handler._send_json(
+                        {"error": "upstream unavailable for " + model,
+                         "status": "upstream_unavailable"}, 502)
+            _logic_gate.release()
             usage = res.usage or {}
             pm.logger.log(RequestLog(
                 model=model, status=res.status if res.ok else (res.status or 502),
@@ -720,6 +788,17 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
             res = attempt_chat_fallback(handler, pm, chat_data, lc,
                                         requested_model=model, pool=None,
                                         remaining=None, client_stream=client_stream)
+        if not res.ok and not res.committed:
+            # 评审 PR#17 B3：同云直连——未交付失败发声封，不再静默 return。
+            if res.status is not None:
+                handler._send_json(
+                    {"error": "upstream returned HTTP " + str(res.status),
+                     "status": "upstream_error"}, res.status)
+            else:
+                handler._send_json(
+                    {"error": "upstream unavailable for " + model,
+                     "status": "upstream_unavailable"}, 502)
+        _logic_gate.release()
         usage = res.usage or {}
         pm.logger.log(RequestLog(
             req_id=req_id, key_name=key_name, model=model,
@@ -736,6 +815,7 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
         ))
         return True
 
+    _logic_gate.release()
     elapsed = (time.monotonic() - handler._req_start) * 1000
     pm.logger.log(RequestLog(
         req_id=req_id, key_name=key_name, model=model,

@@ -73,6 +73,14 @@ class FakePM:
     def __init__(self):
         self.mgr = FakeMgr(active=[MODEL_ID])
         self.pool_registry = FakeRegistry()
+        # 评审 PR#17 N1：pack gate 移到 auth 之后——503 判定点不变，
+        # 但前置的请求上下文/鉴权面需要可走（未启用 auth 即匿名通过）
+        import types as _t
+        self.auth = _t.SimpleNamespace(enabled=False, key_name=lambda a: "anon")
+        self.logger = _t.SimpleNamespace(log=lambda *a, **k: None)
+
+    def new_request_id(self):
+        return "req-test"
 
 
 @pytest.fixture()
@@ -177,11 +185,17 @@ def test_pgid_fn_is_none_never_blind_kill(pack_manager):
 
 def test_chat_503_when_pack_model_disabled(pack_manager, monkeypatch):
     # 请求路径：is_model_disabled → 503 pack_uninstalling，先于本地分发
+    # （评审 PR#17 N1：在 auth 之后——503 判定点不变，位置从 pre-auth 移到
+    # post-auth，未鉴权客户端不得探测卸载状态）
     from inferfabric.proxy import chat_handlers
 
     class FakeHandler:
         def __init__(self):
             self.sent = None
+            import types as _t
+            self.headers = {}
+            self._agent_hit = _t.SimpleNamespace(agent="", ua="", x_app="")
+            self._req_start = 0.0
 
         def _send_json(self, payload, code=200):
             self.sent = (code, payload)
