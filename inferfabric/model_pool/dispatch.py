@@ -207,12 +207,14 @@ def _sanitize_error(err) -> str | None:
 
 
 def _log(pm, handler, *, req_id, key_name, model, status, error=None,
-         route=None, cloud_provider=None, usage=None, ttft_ms=None):
+         route=None, cloud_provider=None, usage=None, ttft_ms=None,
+         metadata=None):
     usage = usage or {}
     pm.logger.log(RequestLog(
         req_id=req_id, key_name=key_name, model=model,
         status=status, error=_sanitize_error(error), route=route,
         cloud_provider=cloud_provider,
+        metadata=metadata or {},
         tokens_in=usage.get("prompt_tokens", 0),
         tokens_in_cached=usage.get("prompt_tokens_cached", 0),
         tokens_out=usage.get("completion_tokens", 0),
@@ -224,13 +226,26 @@ def _log(pm, handler, *, req_id, key_name, model, status, error=None,
 
 
 
+def _error_summary(pool_name, protocol, revision, requested_model,
+                   outcome_code) -> dict:
+    """未到达上游的错误路径 → pool_summary v1 骨架（Task 2 契约：
+    attempt 计数为 0、目标为明确 null，outcome 标注失败类别）。"""
+    return {"v": 1, "pool": pool_name, "protocol": protocol,
+            "config_revision": revision,
+            "requested_model": requested_model,
+            "first_attempted": None, "final_target": None,
+            "attempt_count": 0, "retry_count": 0, "fallback_count": 0,
+            "outcome": outcome_code, "attempts": []}
+
+
 # ── OpenAI 入口 ──
 
-def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, message):
+def _send_pool_error_openai(handler, pm, *, req_id, key_name, model, code, message,
+                            route=None, metadata=None):
     status, retry = _ERROR_CONTRACT.get(code, (503, True))
     extra = {"Retry-After": str(_RETRY_AFTER_S)} if retry else None
     _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-         status=status, error=code)
+         status=status, error=code, route=route, metadata=metadata)
     handler._send_json({"error": message, "status": code}, status,
                        extra_headers=extra)
 
@@ -358,11 +373,12 @@ _ANTHROPIC_CONTRACT = {
 }
 
 
-def _send_pool_error_anthropic(handler, pm, *, req_id, key_name, model, code, message):
+def _send_pool_error_anthropic(handler, pm, *, req_id, key_name, model, code, message,
+                               route=None, metadata=None):
     status, err_type, retry = _ANTHROPIC_CONTRACT.get(code, (503, "overloaded_error", True))
     extra = {"Retry-After": str(_RETRY_AFTER_S)} if retry else None
     _log(pm, handler, req_id=req_id, key_name=key_name, model=model,
-         status=status, error=code)
+         status=status, error=code, route=route, metadata=metadata)
     handler._send_json(
         {"type": "error", "error": {"type": err_type, "message": message}},
         status, extra_headers=extra)
@@ -680,16 +696,18 @@ def _attempt_cloud(handler, pm, data, *, protocol, model, pool, cand,
 
 # ── 结果处理（记日志 + 按入站协议发信封；已提交不写第二份信封） ──
 
-def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
+def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model,
+                           pool_summary=None):
     # 物理身份（终审 #15）：成功/已提交行的 model/cloud_provider 按实际目标
     # 填写（local=served_name / cloud=model_id）— 费用归因按物理模型计价；
     # 逻辑名只出现在 route。pool_unavailable 走 _send_pool_error_*（逻辑名）。
     phys = outcome.physical_model or model
     prov = outcome.cloud_provider
+    meta = {"pool_summary": pool_summary} if pool_summary else None
     if outcome.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=200, route=outcome.route, usage=outcome.usage,
-             ttft_ms=outcome.ttft_ms, cloud_provider=prov)
+             ttft_ms=outcome.ttft_ms, cloud_provider=prov, metadata=meta)
     elif outcome.committed:
         # 响应已提交（含流中断/上游错误已直发）→ 只记日志（spec §6.4）。
         # error 用固定错误码（终审 #16）：上游错误体可能含敏感内容，明细只
@@ -697,7 +715,7 @@ def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=outcome.status or 502,
              error=f"upstream_http_{outcome.status or 502}",
-             route=outcome.route, cloud_provider=prov)
+             route=outcome.route, cloud_provider=prov, metadata=meta)
     elif outcome.status is not None:
         # 非回退类上游错误（400/404/422 等）→ 按上游状态返回明确错误。
         # 信封与日志都用固定文案/错误码（评审 #10、终审 #16）：上游错误体
@@ -705,7 +723,7 @@ def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=outcome.status,
              error=f"upstream_http_{outcome.status}",
-             route=outcome.route, cloud_provider=prov)
+             route=outcome.route, cloud_provider=prov, metadata=meta)
         handler._send_json(
             {"error": f"upstream returned HTTP {outcome.status}",
              "status": "upstream_error"}, outcome.status)
@@ -713,7 +731,9 @@ def _finish_outcome_openai(handler, pm, outcome, *, req_id, key_name, model):
         _send_pool_error_openai(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="pool_unavailable",
-            message=f"All targets failed for {model}")
+            message=f"All targets failed for {model}",
+            route=f"pool:{pool_summary['pool']}" if pool_summary else None,
+            metadata=meta)
 
 
 # 上游 HTTP 状态 → Anthropic error type（非回退类终止错误的信封）
@@ -726,26 +746,28 @@ _ANTHROPIC_STATUS_TYPE = {
 }
 
 
-def _finish_outcome_anthropic(handler, pm, outcome, *, req_id, key_name, model):
+def _finish_outcome_anthropic(handler, pm, outcome, *, req_id, key_name, model,
+                              pool_summary=None):
     # 物理身份 + 固定错误码 — 同 _finish_outcome_openai（终审 #15/#16）
     phys = outcome.physical_model or model
     prov = outcome.cloud_provider
+    meta = {"pool_summary": pool_summary} if pool_summary else None
     if outcome.ok:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=200, route=outcome.route, usage=outcome.usage,
-             ttft_ms=outcome.ttft_ms, cloud_provider=prov)
+             ttft_ms=outcome.ttft_ms, cloud_provider=prov, metadata=meta)
     elif outcome.committed:
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=outcome.status or 502,
              error=f"upstream_http_{outcome.status or 502}",
-             route=outcome.route, cloud_provider=prov)
+             route=outcome.route, cloud_provider=prov, metadata=meta)
     elif outcome.status is not None:
         # 固定文案回客户端（评审 #10）：上游错误体只进进程日志，
         # 不入信封、不入 RequestLog（终审 #16）
         _log(pm, handler, req_id=req_id, key_name=key_name, model=phys,
              status=outcome.status,
              error=f"upstream_http_{outcome.status}",
-             route=outcome.route, cloud_provider=prov)
+             route=outcome.route, cloud_provider=prov, metadata=meta)
         err_type = _ANTHROPIC_STATUS_TYPE.get(outcome.status, "api_error")
         handler._send_json(
             {"type": "error",
@@ -756,4 +778,6 @@ def _finish_outcome_anthropic(handler, pm, outcome, *, req_id, key_name, model):
         _send_pool_error_anthropic(
             handler, pm, req_id=req_id, key_name=key_name, model=model,
             code="pool_unavailable",
-            message=f"All targets failed for {model}")
+            message=f"All targets failed for {model}",
+            route=f"pool:{pool_summary['pool']}" if pool_summary else None,
+            metadata=meta)

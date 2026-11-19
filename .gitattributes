@@ -1,0 +1,3 @@
+# SSE golden fixtures: the trailing blank line is the final SSE event
+# terminator (byte-exact comparisons assert it) — exempt from whitespace checks.
+tests/golden/*.sse -whitespace

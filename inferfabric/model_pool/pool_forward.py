@@ -272,9 +272,12 @@ class AttemptRecord:
     retry_after: float | None = None
     incompatible: bool = False
     duration_ms: float | None = None
-    # 观测字段（Task 3）：stream 结束分类、attempt 级 TTFT
+    # 观测字段（Task 3）：stream 结束分类、attempt 级 TTFT 与 usage 未知语义
     stream_state: str | None = None
     ttft_ms: float | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    usage_known: bool | None = None
 
 
 @dataclass
@@ -305,6 +308,132 @@ def _physical_identity(cand) -> tuple[str | None, str | None]:
     if c.kind == "cloud":
         return c.model_id, c.provider
     return c.model_name, None
+
+
+# 内部固定错误前缀（非上游错误体）：这些文本由本层构造，不含上游回包内容
+_INTERNAL_ERROR_PREFIXES = (
+    "cooldown_admission", "transport error", "physical target",
+    "cloud target", "local target", "stream read error",
+)
+
+
+def safe_attempt_error(rec: "AttemptRecord") -> str | None:
+    """attempt 错误固定码化（终审 C1）。
+
+    上游错误体可能回显凭证/请求片段（部分 provider 对 401 回显 API key），
+    原文绝不入 pool_summary（→ RequestLog metadata）与进程日志 — 与
+    终审 #16（RequestLog error 列固定码）同一纪律延伸到 attempt 级。
+    status/stream 分类足够定位；原文调试需求由 status + candidate_id +
+    时间戳在上游侧自查满足。"""
+    if not rec.error:
+        return None
+    if rec.status is not None:
+        return f"upstream_http_{rec.status}"
+    if rec.stream_state:
+        return f"stream_{rec.stream_state}"
+    if rec.error.startswith(_INTERNAL_ERROR_PREFIXES):
+        # 内部文本：截掉冒号后的细节（异常串/gate 原因），保留类别
+        return rec.error.split(":", 1)[0]
+    return "attempt_error"
+
+
+def _usage_observations(usage: dict | None, ok: bool) -> tuple:
+    """AttemptResult.usage → (tokens_in, tokens_out, usage_known)。
+
+    观测器以全零 dict 初始化，全零 ≠ 真实 0 — 任一 token 字段非零才算
+    已知（Task 3 契约：usage 缺失 = usage_known False/None，不伪造 0）。
+    成功但无 usage → usage_known=False；失败尝试无 usage → None（未知）。
+    极端边界（真实 0/0 响应）按缺失处理 — 宁可 unknown 不冒认。
+    """
+    u = usage or {}
+    if u.get("prompt_tokens") or u.get("completion_tokens"):
+        return u.get("prompt_tokens"), u.get("completion_tokens"), True
+    return None, None, (False if ok else None)
+
+
+def _target_identity(cand) -> dict:
+    """候选 → pool_summary 目标身份（v1 契约：candidate_id/provider/
+    requested_model_id/actual_model_id；本层未区分请求别名，二者同值，
+    Task 3 结构化传输接续细化）。local 无 provider → None。"""
+    c = cand.candidate
+    if c.kind == "cloud":
+        mid = c.model_id
+        prov = c.provider
+    else:
+        mid = c.model_name
+        prov = None
+    return {"candidate_id": c.id, "provider": prov,
+            "requested_model_id": mid, "actual_model_id": mid}
+
+
+def build_pool_summary(outcome: "AttemptOutcome", *, pool_name: str,
+                       protocol: str, config_revision: int,
+                       requested_model: str,
+                       candidates=()) -> dict:
+    """AttemptOutcome → metadata.pool_summary v1（PLAN-2026-11-15 v2 §3.2）。
+
+    - attempt_count 只数真实上游调用（admitted=True，终审 #11）；
+      retry_count=同目标连续再调用，fallback_count=切换目标后再调用。
+    - first_attempted/final_target 取首个/最后一个 admitted attempt 的
+      候选身份；无 admitted attempt 时为 None（明确 null，不冒认）。
+    - 逐 attempt 精简记录；stream/tokens/usage_known 结构化传输未贯通
+      前明确 null（Task 3 接续），不伪造 0。
+    """
+    cands = {r.candidate.id: r for r in candidates}
+    admitted = [r for r in outcome.attempts if r.admitted]
+    retry_count = fallback_count = 0
+    prev = None
+    for r in admitted:
+        if prev is not None:
+            if r.candidate_id == prev:
+                retry_count += 1
+            else:
+                fallback_count += 1
+        prev = r.candidate_id
+
+    def _target(cid):
+        rc = cands.get(cid)
+        return _target_identity(rc) if rc is not None else {"candidate_id": cid}
+
+    if not outcome.ok:
+        if outcome.committed:
+            outcome_name = "committed_error"
+        elif outcome.status is not None:
+            outcome_name = "upstream_error"
+        else:
+            outcome_name = "pool_unavailable"
+    else:
+        outcome_name = "ok"
+
+    return {
+        "v": 1,
+        "pool": pool_name,
+        "protocol": protocol,
+        "config_revision": config_revision,
+        "requested_model": requested_model,
+        "first_attempted": (_target(admitted[0].candidate_id)
+                            if admitted else None),
+        "final_target": (_target(admitted[-1].candidate_id)
+                         if admitted else None),
+        "attempt_count": len(admitted),
+        "retry_count": retry_count,
+        "fallback_count": fallback_count,
+        "outcome": outcome_name,
+        "attempts": [{
+            "ordinal": r.ordinal, "candidate_id": r.candidate_id,
+            "route": r.route, "status": r.status,
+            # 终审 C1：固定码 — 上游错误体原文不入摘要（→ RequestLog metadata）
+            "error": safe_attempt_error(r),
+            "committed": r.committed, "ok": r.ok, "admitted": r.admitted,
+            "duration_ms": r.duration_ms,
+            # 流结束分类与 attempt 级观测（Task 3；无观测时明确 null）
+            "stream": r.stream_state, "ttft_ms": r.ttft_ms,
+            "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
+            "usage_known": r.usage_known,
+        } for r in outcome.attempts],
+    }
+
+
 def _is_non_fallback(status: int | None) -> bool:
     """确定性错误：换候选无解 → 终止（spec §6.2 不回退类）。"""
     if status is None:
@@ -411,12 +540,15 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
 
         attempts += 1
         last = res
+        tokens_in, tokens_out, usage_known = _usage_observations(res.usage, res.ok)
         records.append(AttemptRecord(
             ordinal=len(records) + 1, candidate_id=cand.candidate.id, route=res.route,
             status=res.status, error=res.error, committed=res.committed,
             ok=res.ok, retry_after=res.retry_after, incompatible=res.incompatible,
             duration_ms=(mono() - t0) * 1000.0,
-            stream_state=res.stream_state, ttft_ms=res.ttft_ms))
+            stream_state=res.stream_state, ttft_ms=res.ttft_ms,
+            tokens_in=tokens_in, tokens_out=tokens_out,
+            usage_known=usage_known))
 
         # 半开探测结果回写（健康端点未注册探测 → no-op，终审 #18）。
         # incompatible 视作探测通过（cross-review 2026-11-04）：端点有应答、

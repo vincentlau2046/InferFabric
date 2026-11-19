@@ -475,6 +475,9 @@ class ModelConfig:
     # 统一架构（2026-11-16）：managed_by_pack 非空 = 由能力包装入生成；
     # /models 暴露给 App，本地推理页标注"来自能力包 xxx"
     managed_by_pack: dict | None = None
+    # MACFABRIC P1: 上游引擎是否原生支持 Anthropic /v1/messages。
+    # true → 透传（llama-server b12361）；false → 走 anthropic_bridge 翻译层。
+    anthropic_native: bool = False
 
     # R7: 多副本端口列表（如 [8002, 8003]；为空时使用 type 对应 config 的 port）
     replicas: list[int] = field(default_factory=list)
@@ -924,6 +927,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             replicas=raw.get("replicas", []),
             deployment=raw.get("deployment", ""),
             managed_by_pack=raw.get("managed_by_pack"),
+            anthropic_native=bool(raw.get("anthropic_native", False)),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。
