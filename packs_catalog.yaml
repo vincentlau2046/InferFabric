@@ -1,0 +1,94 @@
+# MacFabric 捆绑能力目录（Catalog）— spec §6.1/§11
+# Catalog 4 项（2026-11-16 用户裁决：模型源统一 ModelScope——HF 直连被阻断；
+# whisper ggml bin 无 ModelScope 源 → 移出，待官方源上架或 PK5 一并复议）。
+# 三项模型镜像经 CDN LFS oid 互证与原冻结 hash 同物（零重验）。
+# Gemma 许可证复核前不得进入本目录。
+# 引擎 artifact 留 GitHub：被阻断的是 HF，GitHub 实测可达（hash 本机下载实测）。
+# 本目录随应用发布；能力包安装只接受此处 pack_id，URL/hash 由后端提供。
+# 注意：ocr.macos-vision 的 macos_vision_builtin_v1 模板属 PK5 批次，
+# 未实现前安装会在 preflight 被拒（model_config_template_not_implemented）。
+packs:
+  - pack_id: llm.qwen3-4b-instruct-2507
+    display_name: Qwen3-4B Instruct (2507)
+    summary: 通用基线端侧 LLM，中英多语，支持工具调用；本批首个完整试点包
+    tags: [chat, tools, multilingual]
+    risk_level: verified
+    builtin: false
+    source_page: "https://modelscope.cn/models/lmstudio-community/Qwen3-4B-Instruct-2507-GGUF"
+    manifest:
+      pack_id: llm.qwen3-4b-instruct-2507
+      pack_version: 1.0.0
+      capability: llm
+      model: {id: qwen3-4b-instruct-2507, parameter_count_b: 4, quantization: q4_k_m, license: apache-2.0}
+      runtime: {engine: llama_cpp, runtime_template: llama-cpp-macos-arm64-v1}
+      resources: {download_mb: 3200, disk_mb: 3400, peak_memory_mb: 4800, gpu_role: shared}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://modelscope.cn/models/lmstudio-community/Qwen3-4B-Instruct-2507-GGUF/resolve/master/Qwen3-4B-Instruct-2507-Q4_K_M.gguf", sha256: "8cdb57cbb880d313736a9bc4e3d3d2485f145b5e19cf33783746e753e82641fc"}  # ModelScope 镜像，CDN LFS oid 互证同物 2026-11-16
+        - {id: engine, kind: runtime, source: "https://github.com/ggml-org/llama.cpp/releases/download/b12361/llama-b12361-bin-macos-arm64.tar.gz", sha256: "0317a41e685e4d577fa55050204f7165fc62600f893e0d1a4e2bed91f1963b87"}  # 本机下载实测 2026-11-15
+      execution: {model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: embedding.bge-m3
+    display_name: BGE-M3 Embedding
+    summary: 多语 dense + 混合检索嵌入模型
+    tags: [embedding, retrieval, multilingual]
+    risk_level: verified
+    builtin: false
+    source_page: "https://modelscope.cn/models/gpustack/bge-m3-GGUF"
+    manifest:
+      pack_id: embedding.bge-m3
+      pack_version: 1.0.0
+      capability: embedding
+      model: {id: bge-m3, parameter_count_b: 1, quantization: q8_0, license: mit}
+      runtime: {engine: llama_cpp, runtime_template: llama-cpp-macos-arm64-v1}
+      resources: {download_mb: 2400, disk_mb: 2600, peak_memory_mb: 2200, gpu_role: shared}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/master/bge-m3-Q8_0.gguf", sha256: "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167"}  # ModelScope 镜像，CDN LFS oid 互证同物 2026-11-16
+        - {id: engine, kind: runtime, source: "https://github.com/ggml-org/llama.cpp/releases/download/b12361/llama-b12361-bin-macos-arm64.tar.gz", sha256: "0317a41e685e4d577fa55050204f7165fc62600f893e0d1a4e2bed91f1963b87"}  # 本机下载实测 2026-11-15
+      execution: {model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: tts.kokoro-82m-onnx
+    display_name: Kokoro-82M (ONNX)
+    summary: 英语低延迟语音合成（ONNX Runtime）
+    tags: [tts, english, low-latency]
+    risk_level: verified
+    builtin: false
+    source_page: "https://modelscope.cn/models/onnx-community/Kokoro-82M-v1.0-ONNX"
+    manifest:
+      pack_id: tts.kokoro-82m-onnx
+      pack_version: 1.0.0
+      capability: tts
+      model: {id: kokoro-82m, parameter_count_b: 1, quantization: fp32-onnx, license: apache-2.0}
+      runtime: {engine: tts_server, runtime_template: kokoro-onnx-macos-arm64-v1}
+      resources: {download_mb: 400, disk_mb: 600, peak_memory_mb: 800, gpu_role: none}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts:
+        - {id: model, kind: model, source: "https://modelscope.cn/models/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/master/onnx/model.onnx", sha256: "8fbea51ea711f2af382e88c833d9e288c6dc82ce5e98421ea61c058ce21a34cb"}  # ModelScope 镜像，CDN LFS oid 互证同物 2026-11-16
+      execution: {model_config_template: tts_server_v1, healthcheck: tts_ready_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
+
+  - pack_id: ocr.macos-vision
+    display_name: macOS Vision OCR
+    summary: 系统内置 OCR（Apple Vision 框架，只读调用，无需下载）
+    tags: [ocr, builtin, zero-download]
+    risk_level: verified
+    builtin: true
+    source_page: "https://developer.apple.com/documentation/vision"
+    manifest:
+      pack_id: ocr.macos-vision
+      pack_version: 1.0.0
+      capability: ocr
+      model: {id: macos-vision, parameter_count_b: 1, quantization: builtin, license: apple-system-framework}
+      runtime: {engine: macos_vision_cli, runtime_template: macos-vision-v1}
+      resources: {download_mb: 1, disk_mb: 1, peak_memory_mb: 200, gpu_role: none}
+      lifecycle: {mode: on_demand}
+      network: {listen: loopback, allowed_upstream: []}
+      artifacts: []
+      execution: {model_config_template: macos_vision_builtin_v1, healthcheck: vision_available_v1}
+      sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
