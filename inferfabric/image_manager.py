@@ -258,6 +258,7 @@ def ensure_image_pulled(image: str, *, ledger: ManagedImageLedger | None = None,
             return {"status": "ok", "pulled": False, "image": image}
     except Exception as e:
         log.warning("image inspect failed for %s: %s", image, e)
+    detail = ""
     try:
         r = run(["docker", "pull", image],
                 capture_output=True, text=True, timeout=timeout)
@@ -265,11 +266,17 @@ def ensure_image_pulled(image: str, *, ledger: ManagedImageLedger | None = None,
             record_image(image, ledger=ledger, data_dir=data_dir,
                          digest=image_identity_value(image, run))
             return {"status": "ok", "pulled": True, "image": image}
+        detail = ((getattr(r, "stderr", "") or "")
+                  or (getattr(r, "stdout", "") or "")).strip()[:300]
         log.warning("docker pull failed for %s (rc=%d): %s",
-                    image, r.returncode, (r.stderr or "").strip())
+                    image, r.returncode, detail)
     except Exception as e:
+        detail = str(e)[:300]
         log.warning("docker pull raised for %s: %s", image, e)
-    return {"status": "error", "pulled": False, "image": image}
+    # issue #8-③：失败结果携带原因摘要（detail），启动路径据此 fail-fast，
+    # 不再落入 docker run 的无超时隐式重拉。
+    return {"status": "error", "pulled": False, "image": image,
+            "detail": detail}
 
 
 def collect_image_refs(models: dict) -> set[str]:

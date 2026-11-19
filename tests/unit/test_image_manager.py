@@ -175,6 +175,14 @@ class TestEnsureImagePulled:
         assert res["status"] == "error"
         assert led.refs() == set()               # 拉取失败不记账（镜像不在盘上）
 
+    def test_pull_failure_detail_carries_reason(self, tmp_path):
+        """issue #8-③：失败结果带原因摘要，供启动路径 fail-fast 报错。"""
+        led = ManagedImageLedger(tmp_path / LEDGER_FILENAME)
+        run = _run_map({"inspect": (1, ""), "pull": (1, "TLS handshake timeout")})
+        res = ensure_image_pulled("img:4", ledger=led, run=run)
+        assert res["pulled"] is False
+        assert "TLS handshake timeout" in res["detail"]
+
 
 # ── collect_image_refs / prune_managed ─────────────────────────
 
@@ -403,3 +411,73 @@ class TestStartPathsRecordManagedImage:
 
         pm.start_ninfer(cfg, "ninfer-test")
         assert ManagedImageLedger(tmp_path / LEDGER_FILENAME).refs() == {"ninfer:latest"}
+
+
+# ── 启动路径 fail-fast（issue #8-③ 选项 2′）───────────────────
+
+def _pull_error(image):
+    return {"status": "error", "pulled": False, "image": image,
+            "detail": "pull timed out"}
+
+
+class TestPullFailFastStartPaths:
+
+    def test_ninfer_start_aborts_when_pull_fails(self, monkeypatch, tmp_path):
+        from inferfabric.process_manager.ninfer import NInferProcessManager
+        from inferfabric.state import StateDB
+        from inferfabric.config import NInferConfig
+        monkeypatch.setenv("IFF_DATA_DIR", str(tmp_path))
+        pm = NInferProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+        cfg = NInferConfig(
+            port=8007, container_name="iff-ninfer-qwen38",
+            weight_path="/w/model.bin", docker_image="ninfer:latest",
+            model_id="m1", max_concurrency=8, max_context=615000,
+            kv_capacity=0, default_max_tokens=8192, pending_timeout_ms=300000,
+            kv_dtype="nvfp4", prefill_chunk=8192,
+        )
+        runs = []
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.ensure_image_pulled",
+                            _pull_error)
+        monkeypatch.setattr("inferfabric.process_manager.ninfer.subprocess.run",
+                            _make_ninfer_fake_run(runs))
+        res = pm.start_ninfer(cfg, "ninfer-test")
+        assert res["status"] == "error", res
+        assert "image pull failed" in res["message"]
+        assert "pull timed out" in res["message"]          # 原因进错误信息
+        assert "docker pull ninfer:latest" in res["message"]  # 重试指引
+        assert not any(c[:2] == ["docker", "run"] for c in runs)  # 不发起 run
+
+    def test_vllm_docker_start_aborts_when_pull_fails(self, monkeypatch, tmp_path):
+        from inferfabric.process_manager.vllm import VLLMProcessManager
+        from inferfabric.state import StateDB
+        from inferfabric.config import VLLMConfig
+        pm = VLLMProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+        cfg = VLLMConfig(model_dir="m", served_name="foo", conda_env="v",
+                         port=8000, max_model_len=4096,
+                         gpu_memory_utilization=0.9, docker_image="vllm:v1")
+        monkeypatch.setattr("inferfabric.process_manager.vllm.ensure_image_pulled",
+                            _pull_error)
+        popens = []
+        monkeypatch.setattr("inferfabric.process_manager.vllm.subprocess.Popen",
+                            lambda *a, **k: popens.append(a))
+        res = pm.start_vllm_docker(cfg, "vllm-test")
+        assert res["status"] == "error"
+        assert "image pull failed" in res["message"] and "pull timed out" in res["message"]
+        assert popens == []                       # 未走到 Popen
+
+    def test_sglang_start_aborts_when_pull_fails(self, monkeypatch, tmp_path):
+        from inferfabric.process_manager.sglang import SGLangProcessManager
+        from inferfabric.state import StateDB
+        from inferfabric.config import SGLangConfig
+        pm = SGLangProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+        cfg = SGLangConfig(model_dir="m", served_name="foo", port=8006,
+                           conda_env="", docker_image="sgl:v1")
+        monkeypatch.setattr("inferfabric.process_manager.sglang.ensure_image_pulled",
+                            _pull_error)
+        popens = []
+        monkeypatch.setattr("inferfabric.process_manager.sglang.subprocess.Popen",
+                            lambda *a, **k: popens.append(a))
+        res = pm.start_sglang(cfg, "sglang-test")
+        assert res["status"] == "error"
+        assert "image pull failed" in res["message"]
+        assert popens == []

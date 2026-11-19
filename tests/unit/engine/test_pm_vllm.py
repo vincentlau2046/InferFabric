@@ -26,6 +26,10 @@ class TestStartVLLMDocker:
         monkeypatch.setattr("inferfabric.process_manager.vllm.os.environ", {"PATH": "/x"})
         monkeypatch.setattr("inferfabric.process_manager.vllm.time.sleep", lambda *a: None)
         monkeypatch.setattr("inferfabric.process_manager.vllm.check_http_status", lambda *a, **k: "✅")
+        # issue #8-③ fail-fast 接线后，这里显式注入“拉取成功”，
+        # 使本测试继续聚焦 pid/cmd 契约（原 fake run 并未模拟 docker inspect）。
+        monkeypatch.setattr("inferfabric.process_manager.vllm.ensure_image_pulled",
+                            lambda image, **k: {"status": "ok", "pulled": False, "image": image})
 
         result = pm.start_vllm_docker(cfg, container_name="vllm-foo")
         assert result["status"] == "healthy", f"应 healthy: {result}"
@@ -48,6 +52,10 @@ class TestStartVLLMDocker:
         monkeypatch.setattr("inferfabric.process_manager.vllm.os.environ", {"PATH": "/x"})
         monkeypatch.setattr("inferfabric.process_manager.vllm.time.sleep", lambda *a: None)
         monkeypatch.setattr("inferfabric.process_manager.vllm.check_http_status", lambda *a, **k: "✅")
+        # issue #8-③ fail-fast 接线后，这里显式注入“拉取成功”，
+        # 使本测试继续聚焦 pid/cmd 契约（原 fake run 并未模拟 docker inspect）。
+        monkeypatch.setattr("inferfabric.process_manager.vllm.ensure_image_pulled",
+                            lambda image, **k: {"status": "ok", "pulled": False, "image": image})
 
         pm.start_vllm_docker(cfg, container_name="vllm-custom")
         cmd = captured["cmd"]
