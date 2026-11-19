@@ -100,6 +100,10 @@ class TestStartSGLangContainerName:
         monkeypatch.setattr("inferfabric.process_manager.sglang.os.environ", {"PATH": "/x"})
         monkeypatch.setattr("inferfabric.process_manager.sglang.time.sleep", lambda *a: None)
         monkeypatch.setattr("inferfabric.process_manager.sglang.check_http_status", lambda *a, **k: "✅")
+        # issue #8-③ fail-fast 接线后，这里显式注入“拉取成功”，
+        # 使本测试继续聚焦 pid/cmd 契约（原 fake run 并未模拟 docker inspect）。
+        monkeypatch.setattr("inferfabric.process_manager.sglang.ensure_image_pulled",
+                            lambda image, **k: {"status": "ok", "pulled": False, "image": image})
 
         pm.start_sglang(cfg, container_name="sglang-foo")
         # 容器名记录到 state（来自参数，非重推）

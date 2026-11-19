@@ -223,9 +223,14 @@ class NInferProcessManager(BaseProcessManager):
         time.sleep(2)
 
         # issue #3 L3b: 显式拉取 + 管理台账（镜像 label 无法 pull 后补写，
-        # "managed" 以容器 label + 台账表达；拉取失败仅告警，docker run 自会
-        # 显性失败）
-        ensure_image_pulled(cfg.docker_image)
+        # "managed" 以容器 label + 台账表达）；issue #8-③（选项 2′）：
+        # 拉取失败即中止启动——不再让 docker run 无超时地隐式重拉。
+        pull = ensure_image_pulled(cfg.docker_image)
+        if pull.get("status") == "error":
+            return {"status": "error",
+                    "message": (f"image pull failed for {cfg.docker_image}: "
+                                f"{pull.get('detail') or 'docker pull failed'} — "
+                                f"retry the start or run: docker pull {cfg.docker_image}")}
 
         weight_path = Path(cfg.weight_path).expanduser()
         weight_dir = str(weight_path.parent)
