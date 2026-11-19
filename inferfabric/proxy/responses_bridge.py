@@ -706,8 +706,12 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
 
     # PK4 T1 + 评审 PR#17 N1：pack gate（auth 之后；chat/messages 路径
     # 有、responses 路径此前完全缺失——chat 503 的模型可从 responses 侧门进）
+    # 评审 PR#17 B4：pack gate 在逻辑级 acquire 之后，503 返回必须先
+    # release——否则 per-model Semaphore 每次泄漏 1 槽，卸载窗口期反复
+    # 探测会把该模型并发耗尽（后续全 429）。
     _pack_pm = getattr(pm, "pack_manager", None)
     if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        _logic_gate.release()
         handler._send_json(
             {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
         return True

@@ -612,3 +612,17 @@ def test_direct_pack_gate_503(monkeypatch):
     assert handled is True
     assert h.json_errors == [({"error": "pack_uninstalling",
                                "status": "pack_uninstalling"}, 503)]
+
+
+def test_direct_pack_gate_503_releases_logic_gate(monkeypatch):
+    """B4：pack gate 在逻辑级 acquire 之后，503 返回必须 release——否则
+    per-model Semaphore 每次泄漏 1 槽，卸载窗口期反复探测耗尽并发。"""
+    pm, _ = _fake_pm_for_direct()
+    pm.pack_manager = types.SimpleNamespace(is_model_disabled=lambda m: True)
+    h = _FakeDirectHandler()
+    handled = _RB.handle_responses_direct(h, pm, {"model": "mdl-x"}, "mdl-x")
+    assert handled is True
+    assert h.json_errors and h.json_errors[0][1] == 503
+    # acquire 过（B2b 语义保留）且本次 503 路径已释放，无槽泄漏
+    assert pm.dual_gate.model_calls[0][0] == "mdl-x"
+    assert pm.dual_gate.model_calls[0][1].released == 1
