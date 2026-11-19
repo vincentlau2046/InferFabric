@@ -203,15 +203,6 @@ def handle_chat(handler, pm, data):
         handler._send_json({"error": "model field is required", "status": "bad_request"}, 400)
         return
 
-    # PK4 T1: pack uninstall in flight → 503 pack_uninstalling (before
-    # auth/pool/local dispatch; disable precedes delete in the uninstall
-    # state machine — this is the 503 decision point for new requests)
-    _pack_pm = getattr(pm, "pack_manager", None)
-    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
-        handler._send_json(
-            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
-        return
-
     log.debug("Incoming request: model=%s", model)
 
     # PR-B: Request context for logging
@@ -254,6 +245,15 @@ def handle_chat(handler, pm, data):
             ))
             handler._send_json({"error": auth_reason, "status": "unauthorized"}, 401)
             return
+
+    # PK4 T1: pack uninstall in flight → 503 pack_uninstalling
+    # （评审 PR#17 N1：移到 auth 之后——未鉴权客户端不得探测「模型是否
+    # 在卸载中」；disable precedes delete 的卸载状态机判定点不变）
+    _pack_pm = getattr(pm, "pack_manager", None)
+    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        handler._send_json(
+            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
+        return
 
     # PR-G2: 流式请求自动注入 include_usage=true — 确保 token 提取生效
     # vLLM 默认不在 SSE 流中返回 usage，需客户端传 stream_options.include_usage=true

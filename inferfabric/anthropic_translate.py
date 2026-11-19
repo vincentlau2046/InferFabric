@@ -65,6 +65,35 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
             elif t == "tool_result":
                 tool_results.append(b)
 
+        # 评审 PR#17 H2：输出序 = assistant(tool_calls) → tool 结果 →
+        # user 文本。OpenAI/vLLM 契约要求 tool 紧跟 tool_calls；Anthropic
+        # 源方向 tool_result 也在消息首（Claude Code 主线流常发
+        # [tool_result, text]）——原先 text 先行会译出 user(text)→
+        # tool(result) 的非法序列（上游 400）。
+        if tool_calls:
+            out.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
+        for tr in tool_results:
+            inner = tr.get("content")
+            if isinstance(inner, list):
+                parts = []
+                for b in inner:
+                    if isinstance(b, dict) and b.get("type") == "text":
+                        parts.append({"type": "text", "text": b.get("text", "")})
+                    elif isinstance(b, dict) and b.get("type") == "image":
+                        src = b.get("source", {})
+                        if src.get("type") == "base64":
+                            # image block 并入 tool content 数组，不静默丢
+                            parts.append({"type": "image_url", "image_url": {
+                                "url": f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"}})
+                content = parts[0]["text"] if (
+                    len(parts) == 1 and parts[0]["type"] == "text") else (parts or "")
+            else:
+                content = inner or ""
+            if tr.get("is_error"):
+                # is_error 透传：模型必须知道工具出错（原先静默丢弃）
+                content = ("ERROR: " + content) if isinstance(content, str)                     else [{"type": "text", "text": "ERROR: "}] + content
+            out.append({"role": "tool", "tool_call_id": tr.get("tool_use_id", ""),
+                        "content": content})
         if texts or images:
             if images:
                 parts = ([{"type": "text", "text": "\n".join(x for x in texts if x)}]
@@ -72,15 +101,6 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
                 out.append({"role": role, "content": parts})
             else:
                 out.append({"role": role, "content": "\n".join(x for x in texts if x)})
-        if tool_calls:
-            out.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-        for tr in tool_results:
-            inner = tr.get("content")
-            if isinstance(inner, list):
-                inner = "\n".join(b.get("text", "") for b in inner
-                                  if isinstance(b, dict) and b.get("type") == "text")
-            out.append({"role": "tool", "tool_call_id": tr.get("tool_use_id", ""),
-                        "content": inner or ""})
     return out
 
 
@@ -233,7 +253,11 @@ class SseToAnthropic:
         if not self._started:
             events += self._start_message()
         if chunk.get("usage"):
-            self._usage = chunk["usage"]
+            # 评审 PR#17 H1：max-not-sum（gateway 双 usage chunk 的坑）——
+            # 重复/分片 usage 块按字段取最大值，绝不累加。
+            for _k, _v in chunk["usage"].items():
+                if isinstance(_v, (int, float)):
+                    self._usage[_k] = max(self._usage.get(_k, 0), _v)
         choices = chunk.get("choices") or []
         delta = (choices[0].get("delta") or {}) if choices else {}
 
@@ -290,7 +314,11 @@ class SseToAnthropic:
             "type": "message_delta",
             "delta": {"stop_reason": _STOP_REASON.get(self._finish_reason, "end_turn"),
                       "stop_sequence": None},
-            "usage": {"output_tokens": out_usage["output_tokens"]}}))
+            # 评审 PR#17 H1：input_tokens 一并带出——上游 chat 流的 usage
+            # 块到流尾才出现，message_start 时恒不可知；message_delta 是
+            # 唯一能携带真实 input_tokens 的 Anthropic 事件。
+            "usage": {"input_tokens": out_usage["input_tokens"],
+                      "output_tokens": out_usage["output_tokens"]}}))
         events.append(self._emit("message_stop", {"type": "message_stop"}))
         return events
 
