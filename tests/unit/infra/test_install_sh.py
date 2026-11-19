@@ -6,10 +6,28 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "scripts" / "install.sh"
+
+
+def _python_shim(tmp_path: Path) -> str:
+    """评审 PR#14 non-blocking：测试不得依赖宿主机 PATH 上的 python3 版本
+    （mac 3.9.6 会让 install.sh 的 ≥3.10 门误杀全部用例）。把 stub 目录
+    垫到 PATH 最前，python3 → 当前 pytest 解释器的绝对路径。"""
+    shim = tmp_path / ".py-shim"
+    shim.mkdir(exist_ok=True)
+    link = shim / "python3"
+    if not link.exists():
+        link.symlink_to(sys.executable)
+    return str(shim)
+
+
+def _child_env(tmp_path: Path) -> dict:
+    return {**os.environ,
+            "PATH": _python_shim(tmp_path) + os.pathsep + os.environ.get("PATH", "")}
 
 
 def run_install(tmp_path: Path, platform: str, *flags: str, extra_env: dict | None = None) -> subprocess.CompletedProcess:
@@ -24,7 +42,7 @@ def run_install(tmp_path: Path, platform: str, *flags: str, extra_env: dict | No
     return subprocess.run(
         ["bash", str(SCRIPT), *flags],
         cwd=REPO, capture_output=True, text=True,
-        env={**os.environ, **env_overrides},
+        env={**_child_env(tmp_path), **env_overrides},
     )
 
 
@@ -77,7 +95,7 @@ def test_plist_xml_escapes_repo_path(tmp_path):
         ["bash", str(repo / "scripts" / "install.sh")],
         cwd=repo, capture_output=True, text=True,
         env={
-            **os.environ,
+            **_child_env(tmp_path),
             "IFF_FORCE_PLATFORM": "darwin",
             "IFF_SKIP_DEPS": "1",
             "IFF_SKIP_SMOKE": "1",
