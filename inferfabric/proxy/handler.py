@@ -384,6 +384,7 @@ _POST_ROUTES = {
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
+    "/v1/responses":            lambda h, pm: h._handle_responses(pm),
     "/switch":                  _admin(lambda h, pm: h._handle_switch(pm)),
     "/stop":                    _admin(lambda h, pm: h._handle_stop(pm)),
     "/sleep":                   _admin(lambda h, pm: h._handle_sleep(pm)),
@@ -694,6 +695,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         handle_chat(self, pm, data)
 
+    # ─── OpenAI Responses API handler（Issue #1，codex CLI 兼容） ──
+
+    def _handle_responses(self, pm):
+        from inferfabric.proxy.responses_bridge import (
+            handle_pool_responses, handle_responses_direct,
+        )
+        data = self._read_body()
+        if data is None:
+            return
+        model = data.get("model", "")
+        if handle_pool_responses(self, pm, data, model):
+            return
+        handle_responses_direct(self, pm, data, model)
+
     # ─── Anthropic Messages handler ───────────────────────────────
 
     def _handle_messages(self, pm):
@@ -1002,9 +1017,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if _selected_port:
                 model_obj = dataclasses.replace(model_obj, port=_selected_port)
 
-        status = forwarder.forward_anthropic_local(
-            self, pm, data, auth_header, model_obj, original_model
-        )
+        # MACFABRIC P1: 无原生 /v1/messages 的引擎走翻译桥（Anthropic→OpenAI）。
+        if not getattr(model_obj, "anthropic_native", False):
+            from inferfabric.proxy.anthropic_bridge import forward_anthropic_via_openai
+            status = forward_anthropic_via_openai(
+                self, pm, data, auth_header, model_obj, original_model
+            )
+        else:
+            status = forwarder.forward_anthropic_local(
+                self, pm, data, auth_header, model_obj, original_model
+            )
         try:
             if status is not None:
                 usage = getattr(self, '_usage', {}) or {}

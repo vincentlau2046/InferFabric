@@ -44,6 +44,10 @@ class RequestLog:
     error: str | None = None
     timestamp: float = 0.0   # time.time() at log time (G-2: sliding window)
     ts: str = ""
+    # 结构化摘要（PLAN-2026-11-15 v2 Task 2）：池请求的 pool_summary v1、
+    # 直连请求的单 attempt 观测。JSONL 存 dict，SQLite 存 JSON 文本。
+    # 不保存凭证/请求正文/上游原文（上层负责脱敏）。
+    metadata: dict = field(default_factory=dict)
 
 
 class RequestLogger:
@@ -129,6 +133,7 @@ class RequestLogger:
                 "error": entry.error,
                 "timestamp": entry.timestamp,
                 "ts": entry.ts,
+                "metadata": json.dumps(entry.metadata or {}, ensure_ascii=False),
             }
             with self._buf_lock:
                 self._buffer.append(d)
