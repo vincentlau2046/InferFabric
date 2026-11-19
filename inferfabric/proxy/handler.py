@@ -40,6 +40,74 @@ from inferfabric.anomaly_collector import AnomalyEvent
 # If set, requests must include X-Admin-Token header matching this value.
 # If not set (default), all control routes are open (localhost-only binding is the security boundary).
 _ADMIN_TOKEN = os.environ.get("IFF_ADMIN_TOKEN", "")
+
+
+def _admin_auth_enabled():
+    """Control-plane auth flag (F7 pick): default OFF, opt-in strict mode.
+
+    First-install experience on a loopback gateway wins — API keys authenticate
+    the cloud request path and must not gate local UI usage. Strict mode is
+    enabled explicitly via IFF_ADMIN_REQUIRED=1 (aliases: true/yes/on, case-
+    insensitive; legacy MACFABRIC_ADMIN_REQUIRED honored for fork parity).
+    """
+    for name in ("IFF_ADMIN_REQUIRED", "MACFABRIC_ADMIN_REQUIRED"):
+        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on"):
+            return True
+    return False
+
+
+def _ensure_admin_token(secrets_path=None):
+    """F7 born-token — deterministic provisioning of the control-plane token.
+
+    Priority: explicit IFF_ADMIN_TOKEN env (ops override) > secrets.env key
+    IFF_ADMIN_TOKEN (0600; generated and written back when missing; legacy
+    MACFABRIC_ADMIN_TOKEN entries are honored read-only for fork parity).
+    Idempotent: an existing value is returned as-is, never rotated.
+    """
+    env = os.environ.get("IFF_ADMIN_TOKEN", "")
+    if env:
+        return env
+    from pathlib import Path
+    from inferfabric.cloud_discovery import SecretsManager
+    sm = SecretsManager(Path(secrets_path) if secrets_path else None)
+    data = sm.load()
+    token = data.get("IFF_ADMIN_TOKEN") or data.get("MACFABRIC_ADMIN_TOKEN", "")
+    if not token:
+        import secrets as _secrets
+        token = _secrets.token_urlsafe(32)
+        sm.write("IFF_ADMIN_TOKEN", token)
+    return token
+
+
+def _admin_gate(handler, expected_host, write=False):
+    """F7 unified control-plane gate (pure function; _check_admin delegates).
+
+    Semantics: auth OFF by default (zero-friction first install on loopback);
+    strict mode (IFF_ADMIN_REQUIRED=1) is fail-closed — no/invalid token → 401.
+    Host/Origin checks apply in BOTH modes unconditionally: they block browser
+    cross-site requests and DNS rebinding, not local usage.
+    """
+    loopback = ("127.0.0.1", "localhost", "::1")
+    host = handler.headers.get("Host", "")
+    origin = handler.headers.get("Origin")
+    host_ok = (not host) or host == expected_host or host.split(":")[0] in loopback
+    origin_ok = origin is None or (
+        origin in (f"http://{expected_host}", f"https://{expected_host}")
+        or origin.split("//")[-1].split("/")[0].split(":")[0] in loopback)
+    if _admin_auth_enabled():
+        token = handler.headers.get("X-Admin-Token", "")
+        configured = getattr(handler, "_admin_token", "")
+        if not configured or not hmac.compare_digest(token, configured):
+            handler._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
+            return False
+    if not host_ok:
+        handler._send_json({"error": "untrusted host"}, 403)
+        return False
+    if write or origin is not None:
+        if not origin_ok:
+            handler._send_json({"error": "untrusted origin"}, 403)
+            return False
+    return True
 from inferfabric.proxy_manager import (
     ProxyManager, PROXY_HOST, PROXY_PORT,
     HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
@@ -1542,15 +1610,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ─── Admin Auth ─────────────────────────────────────────────
 
     def _check_admin(self) -> bool:
-        """Check admin token for control-plane routes.
-        Returns True if allowed, False if denied (401 sent)."""
-        if not _ADMIN_TOKEN:
-            return True  # No token configured → open (localhost-only binding is security)
-        token = self.headers.get("X-Admin-Token", "")
-        if hmac.compare_digest(token, _ADMIN_TOKEN):
-            return True
-        self._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
-        return False
+        """Check admin token for control-plane routes (F7 unified gate).
+        Returns True if allowed, False if denied (401/403 sent)."""
+        self._admin_token = _ADMIN_TOKEN
+        return _admin_gate(self, f"{PROXY_HOST}:{PROXY_PORT}",
+                           write=self.command not in ("GET", "HEAD", "OPTIONS"))
 
     def _handle_switch(self, pm):
         data = self._read_body()
@@ -2638,22 +2702,30 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def _validate_admin_token_safety():
     """Validate that admin token configuration is safe before starting.
 
-    - If _ADMIN_TOKEN is empty and PROXY_HOST is not localhost → raise RuntimeError
-    - If _ADMIN_TOKEN is empty and PROXY_HOST is localhost → warn (acceptable)
+    F7 semantics: born-token bootstrap provisions the token before this check,
+    so an empty _ADMIN_TOKEN in strict mode (IFF_ADMIN_REQUIRED=1) is a hard
+    failure (fail-closed double guard). Default mode stays open with a warning.
     """
     if not _ADMIN_TOKEN:
-        if PROXY_HOST in ("127.0.0.1", "localhost", "::1"):
-            log.warning(
-                "Admin token is empty — control-plane routes are open. "
-                "This is acceptable for localhost-only binding but insecure for network access. "
-                "Set IFF_ADMIN_TOKEN to a secure value."
+        if _admin_auth_enabled():
+            raise RuntimeError(
+                "Admin token is empty — control-plane must fail closed. "
+                "Born-token bootstrap should have provisioned IFF_ADMIN_TOKEN "
+                "in the state-dir secrets.env; set IFF_ADMIN_TOKEN to override."
             )
-        else:
+        if PROXY_HOST not in ("127.0.0.1", "localhost", "::1"):
+            # Upstream guard retained: network-bound deployment without a token
+            # would expose control-plane routes unauthenticated.
             raise RuntimeError(
                 f"Admin token is empty but PROXY_HOST={PROXY_HOST!r} is not localhost. "
                 "This would expose control-plane routes without authentication. "
                 "Set IFF_ADMIN_TOKEN to a secure value or set PROXY_HOST to 127.0.0.1."
             )
+        log.warning(
+            "Admin token is empty and admin auth is disabled — "
+            "control plane open on loopback. Set IFF_ADMIN_REQUIRED=1 "
+            "to enforce token auth."
+        )
 
 
 def _create_server(retries: int = 5, retry_delay: float = 2.0):
@@ -2719,6 +2791,12 @@ def main():
     fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
     logging.getLogger("inferfabric").addHandler(fh)
 
+    # F7 born-token: provision the control-plane token before the safety check
+    # (0600 secrets.env under the state dir; idempotent, never rotated).
+    from inferfabric.proxy_manager import IFF_DATA_DIR
+    global _ADMIN_TOKEN
+    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    os.environ["IFF_ADMIN_TOKEN"] = _ADMIN_TOKEN
     _validate_admin_token_safety()
 
     mgr = ProxyManager()

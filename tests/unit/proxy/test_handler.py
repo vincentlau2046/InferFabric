@@ -74,7 +74,8 @@ def test_admin_correct_token(monkeypatch):
 
 
 def test_admin_wrong_token(monkeypatch):
-    """错误的 admin token 返回 401。"""
+    """错误的 admin token 返回 401（严格模式）。"""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
     h, _ = _make_handler(monkeypatch, headers={"X-Admin-Token": "wrong"}, admin_token="secret123")
     assert h._check_admin() is False
     h._send_json.assert_called_once()
@@ -82,7 +83,8 @@ def test_admin_wrong_token(monkeypatch):
 
 
 def test_admin_missing_token(monkeypatch):
-    """没有提供 token 时返回 401（当配置了 token）。"""
+    """没有提供 token 时返回 401（严格模式且配置了 token）。"""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
     h, _ = _make_handler(monkeypatch, headers={}, admin_token="secret123")
     assert h._check_admin() is False
 
@@ -222,7 +224,8 @@ def test_gpu_clear_failure(monkeypatch):
 
 
 def test_admin_guard_blocks_unauthorized(monkeypatch):
-    """_admin guard 阻止未授权请求执行 handler。"""
+    """_admin guard 阻止未授权请求执行 handler（严格模式）。"""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
     h, mod = _make_handler(monkeypatch, headers={}, admin_token="secret123")
     _admin = mod._admin
     pm = MagicMock()
