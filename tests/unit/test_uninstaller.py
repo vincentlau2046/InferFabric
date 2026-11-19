@@ -605,3 +605,90 @@ class TestCmdRemoveFlow:
         monkeypatch.setattr(cli, "ModelManager", FakeMgr)
         cli.cmd_remove(["model", "m1", "--yes"])
         assert not (mdir / "m1.yaml").exists()
+
+
+# ── 场景漂移检测（issue #8-②，report-only）─────────────────────
+
+class TestFindScenarioDrift:
+
+    def _models(self, served="fabric-m1"):
+        return {"m1": _model(served_name=served)}
+
+    def test_no_drift_when_all_keys_exist(self, tmp_path):
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text("m1:\n  short-ctx: {}\n")
+        applied = tmp_path / "active_scenarios.yaml"
+        applied.write_text("fabric-m1:\n  active_preset: short-ctx\n")
+        from inferfabric.uninstaller import find_scenario_drift
+        assert find_scenario_drift(self._models(), mdir, applied) == []
+
+    def test_removed_model_reported_served_name_matched(self, tmp_path):
+        """侧车键可以是 config 名或 served_name：后者不算漂移。"""
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text(
+            "gone-model:\n  short-ctx: {}\nfabric-m1:\n  short-ctx: {}\n")
+        from inferfabric.uninstaller import find_scenario_drift
+        drift = find_scenario_drift(self._models(), mdir, None)
+        assert drift == [{"file": "scenarios.yaml", "model": "gone-model"}]
+
+    def test_applied_overlay_drift_reported(self, tmp_path):
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        applied = tmp_path / "active_scenarios.yaml"
+        applied.write_text("gone-model:\n  active_preset: x\n")
+        from inferfabric.uninstaller import find_scenario_drift
+        drift = find_scenario_drift(self._models(), mdir, applied)
+        assert drift == [{"file": "active_scenarios.yaml", "model": "gone-model"}]
+
+    def test_unreadable_sidecar_flagged_not_crash(self, tmp_path):
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text("pools: [unclosed\n")
+        from inferfabric.uninstaller import find_scenario_drift
+        drift = find_scenario_drift(self._models(), mdir, None)
+        assert drift == [{"file": "scenarios.yaml", "status": "unreadable"}]
+
+    def test_missing_sidecars_no_drift(self, tmp_path):
+        from inferfabric.uninstaller import find_scenario_drift
+        assert find_scenario_drift(self._models(), tmp_path / "models.d", None) == []
+
+
+class TestCmdModelsDriftWarning:
+
+    def test_drift_printed_as_warning(self, monkeypatch, tmp_path, capsys):
+        import inferfabric.cli as cli
+
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+        (mdir / "scenarios.yaml").write_text("gone-model:\n  short-ctx: {}\n")
+
+        class FakeMgr:
+            models_dir = mdir
+            _models = {"m1": _model(served_name="m1")}
+            def list_models(self):
+                return [{"name": "m1", "mode": "idle", "type": "vllm",
+                         "active": False, "description": "d"}]
+
+        monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        cli.cmd_models([])
+        out = capsys.readouterr().out
+        assert "场景侧车漂移" in out and "gone-model" in out
+
+    def test_no_drift_no_warning(self, monkeypatch, tmp_path, capsys):
+        import inferfabric.cli as cli
+
+        mdir = tmp_path / "models.d"
+        mdir.mkdir()
+
+        class FakeMgr:
+            models_dir = mdir
+            _models = {"m1": _model(served_name="m1")}
+            def list_models(self):
+                return [{"name": "m1", "mode": "idle", "type": "vllm",
+                         "active": False, "description": "d"}]
+
+        monkeypatch.setattr(cli, "ModelManager", FakeMgr)
+        cli.cmd_models([])
+        assert "漂移" not in capsys.readouterr().out
