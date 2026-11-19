@@ -126,7 +126,7 @@ class HttpArtifactFetcher:
 class PackManager:
     def __init__(self, root, models_d, catalog_path=None, fetcher=None,
                  reload_gateway=None, prepare_runtime=None,
-                 run_healthcheck=None):
+                 run_healthcheck=None, memory_available_mb=None):
         self.root = Path(root)
         self.models_d = Path(models_d)
         self.catalog = Catalog(load_catalog(catalog_path or BUNDLED_CATALOG))
@@ -149,7 +149,8 @@ class PackManager:
             run_healthcheck=run_healthcheck or _hc_default,
             write_model_config=self._write_model_config,
             reload_gateway=self._reload_gateway,
-            memory_available_mb=system_available_memory_mb,
+            # 评审 PR#16 B2：可注入探针（测试密闭化）；生产默认真实探针。
+            memory_available_mb=memory_available_mb or system_available_memory_mb,
             on_stage=self._on_install_stage)
         reconcile_on_boot(self.store, self.root)
         self._uninstaller = None    # 惰性：attach_uninstaller 注入网关侧回调

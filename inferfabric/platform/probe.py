@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 
 from . import detect
 
@@ -81,6 +82,30 @@ def mem_total_mb() -> int | None:
     except Exception:
         pass
     return None
+
+
+def mem_available_mb() -> int | None:
+    """可用内存 MB（MemAvailable 口径：含可回收 page cache）。
+
+    Linux：/proc/meminfo 的 MemAvailable——评审 PR#16 B1：SC_AVPHYS_PAGES
+    ≈MemFree，不含 buff/cache（生产机 45GB 可回收时探针读数差 10×，
+    pack 安装 preflight 必失败）。macOS：sysconf SC_AVPHYS_PAGES 语义已
+    接近 MemAvailable，沿用。探测失败返回 None（调用方跳过门禁）。
+    """
+    if not IS_MACOS:
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+            return None
+        except (OSError, ValueError, IndexError):
+            return None
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        avail = os.sysconf("SC_AVPHYS_PAGES")
+        return page * avail // (1024 * 1024)
+    except (ValueError, OSError):
+        return None
 
 
 def mem_used_mb() -> int | None:
