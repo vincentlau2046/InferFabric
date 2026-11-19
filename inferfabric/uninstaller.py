@@ -154,7 +154,14 @@ def find_model_yaml(models_dir, name: str, cfg=None) -> Path | None:
 
 
 def weight_paths(cfg) -> list[str]:
-    """Weight paths a model consumes — reported, never deleted."""
+    """Weight paths a model consumes — reported, never deleted.
+
+    Covers the path-bearing engine configs only (vllm/sglang model_dir,
+    ninfer weight_path, llama_cpp model_path). ollama/tts/asr/comfyui
+    models under-report here by design — their weights live in daemon- or
+    env-managed stores the gateway does not track as files; nothing is
+    silently destroyed either way (weights are never deleted by this tool).
+    """
     paths: list[str] = []
     vllm = getattr(cfg, "vllm", None)
     sglang = getattr(cfg, "sglang", None)
@@ -168,7 +175,8 @@ def weight_paths(cfg) -> list[str]:
     for sub in (ninfer, llama):
         # ninfer.weight_path / llama_cpp.model_path are explicit file paths
         # (a llama_cpp GGUF may live anywhere), not MODEL_BASE-relative dirs.
-        wp = getattr(sub, "weight_path", None) or getattr(sub, "model_path", None)             if sub is not None else None
+        # sub may be None; getattr(None, …, None) resolves to None.
+        wp = getattr(sub, "weight_path", None) or getattr(sub, "model_path", None)
         if wp:
             paths.append(str(Path(wp).expanduser()))
     return paths
