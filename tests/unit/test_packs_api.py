@@ -64,7 +64,10 @@ def mgr(tmp_path):
         catalog_path=cat_path, fetcher=SlowFetcher(files),
         reload_gateway=lambda: None,
         prepare_runtime=lambda pd, m: None,       # 单测不发真进程
-        run_healthcheck=lambda pd, m: None)
+        run_healthcheck=lambda pd, m: None,
+        # 评审 PR#16 B2：探针密闭化——内存门禁吃固定值，不依赖宿主机
+        # 运行时内存（Mac 空闲内存大全绿、Linux 缓存占用高 3 连挂）。
+        memory_available_mb=lambda: 65536)
     return pmgr
 
 
@@ -359,3 +362,29 @@ def test_fetcher_no_resume_on_http_error(tmp_path):
     with pytest.raises(urllib.error.HTTPError):
         f.fetch(SimpleNamespace(source="https://x/m.gguf"), tmp_path / "m.part")
     assert op.calls == 1
+
+
+def test_install_preflight_rejects_when_memory_budget_exhausted(mgr):
+    """评审 PR#16 B2：预算不足 → 安装记录落 failed，error=内存预算
+    （门禁行为钉死在测试里，而非宿主机内存水位）。"""
+    mgr.installer._memory_available_mb = lambda: 0   # 注入耗尽探针
+    code, payload = mgr.start_install("llm.qwen3-4b-instruct-2507")
+    assert code == 202
+    deadline = time.time() + 5
+    rec = None
+    while time.time() < deadline:
+        st = mgr.status_payload()
+        rec = next(r for r in st["packs"]
+                   if r["pack_id"] == "llm.qwen3-4b-instruct-2507")
+        if rec["status"] == "failed":
+            break
+        time.sleep(0.05)
+    assert rec["status"] == "failed"
+    assert "memory budget" in str(rec.get("error", "")), rec
+
+
+def test_platform_probe_mem_available_mb_shape():
+    """评审 PR#16 B1：平台层探针契约——可探或 None，绝不抛。"""
+    from inferfabric.platform.probe import mem_available_mb
+    v = mem_available_mb()
+    assert v is None or (isinstance(v, int) and v >= 0)

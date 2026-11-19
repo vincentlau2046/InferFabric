@@ -55,13 +55,14 @@ def _noop(*a, **k) -> None:
 
 
 def system_available_memory_mb() -> int | None:
-    """当前可用物理内存（MiB）；无法探测时返回 None（调用方跳过门禁）。"""
-    try:
-        page = os.sysconf("SC_PAGE_SIZE")
-        avail = os.sysconf("SC_AVPHYS_PAGES")
-        return page * avail // (1024 * 1024)
-    except (ValueError, OSError):
-        return None
+    """当前可用内存（MiB，MemAvailable 口径）；探不到返回 None（跳过门禁）。
+
+    评审 PR#16 B1：委托平台层 probe.mem_available_mb—— packs 不直接碰
+    OS 差异（SC_AVPHYS_PAGES 在 Linux ≈MemFree 不含可回收 page cache，
+    生产机 preflight 必失败；F7 manifest「上游 core 不直接碰 OS 差异」）。
+    """
+    from inferfabric.platform.probe import mem_available_mb
+    return mem_available_mb()
 
 
 class PackInstaller:
