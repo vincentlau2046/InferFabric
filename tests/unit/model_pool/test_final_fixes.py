@@ -368,12 +368,12 @@ class TestHistoryPassthroughWithCooldown:
         pm.pool_cooldowns = CooldownStore()
         pm.pool_cooldowns.add(fp)
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "tool", "tool_call_id": "t1", "content": "ok"},
             {"role": "user", "content": "hi"}]}
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, _json.loads(_json.dumps(data)),
-                                         "fabric-fast") is True
+                                         "fabric-flash") is True
         assert h.sent == []                    # 正常转发，无错误信封
 
 
@@ -634,8 +634,8 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
-        assert pm.dual_gate.acquired == ["fabric-fast"]          # 外层只一次全量 gate
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
+        assert pm.dual_gate.acquired == ["fabric-flash"]          # 外层只一次全量 gate
         assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理门= acquire_target
 
     # #14：物理门失败 → 不预留副本端口
@@ -651,7 +651,7 @@ class TestDispatchFinal:
                             _fx_ok)   # 若被调用说明门失效
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
         assert port_calls == []            # 门失败在端口预留之前
         assert h.sent and h.sent[0][0] in (400, 503)   # 明确失败信封
 
@@ -676,7 +676,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch, "_forward_request_ex", fake_forward)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
         assert native_calls == []                          # 原生分支已移除
         assert forwarded == ["/v1/chat/completions"]       # OpenAI 兼容端点
 
@@ -706,7 +706,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
         # 恰好一条 RequestLog（最终成功）；attempt 失败不产生额外行
         assert len(pm.logger.entries) == 1
         row = pm.logger.entries[0]
@@ -737,7 +737,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
         assert bases == ["https://snap/v1"]   # 快照路由，非 live 配置
 
     # #16：RequestLog 错误字段只用固定码，不携带上游错误体
@@ -761,7 +761,7 @@ class TestDispatchFinal:
         monkeypatch.setattr(dispatch.forwarder, "forward_to_cloud", fake_cloud)
         h = FakeHandler()
         assert dispatch.handle_pool_chat(
-            h, pm, {"model": "fabric-fast", "messages": []}, "fabric-fast") is True
+            h, pm, {"model": "fabric-flash", "messages": []}, "fabric-flash") is True
         row = pm.logger.entries[-1]
         assert "SECRET-BODY" not in (row.error or "")
         assert row.error == "upstream_http_500"

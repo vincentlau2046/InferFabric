@@ -36,20 +36,9 @@ log = logging.getLogger("inferfabric.model_pool.dispatch")
 
 POOL_PREFIX = "fabric-"   # 硬切 fabric-（用户裁决 2026-11-16：slash 命名客户端兼容差，不留别名）
 
-# 池名 v2（用户裁决 2026-11-17）：对外逻辑名与池键升级为 flash/lite/max，
-# 更贴合中国模型档位命名。旧名 fast/small/premium 保留只读入站别名 —
-# 已分发客户端（AtlasCode 等）仍用 fabric-fast 等旧名，网关解析到新池，
-# 日志/摘要按解析后的新名记录（池身份单一，便于统计聚合）。
-POOL_ALIASES = {
-    "fast": "flash",
-    "small": "lite",
-    "premium": "max",
-}
-
-
-def canonical_pool_name(name: str) -> str:
-    """历史池名 → 当前池名；非别名原样返回。"""
-    return POOL_ALIASES.get(name, name)
+# 池名 v2（用户裁决 2026-11-17）：对外逻辑名与池键为 flash/lite/max/classifier。
+# 旧名 fast/small/premium 别名已移除（用户 2026-11-19：所有客户端已迁移到
+# fabric-* 新名）——请求名即池键，无映射层。
 
 # 错误码 → (HTTP status, 是否带 Retry-After)
 _ERROR_CONTRACT = {
@@ -73,18 +62,14 @@ def is_pool_name(model: str) -> bool:
 
 
 def pool_name_of(model: str) -> str:
-    return canonical_pool_name(model[len(POOL_PREFIX):])
+    return model[len(POOL_PREFIX):]
 
 
 def _resolve_pool_snap(snapshot, model):
-    """池快照解析（评审 PR#4 blocker）：先规范名（别名映射 flash/lite/max），
-    未命中回落原短名——存量 model_pools.yaml 键仍为 fast/small/premium 时不
-    被重命名切断路由；配置迁移到规范名后，别名与规范名并存期双向可用。"""
+    """池快照解析：请求名即池键（别名层已移除，用户裁决 2026-11-19）。"""
     if snapshot is None:
         return None
-    short = model[len(POOL_PREFIX):]
-    return (snapshot.pools.get(pool_name_of(model))
-            or snapshot.pools.get(short))
+    return snapshot.pools.get(pool_name_of(model))
 
 
 # ── 请求能力提取 ──

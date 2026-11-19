@@ -253,9 +253,9 @@ class TestDispatchFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(local_calls) == 1
         assert len(cloud_calls) == 1                    # 总 POST 数 = 2
         assert cloud_calls[0]["suppress"] is True       # 池路径必须抑制直发
@@ -290,8 +290,8 @@ class TestDispatchFailover:
         pm.pool_cooldowns = CooldownStore()
 
         h1 = FakeHandler()
-        assert dispatch.handle_pool_chat(h1, pm, {"model": "fabric-fast",
-                                                  "messages": []}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h1, pm, {"model": "fabric-flash",
+                                                  "messages": []}, "fabric-flash") is True
         status, body, _ = h1.sent[-1]
         assert status == 503 and body["status"] == "pool_unavailable"
         assert len(cloud_calls) == 1
@@ -299,8 +299,8 @@ class TestDispatchFailover:
 
         # 第二次请求：冷却中 → 选择期排除，不再出网
         h2 = FakeHandler()
-        assert dispatch.handle_pool_chat(h2, pm, {"model": "fabric-fast",
-                                                  "messages": []}, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h2, pm, {"model": "fabric-flash",
+                                                  "messages": []}, "fabric-flash") is True
         status, body, _ = h2.sent[-1]
         assert status == 503 and body["status"] == "no_ready_target"
         assert len(cloud_calls) == 1                       # 零新上游调用
@@ -467,7 +467,7 @@ class TestCommittedStreamBoundary:
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
         result = forward_anthropic_local(
             h, pm, {"model": "x", "messages": [], "stream": True},
-            "key", model_obj, "fabric-fast", suppress_client_errors=True)
+            "key", model_obj, "fabric-flash", suppress_client_errors=True)
         # 终审 #10 契约：CloudResult committed 信号（committed=False = 可重放）
         assert result.status == 200 and result.committed is True
         assert h.status == 200

@@ -70,14 +70,14 @@ class TestPoolMessagesDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-flash", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert len(anth_local) == 1
-        assert anth_local[0]["original"] == "fabric-fast"
+        assert anth_local[0]["original"] == "fabric-flash"
         assert anth_local[0]["model_obj"].served_name == "qwen-small"
         assert pm.ensure_service_calls == []          # ready_only
-        assert pm.dual_gate.acquired[:1] == ["fabric-fast"]  # 外层逻辑名 gate
+        assert pm.dual_gate.acquired[:1] == ["fabric-flash"]  # 外层逻辑名 gate
         assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理目标 gate（acquire_target，终审 #8）
         assert h.sent == []
         assert any(getattr(e, "route", None) == "pool:flash/local:qwen-small"
@@ -104,18 +104,18 @@ class TestPoolMessagesDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert anth_local == []
         assert cloud_calls == [{"model": "cloud-m", "protocol": "anthropic"}]
 
     def test_anthropic_error_envelope_shape(self, registry):
         pm = FakePM(registry, active=set(), local_models={}, cloud_models={})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         status, body, hdrs = h.sent[-1]
         # Anthropic 错误信封：type=error + error{type,message}
         assert status == 503
@@ -138,9 +138,9 @@ class TestPoolMessagesDispatch:
     def test_auth_rejected_401_anthropic_envelope(self, registry):
         pm = FakePM(registry, auth=FakeAuth(models=["other"], name="guest"))
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 401
         assert body["error"]["type"] == "authentication_error"
@@ -158,9 +158,9 @@ class TestPoolMessagesDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["error"]["type"] == "invalid_request_error"
@@ -179,9 +179,9 @@ class TestPoolMessagesDispatch:
         pm.mgr.state = SimpleNamespace(
             get=lambda key, default="": "SWITCHING" if key == "profile_state" else default)
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert len(anth_local) == 1
 
     def test_anthropic_vision_no_vision_capable_routes_by_priority(
@@ -198,12 +198,12 @@ class TestPoolMessagesDispatch:
                     cloud_models={"prov/cloud-m": SimpleNamespace(
                         supports_vision=None)})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "data": "x"}},
             ]}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert len(anth_local) == 1              # 正常转发本地 p1
         assert h.sent == []                      # 无错误信封
 
@@ -223,12 +223,12 @@ class TestPoolMessagesDispatch:
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "image", "source": {"type": "base64", "data": "x"}},
             ]}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert len(anth_local) == 1
         assert anth_local[0]["model_obj"].served_name == "qwen-vl"
 
@@ -237,10 +237,10 @@ class TestPoolMessagesDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": [],
+        data = {"model": "fabric-flash", "messages": [],
                 "tools": [{"name": "t", "input_schema": {}}]}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert len(anth_local) == 1
 
 
@@ -283,9 +283,9 @@ class TestParallelToolUseFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert cloud_calls == [{"model": "cloud-m", "protocol": "anthropic"}]
         assert h.sent == []                      # 成功路径无错误信封
 
@@ -304,9 +304,9 @@ class TestParallelToolUseFailover:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert cloud_calls == []
         status, body, _ = h.sent[-1]
         assert status == 400
@@ -327,9 +327,9 @@ class TestParallelToolUseFailover:
                     local_models={"qwen-small": _local_model()},
                     cloud_models={}, providers={})
         h = FakeMessagesHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 503
         assert body["type"] == "error"

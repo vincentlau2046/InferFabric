@@ -274,14 +274,14 @@ class TestHistoryPassthrough:
                     cloud_models={"prov/cloud-m": object()},
                     providers={"prov": object()})
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "assistant", "tool_calls": [{"id": "t1", "type": "function",
              "function": {"name": "f", "arguments": "{}"}}]},
             {"role": "tool", "tool_call_id": "t1", "content": "ok"},
             {"role": "user", "content": "hi"}]}
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, json.loads(json.dumps(data)),
-                                         "fabric-fast") is True
+                                         "fabric-flash") is True
         assert h.sent == []                    # 正常转发，无错误信封
 
     def test_anthropic_thinking_signature_routes_in_multi_candidate_pool(
@@ -305,7 +305,7 @@ class TestHistoryPassthrough:
         monkeypatch.setattr(dispatch.forwarder, "forward_anthropic_local",
                             lambda *a, **kw: SimpleNamespace(
                                 committed=True, status=200, error=None))
-        data = {"model": "fabric-fast", "max_tokens": 10, "messages": [
+        data = {"model": "fabric-flash", "max_tokens": 10, "messages": [
             {"role": "assistant", "content": [
                 {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
                 {"type": "text", "text": "answer"},
@@ -315,7 +315,7 @@ class TestHistoryPassthrough:
                 {"type": "tool_result", "tool_use_id": "tu1", "content": "ok"},
                 {"type": "text", "text": "hi"}]}]}
         h = FakeHandler()
-        assert dispatch.handle_pool_messages(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_messages(h, pm, data, "fabric-flash") is True
         assert h.sent == []                    # 正常转发，无错误信封
 
     def test_tool_history_allowed_in_single_candidate_pool(self, tmp_path,
@@ -331,12 +331,12 @@ class TestHistoryPassthrough:
                     local_models={"qwen-small": _local_model()})
 
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "tool", "tool_call_id": "t1", "content": "ok"},
             {"role": "user", "content": "hi"}]}
         h = FakeHandler()
         assert dispatch.handle_pool_chat(h, pm, json.loads(json.dumps(data)),
-                                         "fabric-fast") is True
+                                         "fabric-flash") is True
         assert h.sent == []                    # 正常转发，无错误信封
 
 
@@ -446,8 +446,8 @@ class TestAttemptRecords:
         monkeypatch.setattr(dispatch, "_forward_request_ex",
                             _fx_conn_fail)   # 本地连接失败（未提交）
         h = FakeHandler()
-        dispatch.handle_pool_chat(h, pm, {"model": "fabric-fast", "messages": []},
-                                  "fabric-fast")
+        dispatch.handle_pool_chat(h, pm, {"model": "fabric-flash", "messages": []},
+                                  "fabric-flash")
         # 唯一一条 RequestLog 是最终 pool_unavailable（逻辑名），无 attempt 行
         assert len(pm.logger.entries) == 1
         assert pm.logger.entries[0].error == "pool_unavailable"
@@ -503,7 +503,7 @@ class TestLocalTargetIdentity:
                 active_services=set(),
                 find_model_by_served_name=lambda n: None))
         res = dispatch._attempt_local_openai(FakeHandler(), fake_pm,
-                                             {"model": "fabric-fast"}, model="fabric-fast",
+                                             {"model": "fabric-flash"}, model="fabric-flash",
                                              pool="flash", cand=cand)
         assert res.status is None and res.committed is False
         assert "qwen-small" in res.error
@@ -526,8 +526,8 @@ class TestLocalTargetIdentity:
         pm = FakePM(reg, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         dispatch._attempt_local_openai(
-            FakeHandler(), pm, {"model": "fabric-fast", "messages": []},
-            model="fabric-fast", pool="flash",
+            FakeHandler(), pm, {"model": "fabric-flash", "messages": []},
+            model="fabric-flash", pool="flash",
             cand=reg.snapshot().pools["flash"].candidates[0])
         assert captured["model_name"] == "qwen-small"
 
@@ -561,7 +561,7 @@ class TestClientErrorSanitization:
         h = FakeHandler()
         pm = SimpleNamespace(logger=SimpleNamespace(log=lambda e: None))
         dispatch._finish_outcome_openai(
-            h, pm, outcome, req_id="r", key_name="k", model="fabric-fast")
+            h, pm, outcome, req_id="r", key_name="k", model="fabric-flash")
         status, body, _ = h.sent[-1]
         assert status == 400
         assert "SECRET" not in json.dumps(body)
@@ -574,7 +574,7 @@ class TestClientErrorSanitization:
         h = FakeHandler()
         pm = SimpleNamespace(logger=SimpleNamespace(log=lambda e: None))
         dispatch._finish_outcome_openai(
-            h, pm, outcome, req_id="r", key_name="k", model="fabric-fast")
+            h, pm, outcome, req_id="r", key_name="k", model="fabric-flash")
         _, body, _ = h.sent[-1]
         assert "sk-LEAKED" not in json.dumps(body)
 
@@ -585,7 +585,7 @@ class TestClientErrorSanitization:
         h = FakeHandler()
         pm = SimpleNamespace(logger=SimpleNamespace(log=lambda e: None))
         dispatch._finish_outcome_anthropic(
-            h, pm, outcome, req_id="r", key_name="k", model="fabric-fast")
+            h, pm, outcome, req_id="r", key_name="k", model="fabric-flash")
         _, body, _ = h.sent[-1]
         assert "sk-LEAK" not in json.dumps(body)
         assert body["type"] == "error"
@@ -609,8 +609,8 @@ class TestCloudDiscoveryOnPoolPath:
 
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
         h = FakeHandler()
-        dispatch.handle_pool_chat(h, pm, {"model": "fabric-fast", "messages": []},
-                                  "fabric-fast")
+        dispatch.handle_pool_chat(h, pm, {"model": "fabric-flash", "messages": []},
+                                  "fabric-flash")
         assert pm.ensure_cloud_discovered_calls == 1
 
     def test_local_only_pool_skips_discovery(self, monkeypatch):
@@ -624,8 +624,8 @@ class TestCloudDiscoveryOnPoolPath:
 
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
         h = FakeHandler()
-        dispatch.handle_pool_chat(h, pm, {"model": "fabric-fast", "messages": []},
-                                  "fabric-fast")
+        dispatch.handle_pool_chat(h, pm, {"model": "fabric-flash", "messages": []},
+                                  "fabric-flash")
         assert pm.ensure_cloud_discovered_calls == 0
 
 
@@ -641,8 +641,8 @@ class TestPhysicalTargetGate:
 
         monkeypatch.setattr(dispatch, "_forward_request_ex", _fx_ok)
         dispatch._attempt_local_openai(
-            FakeHandler(), pm, {"model": "fabric-fast", "messages": []},
-            model="fabric-fast", pool="flash",
+            FakeHandler(), pm, {"model": "fabric-flash", "messages": []},
+            model="fabric-flash", pool="flash",
             cand=reg.snapshot().pools["flash"].candidates[0])
         assert gate.target_acquired == ["qwen-small"]   # 物理目标键（acquire_target，终审 #8）
         assert gate.acquired == []                 # 不双扣外层 RPM/全局门
@@ -789,7 +789,7 @@ class TestForwarderBoundaryFixes:
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
         result = forward_anthropic_local(
             h, pm, {"model": "x", "messages": []},
-            "key", model_obj, "fabric-fast", suppress_client_errors=True)
+            "key", model_obj, "fabric-flash", suppress_client_errors=True)
         # 终审 #10 契约：CloudResult committed 信号（非 None/未提交）
         assert result.status == 200 and result.committed is True
 
@@ -823,5 +823,5 @@ class TestForwarderBoundaryFixes:
         model_obj = SimpleNamespace(name="m", served_name="s", port=8101)
         forward_anthropic_local(
             h, pm, {"model": "x", "messages": []},
-            "key", model_obj, "fabric-fast", suppress_client_errors=True)
+            "key", model_obj, "fabric-flash", suppress_client_errors=True)
         assert cache_puts == []                    # 池路径零缓存写

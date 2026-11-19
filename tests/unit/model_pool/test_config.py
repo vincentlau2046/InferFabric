@@ -228,7 +228,7 @@ class TestValidationIssues:
         raw = _raw_file()
         raw["pools"]["fast"]["candidates"][0] = {
             "id": "c1", "priority": 1, "kind": "cloud",
-            "provider": "p", "model_id": "fabric-fast",
+            "provider": "p", "model_id": "fabric-flash",
         }
         cfg, issues = load_pools_dict(raw, current_revision=0)
 

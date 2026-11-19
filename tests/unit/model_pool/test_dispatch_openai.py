@@ -3,7 +3,7 @@
 核心不变量：
 - 本地候选 ready_only：绝不调用 pm.ensure_service
 - 池请求跳过响应缓存（GET/PUT 均不触碰）
-- 鉴权用完整逻辑名（fabric-fast），不做 split("/")[-1]
+- 鉴权用完整逻辑名（fabric-flash），不做 split("/")[-1]
 - 错误契约：unknown_pool 404 / no_compatible_target 400 / no_ready_target 503
 """
 
@@ -214,15 +214,15 @@ class TestPoolChatDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-flash", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
 
         assert len(forwarded) == 1
         assert forwarded[0]["body"]["model"] == "qwen-small"  # 改写为 served_name
         assert forwarded[0]["cache_body"] is None             # 池请求不写缓存
         assert pm.ensure_service_calls == []                  # 绝不自动启动
-        assert pm.dual_gate.acquired == ["fabric-fast"]        # 外层逻辑名 gate（限流键）
+        assert pm.dual_gate.acquired == ["fabric-flash"]        # 外层逻辑名 gate（限流键）
         assert pm.dual_gate.target_acquired == ["qwen-small"]  # 物理目标门= acquire_target
         assert h.sent == []                                   # 无错误响应
         # RequestLog 记录逻辑名 + pool 路由
@@ -251,21 +251,21 @@ class TestPoolChatDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert forwarded == []                    # 本地零转发
         assert len(cloud_results) == 1
         assert cloud_results[0]["model"] == "cloud-m"
-        assert cloud_results[0]["original"] == "fabric-fast"
+        assert cloud_results[0]["original"] == "fabric-flash"
 
     def test_no_compatible_target_400_openai_envelope(self, registry):
         pm = FakePM(registry, active=set(), local_models={},
                     cloud_models={})  # 全部未就绪
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 503  # 候选存在但未就绪 → no_ready_target
         assert body["status"] == "no_ready_target"
@@ -284,32 +284,32 @@ class TestPoolChatDispatch:
                         openai_base="https://base/v1",
                         anthropic_base="https://base/v1")})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 400
         assert body["status"] == "no_compatible_target"
 
     def test_guest_without_pool_whitelist_rejected(self, registry, forwarded):
-        # guest 白名单只含其它模型 → 完整名 fabric-fast 不在白名单 → 401
+        # guest 白名单只含其它模型 → 完整名 fabric-flash 不在白名单 → 401
         pm = FakePM(registry, auth=FakeAuth(models=["other-model"], name="guest"),
                     active={"qwen-small"}, local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 401
         assert forwarded == []
 
     def test_guest_with_pool_whitelist_allowed(self, registry, forwarded):
-        pm = FakePM(registry, auth=FakeAuth(models=["fabric-fast"], name="guest"),
+        pm = FakePM(registry, auth=FakeAuth(models=["fabric-flash"], name="guest"),
                     active={"qwen-small"}, local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
 
     def test_non_pool_prefix_returns_false(self, registry, forwarded):
@@ -336,9 +336,9 @@ class TestPoolChatDispatch:
         reg.load()
         pm = FakePM(reg)
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert h.sent[-1][0] == 404
 
     def test_pool_request_never_touches_response_cache(self, registry, forwarded):
@@ -353,17 +353,17 @@ class TestPoolChatDispatch:
                     local_models={"qwen-small": _local_model()})
         pm.response_cache = BoomCache()
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [], "temperature": 0}
+        data = {"model": "fabric-flash", "messages": [], "temperature": 0}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
 
     def test_invalid_key_401(self, registry):
         pm = FakePM(registry)
         h = FakeHandler(auth_header="bad-key")
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert h.sent[-1][0] == 401
 
     def test_disabled_pool_503(self, registry):
@@ -373,9 +373,9 @@ class TestPoolChatDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, hdrs = h.sent[-1]
         assert status == 503
         assert body["status"] == "pool_disabled"
@@ -396,13 +396,13 @@ class TestPoolChatDispatch:
                     cloud_models={"prov/cloud-m": SimpleNamespace(
                         supports_vision=None)})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
             ]}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
         assert forwarded[0]["port"] == 8101   # 纯优先级 → 本地 p1
         assert h.sent == []                   # 无错误信封
@@ -436,13 +436,13 @@ class TestPoolChatDispatch:
         monkeypatch.setattr(pm.mgr, "list_models", boom)
 
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
             ]}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
         assert forwarded[0]["port"] == 8101   # 纯优先级 → 本地 p1
         assert cloud_calls == []
@@ -476,13 +476,13 @@ class TestPoolChatDispatch:
         monkeypatch.setattr(pm.mgr, "list_models", boom)
 
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
             ]}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert cloud_calls == ["cloud-m"]      # 已知 VL 云候选软优先
         assert forwarded == []
 
@@ -502,13 +502,13 @@ class TestPoolChatDispatch:
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "text", "text": "hi"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
             ]}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
         assert forwarded[0]["port"] == 8102   # VL 候选，不是 p1 文本候选
 
@@ -527,9 +527,9 @@ class TestPoolChatDispatch:
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-flash", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
         assert forwarded[0]["port"] == 8102   # p1 = VL，纯文本也由它服务
 
@@ -548,12 +548,12 @@ class TestPoolChatDispatch:
                     model_dicts=[{"name": "qwen-small", "model_type": "llm"},
                                  {"name": "qwen-vl", "model_type": "vl"}])
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [
+        data = {"model": "fabric-flash", "messages": [
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
             ]}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 503
         assert body["status"] == "no_ready_target"
@@ -568,10 +568,10 @@ class TestPoolChatDispatch:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [], "tools": [
+        data = {"model": "fabric-flash", "messages": [], "tools": [
             {"name": "t", "description": "d", "input_schema": {"type": "object"}}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         assert len(forwarded) == 1
         sent_tools = forwarded[0]["body"]["tools"]
         assert sent_tools[0]["type"] == "function"  # Anthropic 风格已归一化
@@ -583,9 +583,9 @@ class TestPoolChatDispatch:
             acquire=lambda m, timeout=None: SimpleNamespace(ok=False, reason="rpm"),
             release=lambda: None)
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": []}
+        data = {"model": "fabric-flash", "messages": []}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
         status, body, _ = h.sent[-1]
         assert status == 429
         assert forwarded == []
@@ -600,10 +600,10 @@ class TestStreamUsageInjection:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "stream": True,
+        data = {"model": "fabric-flash", "stream": True,
                 "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
 
         assert len(forwarded) == 1
         assert forwarded[0]["stream"] is True
@@ -613,9 +613,9 @@ class TestStreamUsageInjection:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-flash", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
 
         assert len(forwarded) == 1
         assert "stream_options" not in forwarded[0]["body"]
@@ -626,11 +626,11 @@ class TestStreamUsageInjection:
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "stream": True,
+        data = {"model": "fabric-flash", "stream": True,
                 "stream_options": {"include_usage": False},
                 "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
 
         assert len(forwarded) == 1
         assert forwarded[0]["body"]["stream_options"] == {"include_usage": False}
@@ -657,28 +657,27 @@ class TestStreamUsageInjection:
                     providers={"prov": SimpleNamespace(
                         openai_base="https://base/v1")})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "stream": True,
+        data = {"model": "fabric-flash", "stream": True,
                 "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
 
         assert len(cloud_bodies) == 1
         assert cloud_bodies[0]["stream_options"] == {"include_usage": True}
 
 
 class TestLegacyPoolKeyFallback:
-    def test_legacy_keyed_config_still_routes(self, registry, forwarded):
-        """评审 PR#4 blocker 回归：存量 model_pools.yaml 键仍为旧名
-        （fast/small/premium）时，fabric- 请求规范名未命中后回落原短名，
-        路由不被重命名切断；配置迁移到规范名后别名/规范名双向可用。"""
+    def test_legacy_keyed_config_no_longer_routes(self, registry):
+        """别名层移除回归（用户裁决 2026-11-19）：请求名即池键——存量
+        旧名键（fast/small/premium）不再被 fabric-规范名请求反查兜底，
+        请求落 unknown_pool 404；池配置必须迁移到规范名键。"""
         cfg = _raw_config()
-        cfg["pools"]["fast"] = cfg["pools"].pop("flash")   # 存量键名未迁移
+        cfg["pools"]["fast"] = cfg["pools"].pop("flash")   # 存量旧名键
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small"},
                     local_models={"qwen-small": _local_model()})
         h = FakeHandler()
-        data = {"model": "fabric-fast", "messages": [{"role": "user", "content": "hi"}]}
+        data = {"model": "fabric-flash", "messages": [{"role": "user", "content": "hi"}]}
 
-        assert dispatch.handle_pool_chat(h, pm, data, "fabric-fast") is True
-        assert len(forwarded) == 1
-        assert h.sent == []
+        assert dispatch.handle_pool_chat(h, pm, data, "fabric-flash") is True
+        assert h.sent and h.sent[-1][0] == 404     # unknown_pool
