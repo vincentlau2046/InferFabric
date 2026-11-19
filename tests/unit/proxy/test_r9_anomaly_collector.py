@@ -126,6 +126,7 @@ def test_query_since():
     """query 的 since 参数按时间过滤。"""
     c = AnomalyCollector()
     c.record(AnomalyEvent(message="old"))
+    time.sleep(0.01)   # clock resolution is µs but >= comparison needs strict separation
     t = time.time()
     time.sleep(0.01)
     c.record(AnomalyEvent(message="new"))

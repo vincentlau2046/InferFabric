@@ -8,6 +8,7 @@
   当前 revision+1 拾取，保证热加载不回退。
 """
 
+import copy
 import logging
 import os
 import tempfile
@@ -94,7 +95,9 @@ class PoolRegistry:
                  provider_route: Callable[[str], dict[str, str]] | None = None,
                  local_protocols: Callable[[str], list[str] | None] | None = None):
         self._config_path = Path(config_path)
-        self._lock = threading.Lock()
+        # RLock: purge_candidates (cross-module linkage purge) re-enters
+        # update()'s validate+write path while holding the lock
+        self._lock = threading.RLock()
         self._snapshot: RegistrySnapshot = _EMPTY_SNAPSHOT
         # 最后一次成功加载/写入的原始配置 dict（toggle 等字段级修改的基底，
         # 保留悬空候选/未回传字段，避免经有损视图重建丢数据）
@@ -420,3 +423,35 @@ class PoolRegistry:
             protocol = key.rsplit(":", 1)[-1]
             out[protocol] = ev
         return out
+
+    def purge_candidates(self, predicate: Callable[[dict], bool]) -> tuple[int, int]:
+        """System-level candidate purge (cross-module linkage): removing a
+        source model auto-removes pool candidates that reference it.
+
+        predicate(candidate_raw) hit → drop that candidate from its pool
+        (local model uninstalled → kind=local + model_name match; cloud model
+        removed → provider+model_id match). System-initiated, no editor-race
+        semantics: uses the current revision as expected for update()'s
+        validate+atomic-write+publish path (RLock allows same-thread reentry).
+        Returns: (removed_count, new_revision); no hit writes nothing,
+        returns (0, current revision).
+        """
+        with self._lock:
+            raw = copy.deepcopy(self._raw) if self._raw is not None else None
+            if not isinstance(raw, dict):
+                return 0, self._snapshot.revision
+            removed = 0
+            for p in (raw.get("pools") or {}).values():
+                if not isinstance(p, dict):
+                    continue
+                cands = p.get("candidates")
+                if not isinstance(cands, list):
+                    continue
+                kept = [c for c in cands
+                        if not (isinstance(c, dict) and predicate(c))]
+                removed += len(cands) - len(kept)
+                p["candidates"] = kept
+            if not removed:
+                return 0, self._snapshot.revision
+            snap = self.update(raw, expected_revision=self._snapshot.revision)
+            return removed, snap.revision

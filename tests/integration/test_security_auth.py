@@ -17,6 +17,7 @@ def test_off_policy_unregistered_key_passes_auth(tmp_path):
     store = KeyStore(tmp_path / 'security.db', provision=True)
     assert store.get_policy() == 'off'
     pm = MagicMock()
+    pm.pack_manager = None   # F4 gate: MagicMock auto-attrs would trip the pack-uninstall 503
     pm.auth = SecurityAuth(AuthManager(), store)
     pm.pool_registry.snapshot.return_value.pools = {}
     pm.agent_registry = None
@@ -42,6 +43,7 @@ def test_pool_auth_protocol_headers(tmp_path, path, header):
     store.set_policy('pools')
     meta, token = store.create_key('client', ['fabric-work'], None)
     pm = MagicMock()
+    pm.pack_manager = None   # F4 gate: MagicMock auto-attrs would trip the pack-uninstall 503
     pm.auth = SecurityAuth(AuthManager(), store)
     pm.pool_registry.snapshot.return_value.pools = {}  # Authorized requests reach unknown-pool 404.
     pm.agent_registry = None

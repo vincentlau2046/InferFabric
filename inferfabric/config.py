@@ -345,11 +345,16 @@ class OllamaModelConfig:
 class LlamaCppConfig:
     """Llama.cpp / llama.cpp 独立推理进程."""
     model_path: str     # GGUF 文件路径
+    served_name: str = ""  # proxy 路由名；空回退 model name（同 ninfer 契约）。
+    # --alias 只规范引擎回显，不参与 proxy 路由（2026-11-16 沙箱取证）
     port: int = 11435
     threads: int = 8
     context_size: int = 8192
     gpu_layers: int = 0  # 0=CPU only, -1=all GPU, N=部分
     extra_flags: str = ""  # 透传给 llama-server 的额外参数
+    # P1: 显式二进制路径（能力包捆绑引擎为第一公民）。为空时回退
+    # 上游路径推断（build-cuda/build 双目录逻辑）。
+    binary_path: str = ""
 
 
 @dataclass
@@ -467,6 +472,10 @@ class ModelConfig:
     modality: str = ""  # derived from model_type if empty; 'text' | 'text-vision' | 'multimodal' | 'aigc' | 'embedding' | 'rerank' | 'infra' | 'tts' | 'asr'
     quantization: str = ""  # quantization format: 'NVFP4', 'GPTQ-4bit', 'Q8_0', etc.
 
+    # 统一架构（2026-11-16）：managed_by_pack 非空 = 由能力包装入生成；
+    # /models 暴露给 App，本地推理页标注"来自能力包 xxx"
+    managed_by_pack: dict | None = None
+
     # R7: 多副本端口列表（如 [8002, 8003]；为空时使用 type 对应 config 的 port）
     replicas: list[int] = field(default_factory=list)
 
@@ -543,7 +552,7 @@ class ModelConfig:
         if self.ollama:
             return self.ollama.model_ref
         if self.llama_cpp:
-            return self.name
+            return self.llama_cpp.served_name or self.name
         if self.ninfer:
             return self.ninfer.served_name or self.name
         return self.name
@@ -914,6 +923,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             modality=raw.get("modality", ""),
             replicas=raw.get("replicas", []),
             deployment=raw.get("deployment", ""),
+            managed_by_pack=raw.get("managed_by_pack"),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。
