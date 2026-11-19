@@ -394,6 +394,48 @@ def scenario_refs(models_dir, applied_path, model_names: set[str]) -> list[dict]
     return out
 
 
+def find_scenario_drift(models: dict, models_dir, applied_path=None) -> list[dict]:
+    """Detection-only drift check: sidecar entries naming models that no longer exist.
+
+    Compares the top-level keys of `models.d/scenarios.yaml` (manual sidecar)
+    and the applied overlay (`~/.inferfabric/active_scenarios.yaml`) against
+    the live models.d keys **and served names** (a sidecar may key either).
+    Report-only: both files are user/derived config and are never modified
+    here; the loader already skips unknown keys with a warning (issue #8
+    item 2). Any purge stays an explicit, user-driven edit.
+
+    Note the inverted direction vs `scenario_refs` (which reports sidecar
+    entries naming *removed* models): here the live name set is the baseline
+    and any sidecar key outside it is drift.
+    """
+    names = set(models or {})
+    for m in (models or {}).values():
+        try:
+            served = m.served_name
+        except Exception:
+            served = None
+        if served:
+            names.add(served)
+    out: list[dict] = []
+    candidates = [(Path(models_dir) / "scenarios.yaml", "scenarios.yaml")]
+    if applied_path:
+        candidates.append((Path(applied_path), "active_scenarios.yaml"))
+    for path, label in candidates:
+        if not path.exists():
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            out.append({"file": label, "status": "unreadable"})
+            continue
+        if not isinstance(raw, dict):
+            continue
+        for key in raw:
+            if key not in names:
+                out.append({"file": label, "model": key})
+    return out
+
+
 def remove_model(target: str, *, models: dict, models_dir, pools_path=None,
                  applied_scenarios_path=None,
                  stop_fn=None, is_running_fn=None, purge_pools: bool = False,
