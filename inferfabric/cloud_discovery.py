@@ -33,6 +33,13 @@ _CLOUD_UA = "inferfabric/6.1.6"
 # 人工声明存 model_specs，经 _merge_model_spec 注入注册表。
 _CAPABILITY_KEYS = ("supports_vision", "supports_tools")
 
+# Attribute-edit (App modal) extension keys: int context/output caps +
+# float prices (¥/1M tokens). Accepted alongside _CAPABILITY_KEYS by
+# update_model_spec and persisted into model_specs.
+_SPEC_INT_KEYS = ("context_window", "max_output_tokens")
+_SPEC_FLOAT_KEYS = ("price_input", "price_output")
+_SPEC_ALL_KEYS = _CAPABILITY_KEYS + _SPEC_INT_KEYS + _SPEC_FLOAT_KEYS
+
 
 @dataclass
 class CloudModel:
@@ -96,6 +103,11 @@ class CloudModel:
         # 自定义扩展
         if self.extra:
             caps.update(self.extra)
+        # G-2: 价格字段
+        if self.price_input:
+            caps["price_input"] = self.price_input
+        if self.price_output:
+            caps["price_output"] = self.price_output
         d["capabilities"] = caps
         return d
 
@@ -491,13 +503,15 @@ class CloudDiscovery:
 
         云模型能力上游 /models 不提供（发现只取 id），model_specs 是唯一
         注入点。spec 不存在则创建 —— 打标即声明，语义与手填/配置声明一致。
-        只接受 _CAPABILITY_KEYS。
+        只接受 _SPEC_ALL_KEYS（bool 能力 + int 上下文/输出上限 + float 价格）。
 
-        7.8.0（cross-review I-1）：值 False = **解除打标**（键移除，回三态
+        7.8.0（cross-review I-1）：能力键值 False = **解除打标**（键移除，回三态
         None/无约束），不持久化 false —— 显式 false 自 7.8.0 起是池候选
         活跃约束（catalog 排除词表），面板 chip「关闭」若写 false 会一步
         造出约束且 UI 无回路。显式排除（false）的唯一入口是手编
         cloud_provider.yaml（刻意的摩擦，约束须是明确决定）。
+        属性键（int/float）：None = 清除该属性（从 spec 移除）；否则强转
+        （int 抛 ValueError → 400 由 handler 兜）。
         """
         with self._models_lock:
             cfg = self._providers.get(provider)
@@ -505,12 +519,21 @@ class CloudDiscovery:
                 raise KeyError(provider)
             spec = cfg.model_specs.setdefault(model_id, {})
             for k, v in caps.items():
-                if k not in _CAPABILITY_KEYS:
-                    continue
-                if v is False:
-                    spec.pop(k, None)   # 解除打标 → None（无约束）
-                else:
-                    spec[k] = v
+                if k in _CAPABILITY_KEYS:
+                    if v is False:
+                        spec.pop(k, None)   # 解除打标 → None（无约束）
+                    else:
+                        spec[k] = v
+                elif k in _SPEC_INT_KEYS:
+                    if v is None or v == "":
+                        spec.pop(k, None)   # 清空 = 移除属性
+                    else:
+                        spec[k] = int(v)
+                elif k in _SPEC_FLOAT_KEYS:
+                    if v is None or v == "":
+                        spec.pop(k, None)
+                    else:
+                        spec[k] = float(v)
             self._rebuild_provider_registry(provider, cfg)
         return self._routable_count(provider)
 
@@ -762,10 +785,19 @@ class CloudDiscovery:
                     md = {}
                     if mid:
                         md["model_id"] = mid
-                    if spec.get("price_input"):
+                    # 属性编辑六键完整落盘（M2-T4 回归钉）：数值属性用
+                    # `is not None` 门 —— 0 是合法值（truthy 门曾把 0 价当
+                    # 未设置丢弃）；context_window / max_output_tokens 此前
+                    # 在下方 known 排除集内却从未显式写出 → 属性经 save_config
+                    # 后重启静默蒸发。
+                    if spec.get("price_input") is not None:
                         md["price_input"] = spec["price_input"]
-                    if spec.get("price_output"):
+                    if spec.get("price_output") is not None:
                         md["price_output"] = spec["price_output"]
+                    if spec.get("context_window") is not None:
+                        md["context_window"] = spec["context_window"]
+                    if spec.get("max_output_tokens") is not None:
+                        md["max_output_tokens"] = spec["max_output_tokens"]
                     # L2b: 能力标签显式落盘 —— 此前在 known 排除集里被静默
                     # 丢弃（手写 YAML 标签一经策展操作 save_config 即蒸发）。
                     # 显式 False 也写：关闭标签靠持久化 false，不靠删键。

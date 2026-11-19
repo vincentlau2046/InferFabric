@@ -431,11 +431,18 @@
         // 再传会双转义，含 HTML 特殊字符的厂商名打标后变 AT&amp;T → 404）
         var capBtns = rcaps[mid] ? capChips(p.name, mid,
           rcaps[mid].supports_vision) : '';
+        // 属性入口（M2-T4）：仅可路由候选 — 与打标入口同界（未路由候选不给）
+        var attrsBtn = rcaps[mid]
+          ? '<button type="button" class="btn btn-sec btn-xs" data-action="cpm-attrs"' +
+            ' data-provider="' + nameAttr + '" data-model="' + esc(mid) + '"' +
+            ' title="编辑模型属性（上下文 / 输出上限 / 价格 / 视觉声明）">属性</button>'
+          : '';
         return '<label class="cpm-item" data-action="cpm-toggle" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '">' +
           '<input type="checkbox" class="cpm-check" ' + (checked ? 'checked' : '') + ' aria-label="' + esc(mid) + '">' +
           '<span class="cpm-id mono">' + esc(mid) + '</span>' +
           '<span class="cpm-src">发现</span>' +
           capBtns +
+          attrsBtn +
           chips +
         '</label>';
       }).join('');
@@ -454,6 +461,7 @@
           '<span class="cpm-src">' + label + '</span>' +
           capChips(p.name, s.id, s.supports_vision) +
           '<span class="cpm-ops">' +
+            '<button type="button" class="btn btn-sec btn-xs" data-action="cpm-attrs" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">属性</button>' +
             '<button type="button" class="btn btn-danger btn-xs" data-action="cpm-remove" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">移除</button>' +
           '</span>' +
         '</div>';
@@ -642,6 +650,164 @@
     if (!provider) return;
     window.doCloudDiscover(provider);
   };
+
+  /* ══ 属性浮窗（M2-T4）：模型属性编辑，tag 动作只发变更字段 ══
+   * 回填源：GET /admin/cloud/providers 的 model_specs 原始声明（无 spec = 全未设置）。
+   * 提交语义（= update_model_spec，缺省即保留）：
+   *   - 能力：回填仅 true 视为已声明；false（显式排除）与 null 同渲染为未声明，
+   *     不改动即不提交 —— UI 不新增写显式排除的途径（false 只作解除打标发出）；
+   *   - 数值：输入清空 + 原值存在 → 显式 null（清除属性）；0 按数字 0 提交
+   *     （空串判定在前，0 ≠ 未设置）；token 数为整数、价格为有限数字；
+   *   - 无变更保存不发 POST；取消 / Esc / 点击遮罩均不提交；
+   *   - 保存失败浮窗内联报错、输入保留可更正，不宣称保存成功。 */
+  var _attrsModal = null;   // { provider, model, spec, onKey }
+
+  var _ATTRS_INT_KEYS = ['context_window', 'max_output_tokens'];
+  var _ATTRS_PRICE_KEYS = ['price_input', 'price_output'];
+  var _ATTRS_LABELS = {
+    context_window: '上下文窗口（tokens，整数）',
+    max_output_tokens: '最大输出 tokens（整数）',
+    price_input: '输入价格（/M tokens）',
+    price_output: '输出价格（/M tokens）',
+  };
+
+  function findSpec(providerName, mid) {
+    for (var i = 0; i < _providers.length; i++) {
+      if (_providers[i].name !== providerName) continue;
+      var specs = _providers[i].model_specs || [];
+      for (var j = 0; j < specs.length; j++) {
+        if (specs[j].id === mid) return specs[j];
+      }
+      break;
+    }
+    return null;
+  }
+
+  function closeAttrsModal() {
+    if (!_attrsModal) return;
+    document.removeEventListener('keydown', _attrsModal.onKey);
+    var holder = document.getElementById('cpAttrsModal');
+    if (holder) { holder.innerHTML = ''; holder.style.display = 'none'; }
+    _attrsModal = null;
+  }
+
+  function openAttrsModal(providerName, mid) {
+    if (!providerName || !mid) return;
+    closeAttrsModal();
+    var spec = findSpec(providerName, mid) || {};
+    var holder = document.getElementById('cpAttrsModal');
+    if (!holder) {
+      holder = document.createElement('div');
+      holder.id = 'cpAttrsModal';
+      document.body.appendChild(holder);
+    }
+    var visionOn = spec.supports_vision === true;   // false（显式排除）与 null 同渲染
+    var visionExcluded = spec.supports_vision === false;
+    var rows = _ATTRS_INT_KEYS.concat(_ATTRS_PRICE_KEYS).map(function (k) {
+      var v = spec[k];
+      return '<div class="if-form-row">' +
+        '<label class="if-field-label" for="cpAttrs-' + k + '">' + _ATTRS_LABELS[k] + '</label>' +
+        '<input class="if-field-input mono" id="cpAttrs-' + k + '" type="text" inputmode="decimal"' +
+          ' value="' + esc(v == null ? '' : String(v)) + '" autocomplete="off" spellcheck="false">' +
+        '</div>';
+    }).join('');
+    holder.innerHTML =
+      '<div class="if-modal-backdrop">' +
+        '<div class="if-modal" role="dialog" aria-modal="true" aria-label="模型属性">' +
+          '<div class="if-modal-title">模型属性 — ' + esc(mid) + '</div>' +
+          '<div class="if-modal-body">' +
+            '<p class="if-field-hint">留空且原值存在 = 保存时清除该属性；0 按数字 0 保存。只提交有变更的字段，其余保留。</p>' +
+            '<label class="cpm-cap"><input type="checkbox" id="cpAttrs-vision"' + (visionOn ? ' checked' : '') + '> 视觉（supports_vision）</label>' +
+            (visionExcluded
+              ? '<p class="if-field-hint">该模型有显式排除约束（手编 YAML 设置）— 不改动则保留</p>'
+              : '') +
+            rows +
+            '<p class="if-field-hint" id="cpAttrsErr" style="display:none"></p>' +
+          '</div>' +
+          '<div class="if-modal-actions">' +
+            '<button type="button" class="btn btn-sec" data-act="attrs-cancel">取消</button>' +
+            '<button type="button" class="btn btn-pri" data-act="attrs-save">保存</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    holder.style.display = '';
+    var st = { provider: providerName, model: mid, spec: spec, onKey: null };
+    st.onKey = function (e) { if (e.key === 'Escape') closeAttrsModal(); };
+    document.addEventListener('keydown', st.onKey);
+    _attrsModal = st;
+    var backdrop = holder.querySelector('.if-modal-backdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) {
+        var act = e.target.getAttribute && e.target.getAttribute('data-act');
+        if (act === 'attrs-save') saveAttrs();
+        else if (act === 'attrs-cancel' || e.target === backdrop) closeAttrsModal();
+      });
+    }
+    var saveBtn = holder.querySelector('[data-act="attrs-save"]');
+    if (saveBtn) saveBtn.focus();
+  }
+
+  /* 只发变更字段；非法输入抛错（内联显示，输入保留可更正） */
+  function buildAttrsChanges(spec) {
+    var changes = {};
+    var visEl = document.getElementById('cpAttrs-vision');
+    var origVision = !!(spec && spec.supports_vision === true);
+    if (visEl && !!visEl.checked !== origVision) {
+      changes.supports_vision = !!visEl.checked;   // true=打标 / false=解除打标
+    }
+    _ATTRS_INT_KEYS.concat(_ATTRS_PRICE_KEYS).forEach(function (k) {
+      var el = document.getElementById('cpAttrs-' + k);
+      if (!el) return;
+      var raw = el.value;
+      var orig = spec ? spec[k] : null;
+      if (raw.trim() === '') {
+        if (orig != null) changes[k] = null;   // 显式清除（原值存在 + 输入清空）
+        return;
+      }
+      var num = Number(raw.trim());
+      var isInt = _ATTRS_INT_KEYS.indexOf(k) >= 0;
+      if (isInt ? !Number.isInteger(num) : !isFinite(num)) {
+        throw new Error(_ATTRS_LABELS[k] + '：请输入合法' + (isInt ? '整数' : '数字'));
+      }
+      if (orig != null && num === orig) return;   // 未变更不提交
+      changes[k] = num;
+    });
+    return changes;
+  }
+
+  async function saveAttrs() {
+    var st = _attrsModal;
+    if (!st) return;
+    var errEl = document.getElementById('cpAttrsErr');
+    function showErr(msg) {
+      if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    }
+    var changes;
+    try {
+      changes = buildAttrsChanges(st.spec);
+    } catch (e) {
+      showErr(e.message || String(e));
+      return;
+    }
+    if (!Object.keys(changes).length) {
+      closeAttrsModal();
+      UI.toast('无变更 — 未发送请求', 'info');
+      return;
+    }
+    try {
+      var r = await callProviderModels(st.provider, 'tag', st.model, changes);
+      if (!r.ok || !r.data || r.data.error) {
+        showErr('保存失败：' + ((r.data && r.data.error) || ('HTTP ' + r.status)) +
+                ' — 输入已保留，可更正后重试');
+        return;   // 浮窗保持打开、输入不动；不宣称保存成功
+      }
+      closeAttrsModal();
+      UI.toast(st.model + ' 属性已保存', 'success');
+      await cloudLoadProviders();   // 保存成功回读该 provider
+    } catch (e) {
+      showErr('保存失败：' + (e.message || e) + ' — 输入已保留，可更正后重试');
+    }
+  }
 
   /* ── 可路由模型列表（策展后 = 注册表；行内来源徽标） ── */
   function cloudRenderModels(data) {
@@ -996,6 +1162,12 @@
                         el.getAttribute('data-val') === '1' ? false : true);
         break;
       }
+      case 'cpm-attrs':
+        // 属性按钮在 <label class="cpm-item"> 内 — label 不转发激活，
+        // preventDefault 兜底（与 cpm-tag 同理），勾选态零扰动
+        if (ev && ev.preventDefault) ev.preventDefault();
+        if (provider) openAttrsModal(provider, el.getAttribute('data-model'));
+        break;
       case 'provider-test': {
         if (!provider) return;
         var p = null;
