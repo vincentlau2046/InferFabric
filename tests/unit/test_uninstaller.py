@@ -31,6 +31,7 @@ from inferfabric.uninstaller import (
     remove_env,
     remove_image,
     remove_model,
+    weight_paths,
 )
 
 
@@ -222,6 +223,10 @@ class TestPoolCandidates:
         assert "revision" not in put_payload   # registry 管理 revision，不落盘旧值
         # live 模式不本地写盘：文件仍由 proxy 的 registry 持久化
         assert len(yaml.safe_load(p.read_text())["pools"]["fast"]["candidates"]) == 2
+        # 更新请求必须是 POST：同步 server 只路由 GET/POST（无 do_PUT），
+        # PR #7 曾发 PUT → 501，活 registry 下 purge 必挂（MacFabric dashboard
+        # 真实浏览器验收发现）。
+        assert calls[-1][0] == "POST"
 
     def test_purge_cas_conflict_refreshes_once(self, tmp_path, monkeypatch):
         p = _write_pools(tmp_path / "pools.yaml")
@@ -270,6 +275,16 @@ class TestRemoveModel:
         assert any(a["action"] == "would-stop" for a in report["actions"])
         assert report["weights_kept"]                    # 报告不删
         assert any(p.endswith("Qwen3") for p in report["weights_kept"])
+
+    def test_weights_kept_covers_llama_cpp_model_path(self, tmp_path):
+        """llama_cpp 的 GGUF 是显式文件路径（model_path），预览必须列出
+        （MacFabric 验收发现：包引擎模型移除预览缺权重条目）。"""
+        from inferfabric.config import ModelConfig, LlamaCppConfig
+        cfg = ModelConfig(name="gguf-m", type="llama_cpp", description="d",
+                          llama_cpp=LlamaCppConfig(
+                              model_path="/data/gguf/qwen3-q4.gguf"))
+        paths = weight_paths(cfg)
+        assert paths == ["/data/gguf/qwen3-q4.gguf"]
 
     def test_execute_stops_then_deletes(self, tmp_path):
         models, mdir = _model_env(tmp_path)
