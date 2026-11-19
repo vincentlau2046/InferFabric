@@ -327,6 +327,7 @@ def test_chunked_request_body_supported(monkeypatch):
 # ═══════════════════════════════════════════════════════════════
 
 def test_admin_guard_401_and_pass(monkeypatch):
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")  # F7: token enforced in strict mode
     monkeypatch.setattr(handler_module, "_ADMIN_TOKEN", "secret")
 
     def stub_switch(h, pm):

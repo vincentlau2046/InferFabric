@@ -176,38 +176,48 @@ def test_validate_cloud_test_url_allows_registered_provider():
 
 
 def test_check_admin_uses_hmac_compare_digest():
-    """D-4: _check_admin uses hmac.compare_digest (constant-time)."""
-    from inferfabric.proxy.handler import ProxyHandler
+    """D-4: the admin gate uses hmac.compare_digest (constant-time).
+
+    F7: _check_admin delegates to _admin_gate, which owns token comparison."""
+    import inferfabric.proxy.handler as handler_module
     import inspect
-    source = inspect.getsource(ProxyHandler._check_admin)
+    source = inspect.getsource(handler_module._admin_gate)
     assert "hmac.compare_digest" in source or "compare_digest" in source
 
 
 
 def test_check_admin_no_token_open_mode():
-    """D-4: with no IFF_ADMIN_TOKEN, _check_admin returns True."""
+    """D-4: with no IFF_ADMIN_TOKEN and strict mode off, _check_admin returns True."""
+    import os
     import inferfabric.proxy.handler as handler_module
     old_token = handler_module._ADMIN_TOKEN
+    old_required = os.environ.pop("IFF_ADMIN_REQUIRED", None)
     handler_module._ADMIN_TOKEN = ""
     try:
         handler = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
         handler.headers = {}
+        handler.command = "GET"
         result = handler_module.ProxyHandler._check_admin(handler)
         assert result is True
     finally:
         handler_module._ADMIN_TOKEN = old_token
+        _restore_admin_required(old_required)
 
 
 def test_check_admin_rejects_wrong_token():
-    """D-4: wrong token rejected; correct token accepted."""
+    """D-4: wrong token rejected; correct token accepted (strict mode)."""
+    import os
     import inferfabric.proxy.handler as handler_module
     from unittest.mock import Mock
 
     old = handler_module._ADMIN_TOKEN
+    old_required = os.environ.pop("IFF_ADMIN_REQUIRED", None)
+    os.environ["IFF_ADMIN_REQUIRED"] = "1"
     handler_module._ADMIN_TOKEN = "secret123"
     try:
         h = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
         h.headers = {}
+        h.command = "GET"
         h.send_response = lambda code: None
         h.send_header = lambda k, v: None
         h.end_headers = lambda: None
@@ -222,6 +232,7 @@ def test_check_admin_rejects_wrong_token():
 
         h2 = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
         h2.headers = {"X-Admin-Token": "secret123"}
+        h2.command = "GET"
         h2.send_response = lambda code: None
         h2.send_header = lambda k, v: None
         h2.end_headers = lambda: None
@@ -235,6 +246,16 @@ def test_check_admin_rejects_wrong_token():
         assert result2 is True
     finally:
         handler_module._ADMIN_TOKEN = old
+        _restore_admin_required(old_required)
+
+
+def _restore_admin_required(old_required):
+    """Restore IFF_ADMIN_REQUIRED to its pre-test state (delete if unset before)."""
+    import os
+    if old_required is None:
+        os.environ.pop("IFF_ADMIN_REQUIRED", None)
+    else:
+        os.environ["IFF_ADMIN_REQUIRED"] = old_required
 
 def test_validate_runtime_config_rejects_bad_rate_limit():
     """D-5: bad rate_limit values are rejected."""

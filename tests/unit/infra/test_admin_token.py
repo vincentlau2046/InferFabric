@@ -18,20 +18,23 @@ import pytest
 
 
 class TestCheckAdminConstantTime:
-    """Verify _check_admin uses hmac.compare_digest."""
+    """Verify the admin gate uses hmac.compare_digest.
+
+    F7: _check_admin delegates to _admin_gate, which owns token comparison.
+    """
 
     def test_compare_digest_usage(self):
         """Source code must use hmac.compare_digest, not ==."""
-        from inferfabric.proxy.handler import ProxyHandler
         import inspect
-        source = inspect.getsource(ProxyHandler._check_admin)
+        import inferfabric.proxy.handler as h_mod
+        source = inspect.getsource(h_mod._admin_gate)
         assert "hmac.compare_digest" in source, \
-            "_check_admin must use hmac.compare_digest for constant-time comparison"
+            "_admin_gate must use hmac.compare_digest for constant-time comparison"
         # Should NOT use bare == for token comparison
         stripped = source.replace(" ", "")
         assert 'token==_ADMIN_TOKEN' not in stripped and \
                'token=="_ADMIN_TOKEN"' not in source, \
-            "_check_admin should not use == for token comparison"
+            "_admin_gate should not use == for token comparison"
 
 
 class TestValidateAdminTokenSafety:
@@ -83,30 +86,41 @@ class TestValidateAdminTokenSafety:
 
 
 class TestAdminTokenIntegration:
-    """Integration tests for _check_admin in ProxyHandler."""
+    """Integration tests for _check_admin in ProxyHandler.
+
+    F7 contract: token enforcement is strict-mode-only (IFF_ADMIN_REQUIRED=1);
+    default mode stays open on loopback (zero-friction install). Wrong/missing
+    token therefore require strict mode to yield 401.
+    """
+
+    @staticmethod
+    def _handler(monkeypatch, h_mod, admin_token, headers, command="GET", strict=False):
+        if strict:
+            monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
+        else:
+            monkeypatch.delenv("IFF_ADMIN_REQUIRED", raising=False)
+            monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", admin_token)
+        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
+        h.headers = dict(headers)
+        h.command = command
+        h._send_json = MagicMock()
+        return h
 
     def test_correct_token_accepted(self, monkeypatch):
         """Correct token passes check."""
         import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "test-secret")
-        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
-        h.headers = MagicMock()
-        h.headers.get.return_value = "test-secret"
-        h._send_json = MagicMock()
-
+        h = self._handler(monkeypatch, h_mod, "test-secret",
+                          {"X-Admin-Token": "test-secret"})
         result = h._check_admin()
         assert result is True
         h._send_json.assert_not_called()
 
     def test_wrong_token_rejected(self, monkeypatch):
-        """Wrong token fails check with 401."""
+        """Wrong token fails check with 401 (strict mode)."""
         import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "test-secret")
-        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
-        h.headers = MagicMock()
-        h.headers.get.return_value = "wrong-secret"
-        h._send_json = MagicMock()
-
+        h = self._handler(monkeypatch, h_mod, "test-secret",
+                          {"X-Admin-Token": "wrong-secret"}, strict=True)
         result = h._check_admin()
         assert result is False
         h._send_json.assert_called_once()
@@ -114,25 +128,16 @@ class TestAdminTokenIntegration:
         assert args[1] == 401
 
     def test_empty_token_config_allows_all(self, monkeypatch):
-        """When _ADMIN_TOKEN is empty, all requests pass."""
+        """When _ADMIN_TOKEN is empty and strict mode is off, requests pass."""
         import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "")
-        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
-        h.headers = MagicMock()
-        h._send_json = MagicMock()
-
+        h = self._handler(monkeypatch, h_mod, "", {})
         result = h._check_admin()
         assert result is True
         h._send_json.assert_not_called()
 
     def test_empty_header_rejected(self, monkeypatch):
-        """Empty X-Admin-Token header is rejected when token is set."""
+        """Missing X-Admin-Token header is rejected when token is set (strict mode)."""
         import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "secret")
-        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
-        h.headers = MagicMock()
-        h.headers.get.return_value = ""
-        h._send_json = MagicMock()
-
+        h = self._handler(monkeypatch, h_mod, "secret", {}, strict=True)
         result = h._check_admin()
         assert result is False

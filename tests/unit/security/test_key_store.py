@@ -109,3 +109,16 @@ def test_runtime_missing_corrupt_and_reinit_rejected(tmp_path, store):
     with pytest.raises(FileExistsError):
         KeyStore(store.path, provision=True)
     assert KeyStore(store.path).get_policy() == 'all'
+
+
+def test_active_key_id_valid_unknown_revoked_expired(store, monkeypatch):
+    meta, token = store.create_key('a', None, None)
+    assert store.active_key_id(token) == meta['id']
+    assert store.active_key_id('sk-iff-never-issued') is None
+    store.revoke_key(meta['id'])
+    assert store.active_key_id(token) is None
+    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    _, exp = store.create_key('b', None, deadline)
+    assert store.active_key_id(exp) is not None
+    monkeypatch.setattr(store, '_now', lambda: deadline.timestamp())
+    assert store.active_key_id(exp) is None

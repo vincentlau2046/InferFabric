@@ -69,7 +69,10 @@ def build_auth(data_dir):
     legacy = AuthManager(data_dir / 'api_keys.yaml')
     if (os.environ.get('IFF_SECURITY_ENABLED') == '1' or marker.exists()
             or marker.is_symlink() or path.exists() or path.is_symlink()):
-        store = KeyStore(path)
+        # Marker present but DB missing (e.g. leftover from a failed enable)
+        # used to crash the startup loop with FileNotFoundError — provision
+        # per `iff keys init` semantics instead (fork fix, 2026-11-15 incident).
+        store = KeyStore(path, provision=not (path.exists() or path.is_symlink()))
         # Enduring marker prevents deletion of the DB from reverting to anonymous access.
         fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         os.close(fd)

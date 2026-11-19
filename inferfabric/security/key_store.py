@@ -145,6 +145,13 @@ class KeyStore:
         row = self._entry(token)
         return row['name'] if row else 'anonymous'
 
+    def active_key_id(self, token):
+        """Key id for an active (non-revoked, non-expired) token, else None.
+
+        Reuses the _entry validity path — no separate secret storage."""
+        row = self._entry(token)
+        return row['id'] if row is not None else None
+
     def get_policy(self):
         with self._db() as db:
             row = db.execute('SELECT policy FROM settings WHERE id=1').fetchone()

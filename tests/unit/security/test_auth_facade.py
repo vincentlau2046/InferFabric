@@ -110,18 +110,20 @@ def test_corruption_fail_closed_and_reload_reports_failure(auth):
         auth.reload()
 
 
-def test_activation_is_explicit_and_missing_store_is_fatal(tmp_path, monkeypatch):
+def test_activation_is_explicit_and_missing_store_provisions(tmp_path, monkeypatch):
+    # F7 fork fix (2026-11-15 incident): activation is still explicit, but a
+    # marker left behind by a failed enable with no DB used to crashloop the
+    # startup loop with FileNotFoundError — provision per `iff keys init`
+    # semantics instead.
     monkeypatch.delenv('IFF_SECURITY_ENABLED', raising=False)
     assert isinstance(build_auth(tmp_path), AuthManager)
     monkeypatch.setenv('IFF_SECURITY_ENABLED', '1')
-    with pytest.raises((sqlite3.DatabaseError, OSError)):
-        build_auth(tmp_path)
-    KeyStore(tmp_path / 'security.db', provision=True)
     assert isinstance(build_auth(tmp_path), SecurityAuth)
-    monkeypatch.delenv('IFF_SECURITY_ENABLED')
+    assert (tmp_path / 'security.db').exists()
     # An initialized store is also an enduring activation marker.
+    monkeypatch.delenv('IFF_SECURITY_ENABLED')
     assert isinstance(build_auth(tmp_path), SecurityAuth)
     (tmp_path / 'security.enabled').touch()
     (tmp_path / 'security.db').unlink()
-    with pytest.raises((sqlite3.DatabaseError, OSError)):
-        build_auth(tmp_path)
+    assert isinstance(build_auth(tmp_path), SecurityAuth)
+    assert (tmp_path / 'security.db').exists()

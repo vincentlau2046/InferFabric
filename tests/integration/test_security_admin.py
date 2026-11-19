@@ -44,6 +44,9 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
     pm.response_cache = None
     pm.mgr.gpu_mode = 'idle'
     pm.new_request_id.return_value = 'security-test'
+    # F7: wrong-token 401 on /admin/keys/login is a strict-mode guarantee;
+    # default mode intentionally lets the dashboard password gate login alone.
+    monkeypatch.setenv('IFF_ADMIN_REQUIRED', '1')
     monkeypatch.setattr(handler_module, '_ADMIN_TOKEN', 'test-admin-token')
 
     async def roundtrip(base):
