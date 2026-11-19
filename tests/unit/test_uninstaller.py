@@ -218,9 +218,9 @@ class TestPoolCandidates:
         res = purge_pool_candidates(p, {"m1"})
         assert res["removed"][0]["candidate_id"] == "a"
         assert res["reload"] == {"status": "applied-live", "revision": 5}
-        put_payload = calls[-1][1]
-        assert put_payload["expected_revision"] == 4     # CAS 基点=live revision
-        assert "revision" not in put_payload   # registry 管理 revision，不落盘旧值
+        update_payload = calls[-1][1]
+        assert update_payload["expected_revision"] == 4  # CAS 基点=live revision
+        assert "revision" not in update_payload  # registry 管理 revision，不落盘旧值
         # live 模式不本地写盘：文件仍由 proxy 的 registry 持久化
         assert len(yaml.safe_load(p.read_text())["pools"]["fast"]["candidates"]) == 2
         # 更新请求必须是 POST：同步 server 只路由 GET/POST（无 do_PUT），
