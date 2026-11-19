@@ -189,3 +189,122 @@ def test_validate_admin_token_safety_non_loopback_host_raises(monkeypatch):
     monkeypatch.setattr(proxy_handler, "PROXY_HOST", "0.0.0.0")
     with pytest.raises(RuntimeError):
         proxy_handler._validate_admin_token_safety()
+
+# ── review PR#15 fixes (B1 + N1–N4) ──
+
+def test_admin_gate_non_loopback_bind_enforces_token_by_default(monkeypatch):
+    """B1: non-loopback PROXY_HOST + default mode → token enforced (401 without)."""
+    monkeypatch.delenv("IFF_ADMIN_REQUIRED", raising=False)
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+    monkeypatch.setattr(proxy_handler, "PROXY_HOST", "0.0.0.0")
+    h = _FakeHandler({"Host": "0.0.0.0:8999"}, admin_token="tok-abc")
+    assert proxy_handler._admin_gate(h, "0.0.0.0:8999") is False
+    assert h.replied[1] == 401
+    h2 = _FakeHandler({"X-Admin-Token": "tok-abc", "Host": "0.0.0.0:8999"},
+                      admin_token="tok-abc")
+    assert proxy_handler._admin_gate(h2, "0.0.0.0:8999") is True
+
+
+def test_admin_gate_non_loopback_bind_explicit_opt_out_still_open(monkeypatch):
+    """B1: explicit IFF_ADMIN_REQUIRED=0 opts out even on non-loopback bind."""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "0")
+    monkeypatch.setattr(proxy_handler, "PROXY_HOST", "0.0.0.0")
+    h = _FakeHandler({"Host": "0.0.0.0:8999"}, admin_token="tok-abc")
+    assert proxy_handler._admin_gate(h, "0.0.0.0:8999") is True
+
+
+def test_admin_auth_enabled_explicit_opt_out_on_loopback(monkeypatch):
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "0")
+    assert proxy_handler._admin_auth_enabled() is False
+
+
+def test_validate_safety_non_loopback_explicit_opt_out_empty_token_raises(monkeypatch):
+    """B1: opt-out + network bind + empty token → startup still refused."""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "0")
+    monkeypatch.setattr(proxy_handler, "_ADMIN_TOKEN", "")
+    monkeypatch.setattr(proxy_handler, "PROXY_HOST", "0.0.0.0")
+    with pytest.raises(RuntimeError):
+        proxy_handler._validate_admin_token_safety()
+
+
+def test_admin_gate_ipv6_loopback_host_accepted(monkeypatch):
+    """N1: "[::1]:8999" Host must resolve to ::1, not "[" (which 403'd)."""
+    monkeypatch.delenv("IFF_ADMIN_REQUIRED", raising=False)
+    monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+    h = _FakeHandler({"X-Admin-Token": "t", "Host": "[::1]:8999"}, admin_token="t")
+    assert proxy_handler._admin_gate(h, "[::1]:8999") is True
+    assert h.replied is None
+
+
+def test_admin_gate_ipv6_origin_accepted(monkeypatch):
+    """N1: bracketed IPv6 Origin netloc resolves to ::1 (write request)."""
+    h = _FakeHandler({"X-Admin-Token": "t", "Origin": "http://[::1]:8999"},
+                     admin_token="t")
+    assert proxy_handler._admin_gate(h, "[::1]:8999", write=True) is True
+
+
+def test_admin_gate_non_ascii_token_401_not_crash(monkeypatch):
+    """N3: latin-1 decoded header with non-ASCII → clean 401, no TypeError."""
+    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
+    h = _FakeHandler({"X-Admin-Token": "tök-énv"}, admin_token="tok-abc")
+    assert proxy_handler._admin_gate(h, "127.0.0.1:8999") is False
+    assert h.replied[1] == 401
+
+
+def test_born_token_write_failure_degrades_to_in_memory(tmp_path, monkeypatch, caplog):
+    """N4: read-only state dir → warn + continue with in-memory token, no raise."""
+    import logging
+    from inferfabric.cloud_discovery import SecretsManager
+    env_file = tmp_path / "secrets.env"
+    monkeypatch.delenv("IFF_ADMIN_TOKEN", raising=False)
+
+    def boom(self, key, value):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(SecretsManager, "write", boom)
+    with caplog.at_level(logging.WARNING, logger="inferfabric"):
+        token = proxy_handler._ensure_admin_token(env_file)
+    assert token, "in-memory born token must still be returned"
+    assert not env_file.exists()
+    assert any("persist" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_purge_pool_candidates_reads_born_token_from_secrets_env(tmp_path, monkeypatch):
+    """N2: no env token → CLI purge reads the born token from secrets.env."""
+    import inferfabric.uninstaller as un
+    env_file = tmp_path / "secrets.env"
+    env_file.write_text("IFF_ADMIN_TOKEN=born-secret-9\n")
+    env_file.chmod(0o600)
+    monkeypatch.delenv("IFF_ADMIN_TOKEN", raising=False)
+
+    captured = {}
+
+    class _FakeSM:
+        def __init__(self, path=None):
+            pass
+
+        def load(self):
+            return {"IFF_ADMIN_TOKEN": "born-secret-9"}
+
+    import inferfabric.cloud_discovery as cd
+    monkeypatch.setattr(cd, "SecretsManager", _FakeSM)
+
+    def _fake_admin_request(method, path, *, host, port, token, timeout):
+        captured["token"] = token
+        raise un.PoolsConfigError("stop here")
+
+    monkeypatch.setattr(un, "_admin_request", _fake_admin_request)
+    pools = tmp_path / "model_pools.yaml"
+    pools.write_text(
+        "pools:\n"
+        "  fabric-a:\n"
+        "    candidates:\n"
+        "      - id: c1\n"
+        "        kind: local\n"
+        "        model_name: m1\n"
+    )
+    try:
+        un.purge_pool_candidates(pools, {"m1"})
+    except un.PoolsConfigError:
+        pass
+    assert captured.get("token") == "born-secret-9"

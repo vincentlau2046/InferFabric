@@ -43,16 +43,28 @@ _ADMIN_TOKEN = os.environ.get("IFF_ADMIN_TOKEN", "")
 
 
 def _admin_auth_enabled():
-    """Control-plane auth flag (F7 pick): default OFF, opt-in strict mode.
+    """Control-plane auth flag (F7 pick): default OFF on loopback, opt-in strict mode.
 
     First-install experience on a loopback gateway wins — API keys authenticate
-    the cloud request path and must not gate local UI usage. Strict mode is
-    enabled explicitly via IFF_ADMIN_REQUIRED=1 (aliases: true/yes/on, case-
-    insensitive; legacy MACFABRIC_ADMIN_REQUIRED honored for fork parity).
+    the cloud request path and must not gate local UI usage. Explicit
+    IFF_ADMIN_REQUIRED=1 (aliases: true/yes/on, case-insensitive; legacy
+    MACFABRIC_ADMIN_REQUIRED honored for fork parity) enables strict mode;
+    explicit =0/false/no/off opts out.
+
+    Review PR#15 B1: a non-loopback bind defaults auth ON (unless explicitly
+    opted out). Born-token bootstrap means _ADMIN_TOKEN is never empty after
+    main(), which made the startup "empty token + non-loopback → refuse"
+    guard unreachable — without this default, a network-bound gateway in
+    default mode would expose the control plane unauthenticated.
     """
     for name in ("IFF_ADMIN_REQUIRED", "MACFABRIC_ADMIN_REQUIRED"):
-        if os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on"):
+        val = os.environ.get(name, "").strip().lower()
+        if val in ("1", "true", "yes", "on"):
             return True
+        if val in ("0", "false", "no", "off"):
+            return False
+    if PROXY_HOST not in ("127.0.0.1", "localhost", "::1"):
+        return True
     return False
 
 
@@ -75,29 +87,59 @@ def _ensure_admin_token(secrets_path=None):
     if not token:
         import secrets as _secrets
         token = _secrets.token_urlsafe(32)
-        sm.write("IFF_ADMIN_TOKEN", token)
+        try:
+            sm.write("IFF_ADMIN_TOKEN", token)
+        except OSError:
+            # Review PR#15 N4: read-only IFF_DATA_DIR must not crash-loop the
+            # gateway at startup. Degrade to the in-memory token (this process
+            # still enforces it); persistence resumes when the state dir is
+            # writable. Strict mode stays fail-closed via
+            # _validate_admin_token_safety (empty token → refuse to start).
+            log.warning(
+                "Could not persist born admin token to secrets.env — "
+                "continuing with an in-memory token for this process"
+            )
     return token
+
+
+def _host_hostname(netloc):
+    """Hostname from a Host/Origin netloc, bracket-aware (review PR#15 N1).
+
+    "[::1]:8999" → "::1"; the previous ``split(":")[0]`` turned it into "[",
+    403-ing every admin route for IPv6 loopback deployments (fail-closed but
+    unusable).
+    """
+    if netloc.startswith("["):
+        return netloc[1:].split("]")[0]
+    return netloc.split(":")[0]
 
 
 def _admin_gate(handler, expected_host, write=False):
     """F7 unified control-plane gate (pure function; _check_admin delegates).
 
-    Semantics: auth OFF by default (zero-friction first install on loopback);
-    strict mode (IFF_ADMIN_REQUIRED=1) is fail-closed — no/invalid token → 401.
+    Semantics: auth OFF by default on loopback (zero-friction first install);
+    ON for non-loopback binds unless IFF_ADMIN_REQUIRED is explicitly opted
+    out (review PR#15 B1). Strict mode (IFF_ADMIN_REQUIRED=1) is fail-closed —
+    no/invalid token → 401.
     Host/Origin checks apply in BOTH modes unconditionally: they block browser
     cross-site requests and DNS rebinding, not local usage.
     """
     loopback = ("127.0.0.1", "localhost", "::1")
     host = handler.headers.get("Host", "")
     origin = handler.headers.get("Origin")
-    host_ok = (not host) or host == expected_host or host.split(":")[0] in loopback
+    host_ok = (not host) or host == expected_host or _host_hostname(host) in loopback
     origin_ok = origin is None or (
         origin in (f"http://{expected_host}", f"https://{expected_host}")
-        or origin.split("//")[-1].split("/")[0].split(":")[0] in loopback)
+        or _host_hostname(origin.split("//")[-1].split("/")[0]) in loopback)
     if _admin_auth_enabled():
         token = handler.headers.get("X-Admin-Token", "")
         configured = getattr(handler, "_admin_token", "")
-        if not configured or not hmac.compare_digest(token, configured):
+        # compare bytes (review PR#15 N3): http.server decodes headers as
+        # latin-1; a non-ASCII token string would raise TypeError inside
+        # compare_digest and hang the connection instead of 401-ing.
+        if (not configured
+                or not hmac.compare_digest(token.encode("utf-8"),
+                                           configured.encode("utf-8"))):
             handler._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
             return False
     if not host_ok:
@@ -1613,7 +1655,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """Check admin token for control-plane routes (F7 unified gate).
         Returns True if allowed, False if denied (401/403 sent)."""
         self._admin_token = _ADMIN_TOKEN
-        return _admin_gate(self, f"{PROXY_HOST}:{PROXY_PORT}",
+        # Bracket IPv6 binds (review PR#15 N1): Host for "::1" is "[::1]:8999".
+        expected = (f"[{PROXY_HOST}]:{PROXY_PORT}" if ":" in PROXY_HOST
+                    else f"{PROXY_HOST}:{PROXY_PORT}")
+        return _admin_gate(self, expected,
                            write=self.command not in ("GET", "HEAD", "OPTIONS"))
 
     def _handle_switch(self, pm):
@@ -2704,7 +2749,11 @@ def _validate_admin_token_safety():
 
     F7 semantics: born-token bootstrap provisions the token before this check,
     so an empty _ADMIN_TOKEN in strict mode (IFF_ADMIN_REQUIRED=1) is a hard
-    failure (fail-closed double guard). Default mode stays open with a warning.
+    failure (fail-closed double guard). Default mode on loopback stays open
+    with a warning. Review PR#15 B1: on a non-loopback bind, default mode now
+    enables auth, so the retained non-loopback guard below only fires when
+    auth was *explicitly* opted out (IFF_ADMIN_REQUIRED=0) with no token —
+    exactly the operator action that must refuse to start.
     """
     if not _ADMIN_TOKEN:
         if _admin_auth_enabled():
@@ -2793,10 +2842,13 @@ def main():
 
     # F7 born-token: provision the control-plane token before the safety check
     # (0600 secrets.env under the state dir; idempotent, never rotated).
+    # Review PR#15 N2: do NOT seed os.environ with the token — engine
+    # subprocesses (vllm/sglang/docker) inherit the environment and would each
+    # receive the control-plane secret. In-process consumers read the module
+    # global; out-of-process consumers (e.g. iff remove) read secrets.env.
     from inferfabric.proxy_manager import IFF_DATA_DIR
     global _ADMIN_TOKEN
     _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
-    os.environ["IFF_ADMIN_TOKEN"] = _ADMIN_TOKEN
     _validate_admin_token_safety()
 
     mgr = ProxyManager()

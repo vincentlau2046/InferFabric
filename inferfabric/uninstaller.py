@@ -317,7 +317,19 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
 
     host = host or os.environ.get("EDGE_PROXY_HOST", "127.0.0.1")
     port = int(port or os.environ.get("EDGE_PROXY_PORT", "8999"))
-    token = token if token is not None else os.environ.get("IFF_ADMIN_TOKEN", "")
+    if token is None:
+        # Review PR#15 N2: the proxy no longer seeds IFF_ADMIN_TOKEN into the
+        # environment (it leaked to engine subprocesses). A born token lives in
+        # the state-dir secrets.env — same priority as the proxy's own
+        # bootstrap: explicit env > secrets.env (legacy alias honored).
+        token = os.environ.get("IFF_ADMIN_TOKEN", "")
+        if not token:
+            try:
+                from inferfabric.cloud_discovery import SecretsManager
+                data = SecretsManager().load()
+                token = data.get("IFF_ADMIN_TOKEN") or data.get("MACFABRIC_ADMIN_TOKEN", "")
+            except OSError:
+                token = ""
 
     last_err = None
     for _attempt in range(2):   # one refresh+retry on revision conflict
