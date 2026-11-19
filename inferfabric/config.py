@@ -478,6 +478,9 @@ class ModelConfig:
     # MACFABRIC P1: 上游引擎是否原生支持 Anthropic /v1/messages。
     # true → 透传（llama-server b12361）；false → 走 anthropic_bridge 翻译层。
     anthropic_native: bool = False
+    # F9/T3（unification）：开机自动拉起。默认 False（用户裁决：不自动
+    # 启动是安全缺省）；仅 models.d YAML 顶层 autostart: true 生效。
+    autostart: bool = False
 
     # R7: 多副本端口列表（如 [8002, 8003]；为空时使用 type 对应 config 的 port）
     replicas: list[int] = field(default_factory=list)
@@ -928,6 +931,7 @@ def load_models(models_dir: Path = MODELS_DIR, include_applied: bool = True) -> 
             deployment=raw.get("deployment", ""),
             managed_by_pack=raw.get("managed_by_pack"),
             anthropic_native=bool(raw.get("anthropic_native", False)),
+            autostart=bool(raw.get("autostart", False)),
         )
         # 场景预设（iff tune）: 顶层 presets（内联兜底）+ 源 YAML 路径。
         # active_preset 不从 YAML 读——应用层（APPLIED_SCENARIOS_FILE）是单一来源。

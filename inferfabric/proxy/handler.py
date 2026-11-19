@@ -401,6 +401,7 @@ _POST_ROUTES = {
     "/reload-config":          _admin(lambda h, pm: h._handle_reload_config(pm)),
     "/admin/cache/toggle":     _admin(lambda h, pm: h._handle_cache_toggle(pm)),
     "/admin/auto-switch/toggle": _admin(lambda h, pm: h._handle_auto_switch_toggle(pm)),
+    "/admin/models/set-autostart": _admin(lambda h, pm: h._handle_set_autostart(pm)),
     "/admin/gpu-clear":        _admin(lambda h, pm: h._handle_gpu_clear(pm)),
     "/api/agents":             _admin(lambda h, pm: h._handle_post_agents(pm)),
     "/api/agents/reclassify":  _admin(lambda h, pm: h._handle_reclassify(pm)),
@@ -2377,6 +2378,53 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         result = pm.mgr.pull_model(name, framework)
         self._send_json(result)
 
+    def _handle_set_autostart(self, pm):
+        """POST /admin/models/set-autostart {name, enabled} — 改 models.d YAML
+        autostart 字段 + 热重载（F9/T3，fork 移植）。默认 False（不自动启动）。
+
+        行级编辑保持 YAML 可读性（注释/键序不动）；autostart 缺失时插到
+        首个顶级 name: 之后。"""
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        enabled = bool((data or {}).get("enabled", False))
+        model = pm.mgr._models.get(name)
+        if model is None:
+            self._send_json({"error": "Unknown model: " + name}, 404)
+            return
+        yaml_path = getattr(model, "yaml_path", None)
+        if not yaml_path or not Path(yaml_path).exists():
+            self._send_json({"error": "YAML not found: " + str(yaml_path)}, 404)
+            return
+        try:
+            text = Path(yaml_path).read_text()
+            lines = text.split("\n")
+            flag_line = "autostart: " + ("true" if enabled else "false")
+            replaced = False
+            out = []
+            for ln in lines:
+                if ln.startswith("autostart:"):
+                    out.append(flag_line)
+                    replaced = True
+                else:
+                    out.append(ln)
+            if not replaced:
+                for i, ln in enumerate(out):
+                    if ln.startswith("name:"):
+                        out.insert(i + 1, flag_line)
+                        break
+            Path(yaml_path).write_text("\n".join(out))
+        except Exception as e:
+            self._send_json({"error": "YAML update failed: " + str(e)}, 500)
+            return
+        # 上游热重载走 config_reloader（连带 dashboard 缓存失效）；
+        # 裸 fake pm（单测）回落 mgr 直调。
+        if getattr(pm, "config_reloader", None):
+            pm.config_reloader.reload_models()
+        elif hasattr(pm.mgr, "reload_models"):
+            pm.mgr.reload_models()
+        log.info("Autostart %s -> %s", name, enabled)
+        self._send_json({"status": "ok", "model": name, "autostart": enabled})
+
     def _handle_cache_toggle(self, pm):
         """POST /admin/cache/toggle — 切换响应缓存开关。"""
         from inferfabric.proxy.response_cache import ResponseCache
@@ -3508,6 +3556,26 @@ def main():
     config_reloader = build_config_reloader(mgr, auth=mgr.auth, cloud=mgr.cloud)
     mgr.config_reloader = config_reloader
     config_reloader.setup()
+
+    # F9/T3（unification，fork 移植）：autostart 模型开机拉起。
+    # 默认 False —— 不自动启动是安全缺省；best-effort 逐个 switch，
+    # 失败仅记日志不阻断网关启动。
+    def _autostart_models():
+        time.sleep(2)  # 等服务端口就绪
+        for m in mgr.mgr._models.values():
+            if not getattr(m, "autostart", False):
+                continue
+            name = m.name
+            if name in mgr.mgr.active_services:
+                continue
+            log.info("Autostart: launching %s (autostart: true)", name)
+            try:
+                result = mgr.mgr.switch(name)
+                log.info("Autostart %s -> %s", name, result.get("status"))
+            except Exception as e:
+                log.error("Autostart %s failed: %s", name, e)
+    threading.Thread(target=_autostart_models, daemon=True,
+                     name="inferfabric-autostart").start()
 
     def watchdog_loop():
         while not shutdown_event.is_set():
