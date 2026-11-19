@@ -32,10 +32,15 @@ class LlamaCppProcessManager(BaseProcessManager):
             return {"status": "error", "message": f"GGUF model not found: {model_path}"}
 
         # ── Select llama-server binary by GPU offload mode ──
-        # gpu_layers != 0 → CUDA build (GPU offload)
+        # binary_path (pack-bundled engine) takes priority when set;
+        # otherwise gpu_layers != 0 → CUDA build (GPU offload),
         # gpu_layers == 0 → CPU-only build (no CUDA runtime overhead)
         llama_cpp_base = Path.home() / "llama-cpp"
-        if cfg.gpu_layers != 0:
+        if getattr(cfg, "binary_path", ""):
+            llama_server = Path(cfg.binary_path).expanduser()
+            if not llama_server.exists():
+                return {"status": "error", "message": f"llama-server not found at {llama_server} (binary_path)"}
+        elif cfg.gpu_layers != 0:
             llama_server = llama_cpp_base / "build-cuda" / "bin" / "llama-server"
             if not llama_server.exists():
                 return {"status": "error", "message": f"CUDA llama-server not found at {llama_server}"}

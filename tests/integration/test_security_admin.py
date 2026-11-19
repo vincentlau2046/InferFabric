@@ -38,6 +38,7 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
     store = KeyStore(tmp_path / 'security.db', provision=True)
     set_password(store, 'isolated-test-password')
     pm = MagicMock()
+    pm.pack_manager = None   # F4 gate: MagicMock auto-attrs would trip the pack-uninstall 503
     pm.auth = SecurityAuth(AuthManager(), store)
     pm.pool_registry.snapshot.return_value.pools = {}
     pm.agent_registry = None

@@ -53,6 +53,7 @@ def _fake_pm():
     pm = MagicMock()
     pm.new_request_id.return_value = "iff-test"
     pm.auth.enabled = False
+    pm.pack_manager = None   # F4 gate: MagicMock auto-attrs would trip the pack-uninstall 503
     pm._runtime_config = {"cache": {"enabled": True}}
     pm.response_cache = _FakeCache()
     return pm

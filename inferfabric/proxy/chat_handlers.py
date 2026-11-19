@@ -202,6 +202,16 @@ def handle_chat(handler, pm, data):
     if not model:
         handler._send_json({"error": "model field is required", "status": "bad_request"}, 400)
         return
+
+    # PK4 T1: pack uninstall in flight → 503 pack_uninstalling (before
+    # auth/pool/local dispatch; disable precedes delete in the uninstall
+    # state machine — this is the 503 decision point for new requests)
+    _pack_pm = getattr(pm, "pack_manager", None)
+    if _pack_pm is not None and _pack_pm.is_model_disabled(model):
+        handler._send_json(
+            {"error": "pack_uninstalling", "status": "pack_uninstalling"}, 503)
+        return
+
     log.debug("Incoming request: model=%s", model)
 
     # PR-B: Request context for logging

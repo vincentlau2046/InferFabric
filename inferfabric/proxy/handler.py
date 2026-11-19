@@ -35,6 +35,7 @@ from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.anomaly_collector import AnomalyEvent
+from inferfabric.proxy import pack_handlers
 
 # Admin token for control-plane routes (/switch, /stop, /deploy, /pull, etc.)
 # If set, requests must include X-Admin-Token header matching this value.
@@ -353,6 +354,12 @@ _GET_ROUTES = {
     # 旧 /engine_metrics 保留做向后兼容。
     "/api/engine_metrics":     lambda h, pm: h._handle_engine_metrics(pm),
     "/watchdog_status":         lambda h, pm: _handle_watchdog_status(h),
+    "/admin/packs/download-status": _admin(lambda h, pm: h._send_json(_pack_downloads_snapshot())),
+    # Capability packs Catalog/transactions — install accepts Catalog pack_id only
+    "/admin/packs/catalog":    _admin(lambda h, pm: h._handle_pack_catalog(pm)),
+    "/admin/packs/status":     _admin(lambda h, pm: h._handle_pack_status(pm)),
+    "/admin/packs/policy":     _admin(lambda h, pm: h._handle_pack_policy_get(pm)),
+    "/admin/packs/uninstall-preview": _admin(lambda h, pm: h._handle_pack_uninstall_preview(pm)),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
@@ -411,12 +418,147 @@ _POST_ROUTES = {
     "/admin/model-pools/toggle": _admin(lambda h, pm: mp_admin.handle_post_model_pools_toggle(h, pm)),
     "/v1/embeddings":           lambda h, pm: h._handle_embeddings(pm),
     "/v1/rerank":               lambda h, pm: h._handle_rerank(pm),
+    # ─── Admin: Capability Packs (F4) ─────────────────────────────
+    "/admin/packs/install":    _admin(lambda h, pm: h._handle_pack_install(pm)),
+    "/admin/packs/uninstall":  _admin(lambda h, pm: h._handle_pack_uninstall(pm)),
+    "/admin/packs/custom":     _admin(lambda h, pm: h._handle_pack_custom(pm)),
+    # Legacy /admin/packs/download kept as-is (user-imported model path).
+    "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
+    "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
 }
 
 _DELETE_ROUTES = {
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/api/agents":             _admin(lambda h, pm: h._handle_delete_agent(pm)),
 }
+
+# ─── Legacy pack download state (user-imported model path) ────────
+
+_PACK_DOWNLOADS: dict = {}
+_PACK_DL_LOCK = threading.Lock()
+
+# Zero system installs; uninstalls go through _handle_pack_uninstall's engine-unit
+# refcount teardown.
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_WHISPER_SRC = _REPO_ROOT / "engines/whisper/whisper.cpp"
+_WHISPER_BIN = _WHISPER_SRC / "build/bin/whisper-server"
+_WHISPER_CMAKE = (_REPO_ROOT / "engines/_tools/cmake-3.31.6-macos10.10-universal/"
+                  "CMake.app/Contents/bin/cmake")
+
+
+def _ensure_whisper_engine(st: dict) -> tuple[bool, str]:
+    """Skip if the whisper-server binary exists; otherwise build in background
+    (progress written to st.detail/log_tail)."""
+    if _WHISPER_BIN.exists():
+        return True, "cached"
+    if not _WHISPER_SRC.exists():
+        return False, f"whisper.cpp source missing: {_WHISPER_SRC}"
+    import subprocess as _sp
+    env = dict(os.environ)
+    env["PATH"] = str(_WHISPER_CMAKE.parent) + ":" + env.get("PATH", "")
+    for label, argv in (
+            ("cmake 配置…", [str(_WHISPER_CMAKE), "-B", "build",
+                             "-DWHISPER_BUILD_EXAMPLES=ON", "-DWHISPER_BUILD_TESTS=OFF",
+                             "-DGGML_METAL=ON"]),
+            ("编译中…", [str(_WHISPER_CMAKE), "--build", "build",
+                         "--config", "Release", "-j", "8",
+                         "--target", "whisper-server"])):
+        st["detail"] = label
+        proc = _sp.run(argv, cwd=str(_WHISPER_SRC), env=env,
+                       capture_output=True, text=True, timeout=1800)
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-2000:]
+            st["log_tail"] = tail
+            return False, f"{label} exit={proc.returncode}: {tail[-300:]}"
+    if not _WHISPER_BIN.exists():
+        return False, "build finished but whisper-server not found"
+    return True, "built"
+
+
+def _install_whisper_pack(pm, name: str, model_file: Path) -> dict:
+    """Write asr_server yaml (Metal whisper-server, OpenAI-compatible
+    /v1/audio/transcriptions) + hot reload. Explicit absolute paths
+    (isolation rule: never probe conda)."""
+    yaml_path = Path(pm.mgr.models_dir) / f"{name}.yaml"
+    if name in pm.mgr._models:
+        return {"status": "already_configured", "message": name}
+    content = f"""name: {name}
+description: "whisper.cpp ASR (Metal, OpenAI-compatible /v1/audio/transcriptions)"
+type: asr_server
+gpu_role: none
+model_type: asr
+ledger_mode: on_demand
+asr_server:
+  conda_env: whisper            # python_bin declared explicitly → no conda probe (isolation)
+  python_bin: {_WHISPER_BIN}
+  port: 8881
+  working_dir: {_WHISPER_SRC / "build/bin"}
+  health_url: "http://127.0.0.1:8881/health"
+  health_check_timeout: 180
+  start_cmd: "{_WHISPER_BIN} --model {model_file} --host 127.0.0.1 --port 8881 --inference-path /v1/audio/transcriptions"
+"""
+    yaml_path.write_text(content, encoding="utf-8")
+    pm.mgr.reload_models()
+    return {"status": "installed", "message": f"{name} installed (not started)"}
+
+
+def _pack_download_state(name: str) -> dict:
+    with _PACK_DL_LOCK:
+        return _PACK_DOWNLOADS.setdefault(name, {})
+
+def _pack_downloads_snapshot() -> dict:
+    with _PACK_DL_LOCK:
+        return {k: dict(v) for k, v in _PACK_DOWNLOADS.items()}
+
+
+def _collect_engine_refs(model) -> tuple[str | None, list]:
+    """Collect engine units and file paths referenced by a model config
+    (containerized uninstall decision).
+
+    Returns: (engine_unit_name | None, [absolute paths]).
+    engine_unit = first-level dir name under <repo>/engines/; absolute and
+    relative paths both collected (relative resolved against the repo root
+    first, cwd as fallback).
+    """
+    from dataclasses import fields, is_dataclass
+    repo_root = Path(__file__).resolve().parents[3]
+    engines_root = (repo_root / "engines").resolve()
+    candidates: list[Path] = []
+
+    def _walk(obj):
+        if not is_dataclass(obj):
+            return
+        for f in fields(obj):
+            try:
+                v = getattr(obj, f.name)
+            except Exception:
+                continue
+            if isinstance(v, (str, Path)) and str(v):
+                sv = str(v)
+                if sv.startswith("/"):
+                    candidates.append(Path(sv))
+                elif not sv.startswith("~") and "/" in sv or sv.endswith((".gguf", ".onnx", ".bin")):
+                    # Relative path: resolve against repo root (cwd=repo root convention)
+                    candidates.append(repo_root / sv)
+            elif is_dataclass(v):
+                _walk(v)
+
+    _walk(model)
+    engine_unit = None
+    resolved: list[Path] = []
+    for p in candidates:
+        try:
+            rp = p.resolve()
+        except OSError:
+            continue
+        resolved.append(rp)
+        if engines_root in rp.parents:
+            rel = rp.relative_to(engines_root)
+            unit = rel.parts[0] if rel.parts else None
+            if unit and engine_unit is None:
+                engine_unit = unit
+    return engine_unit, resolved
 
 # Helper for watchdog route
 def _handle_watchdog_status(handler):
@@ -571,6 +713,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         original_model = data.get("model", "")
         auth_header = self.headers.get("Authorization", "") or self.headers.get("x-api-key", "")
+
+        # PK4 T1: pack uninstall in flight → 503 pack_uninstalling
+        # (before auth/pool/local dispatch)
+        _pack_pm = getattr(pm, "pack_manager", None)
+        if _pack_pm is not None and original_model and \
+                _pack_pm.is_model_disabled(original_model):
+            self._send_json(
+                {"error": "pack_uninstalling",
+                 "status": "pack_uninstalling"}, 503)
+            return
 
         # PR-B: Request context for logging
         req_id = pm.new_request_id()
@@ -1660,6 +1812,282 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     else f"{PROXY_HOST}:{PROXY_PORT}")
         return _admin_gate(self, expected,
                            write=self.command not in ("GET", "HEAD", "OPTIONS"))
+
+    def _handle_pack_catalog(self, pm):
+        self._send_json(pack_handlers.get_pack_manager().catalog_payload())
+
+    def _handle_pack_status(self, pm):
+        self._send_json(pack_handlers.get_pack_manager().status_payload())
+
+    def _handle_pack_policy_get(self, pm):
+        code, payload = pack_handlers.get_pack_manager().policy_get()
+        self._send_json(payload, code)
+
+    def _handle_pack_policy_post(self, pm):
+        data = self._read_body()
+        code, payload = pack_handlers.get_pack_manager().policy_put(data or {})
+        self._send_json(payload, code)
+
+    # ─── Capability pack uninstall preview (F2) ──────────────────────
+    def _handle_pack_uninstall_preview(self, pm):
+        from urllib.parse import parse_qs
+        qs = parse_qs(urlparse(self.path).query)
+        pack_id = (qs.get("pack_id") or [""])[0]
+        code, payload = pack_handlers.get_pack_manager().preview_uninstall(pack_id)
+        self._send_json(payload, code)
+
+    def _handle_pack_custom(self, pm):
+        """POST /admin/packs/custom — user-extended capability pack
+        (unified-architecture ruling 2026-11-16).
+
+        body: {name, url, capability, sha256?}; validation chain runs in a
+        background thread; progress/result surface through the existing
+        /admin/packs/status state machine.
+        """
+        data = self._read_body()
+        code, payload = pack_handlers.get_pack_manager().start_custom_install(
+            data)
+        self._send_json(payload, code)
+
+    def _handle_pack_uninstall(self, pm):
+        """Uninstall entry split: body with ``pack_id`` → capability pack
+        state machine; otherwise legacy flow (user model / discovery artifact
+        cleanup, kept as-is)."""
+        data = self._read_body()
+        if data and data.get("pack_id"):
+            code, payload = pack_handlers.get_pack_manager().uninstall(
+                str(data["pack_id"]), bool(data.get("confirmed")))
+            self._send_json(payload, code)
+            return
+        self._handle_pack_uninstall_legacy(pm)
+
+    def _handle_pack_uninstall_legacy(self, pm):
+        """Legacy uninstall — end-to-end "containerized" cleanup:
+
+        stop service → delete models.d/<name>.yaml → hot reload
+        → model file cleanup (project models/ only; ~/models user data untouched)
+        → engine unit refcount hitting zero removes the whole directory
+        (isolated env torn down entirely, zero system residue)
+        → pool linkage: purge local candidates referencing the model.
+        """
+        data = self._read_body()
+        if data is None:
+            return
+        name = data.get("name", "")
+        if not name:
+            self._send_json({"error": "Missing name"}, 400)
+            return
+        model = pm.mgr._models.get(name)
+        if model is None:
+            self._send_json({"error": f"Unknown model: {name}"}, 404)
+            return
+        # Collect paths referenced by the model (engine unit + model files)
+        engine_unit, owned_files = _collect_engine_refs(model)
+        # Stop if running (shared/independent both go through stop_service)
+        stopped = None
+        if name in pm.mgr.active_services:
+            stopped = pm.mgr.stop_service(name)
+        yaml_path = getattr(model, "yaml_path", None)
+        if not yaml_path or not Path(yaml_path).exists():
+            self._send_json({"error": f"YAML not found: {yaml_path}"}, 404)
+            return
+        try:
+            Path(yaml_path).unlink()
+        except Exception as e:
+            self._send_json({"error": f"Delete failed: {e}"}, 500)
+            return
+        # D1: next switch re-reads models.d; reload here so the list takes
+        # effect immediately (must go through mgr.reload_models: syncs
+        # _gpu_state/_lifecycle references)
+        pm.mgr.reload_models()
+
+        # Model file cleanup: only files under the project models/ dir
+        removed_files = []
+        repo_root = Path(__file__).resolve().parents[3]
+        project_models = repo_root / "models"
+        for f in owned_files:
+            try:
+                rp = f.resolve()
+                if project_models == rp or project_models in rp.parents:
+                    if rp.is_file():
+                        rp.unlink()
+                        removed_files.append(str(rp))
+            except OSError:
+                continue
+
+        # Engine unit teardown: after reload, no remaining model references
+        # engines/<unit>/ → remove the whole directory
+        removed_engine = None
+        if engine_unit is not None:
+            still_used = False
+            for m in pm.mgr._models.values():
+                try:
+                    u, _ = _collect_engine_refs(m)
+                    if u == engine_unit:
+                        still_used = True
+                        break
+                except Exception:
+                    continue
+            target = repo_root / "engines" / engine_unit
+            if not still_used and target.is_dir() and target.parent.name == "engines" \
+                    and target.parent.resolve() == (repo_root / "engines").resolve():
+                import shutil
+                shutil.rmtree(target, ignore_errors=True)
+                removed_engine = str(target)
+
+        # Pool linkage: purge local candidates referencing the model
+        # (source module deleted → pools auto-sync)
+        purged, pool_rev = 0, None
+        try:
+            purged, pool_rev = pm.pool_registry.purge_candidates(
+                lambda c: c.get("kind") == "local" and c.get("model_name") == name)
+        except Exception as e:
+            log.warning("pool purge after uninstall %s failed: %s", name, e)
+
+        log.info("Pack uninstalled: %s (stopped=%s, files=%d, engine=%s, pool_purged=%d)",
+                 name, bool(stopped), len(removed_files), removed_engine, purged)
+        self._send_json({"status": "uninstalled", "model": name,
+                         "stopped": bool(stopped),
+                         "removed_model_files": removed_files,
+                         "removed_engine_dir": removed_engine,
+                         "pool_candidates_purged": purged})
+
+    def _handle_pack_download(self, pm):
+        """POST /admin/packs/download {name, url, filename, model_type_label?}
+
+        One-click pack install (legacy path):
+        1. models.d/<name>.yaml exists → already_configured
+        2. model file already at <repo>/models/<filename> → skip download
+        3. otherwise background streaming download (.part → atomic rename),
+           GET /admin/packs/download-status for progress; auto install_model
+           on completion (writes YAML only, does not start).
+        """
+        import threading as _threading
+        import urllib.request as _ureq
+        data = self._read_body()
+        name = ((data or {}).get("name") or "").strip()
+        url = ((data or {}).get("url") or "").strip()
+        filename = ((data or {}).get("filename") or "").strip()
+        label = ((data or {}).get("model_type_label") or "").strip()
+        engine = ((data or {}).get("engine") or "").strip()   # "whisper" → build engine first
+        if not name or not url or not filename:
+            self._send_json({"error": "name/url/filename required"}, 400)
+            return
+        if "/" in filename or ".." in filename:
+            self._send_json({"error": "invalid filename"}, 400)
+            return
+        if not self._validate_cloud_test_url(url, pm)[0] and not url.startswith("https://"):
+            self._send_json({"error": "invalid url"}, 400)
+            return
+        if name in pm.mgr._models:
+            self._send_json({"status": "already_configured", "model": name})
+            return
+        dest_dir = Path(self._pack_models_dir(pm))
+        dest = dest_dir / filename
+        if engine != "whisper" and dest.exists() and dest.stat().st_size > 0:
+            result = pm.mgr.install_model(name, "llama_cpp", model_type_label=label)
+            self._send_json(result)
+            return
+        if _pack_download_state(name).get("status") == "downloading":
+            self._send_json({"status": "already_downloading", "model": name})
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        def _worker():
+            _pack_download_state(name).update(status="downloading", downloaded=0, total=0,
+                                              error="", started=time.time())
+            try:
+                # ── Engine stage (ASR end-to-end): in-project whisper-server build (Metal) ──
+                if engine == "whisper":
+                    st = _pack_download_state(name)
+                    st.update(status="building", detail="检查引擎…", error="")
+                    ok, msg = _ensure_whisper_engine(st)
+                    if not ok:
+                        st.update(status="error", error=f"引擎构建失败: {msg[:300]}")
+                        return
+                    if not dest.exists() or dest.stat().st_size == 0:
+                        st.update(status="downloading", detail="下载模型…")
+                        req = _ureq.Request(url, headers={"User-Agent": "InferFabric/1.0"})
+                        with _ureq.urlopen(req, timeout=60) as resp:
+                            total = int(resp.headers.get("Content-Length") or 0)
+                            st["total"] = total
+                            tmp = dest.with_suffix(".part")
+                            done = 0
+                            with open(tmp, "wb") as f:
+                                while True:
+                                    chunk = resp.read(1024 * 1024)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    done += len(chunk)
+                                    st["downloaded"] = done
+                            tmp.rename(dest)
+                    st.update(status="installing", detail="写配置…")
+                    result = _install_whisper_pack(pm, name, dest)
+                    st["status"] = ("installed" if result.get("status") in
+                                    ("installed", "already_configured") else "error")
+                    st["error"] = result.get("message", "")
+                    log.info("ASR pack install %s: %s", name, result)
+                    return
+                req = _ureq.Request(url, headers={"User-Agent": "InferFabric/1.0"})
+                with _ureq.urlopen(req, timeout=60) as resp:
+                    total = int(resp.headers.get("Content-Length") or 0)
+                    _pack_download_state(name)["total"] = total
+                    tmp = dest.with_suffix(".part")
+                    done = 0
+                    with open(tmp, "wb") as f:
+                        while True:
+                            chunk = resp.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            done += len(chunk)
+                            _pack_download_state(name)["downloaded"] = done
+                    tmp.rename(dest)
+                _pack_download_state(name)["status"] = "installing"
+                result = pm.mgr.install_model(name, "llama_cpp", model_type_label=label)
+                _pack_download_state(name)["status"] = (
+                    "installed" if result.get("status") in ("installed", "already_configured")
+                    else "error")
+                _pack_download_state(name)["error"] = result.get("message", "")
+                log.info("Pack download+install %s: %s", name, result)
+            except Exception as e:
+                log.error("Pack download %s failed: %s", name, e)
+                _pack_download_state(name).update(status="error", error=str(e)[:300])
+                dest.with_suffix(".part").unlink(missing_ok=True)
+
+        _threading.Thread(target=_worker, daemon=True, name=f"pack-dl-{name}").start()
+        self._send_json({"status": "download_started", "model": name})
+
+    def _pack_models_dir(self, pm) -> str:
+        models_dir = Path(pm.mgr.models_dir)
+        try:
+            return str(models_dir.parents[1] / "models")
+        except IndexError:
+            return str(Path.home() / "models")
+
+    def _handle_pack_install(self, pm):
+        """Install entry split (spec §6.1 ruling):
+
+        - body with ``pack_id`` → capability pack transaction (Catalog-only,
+          URL/hash provided by the backend)
+        - otherwise legacy flow: local discovery artifact writes models.d YAML
+          (user-imported model path, kept as-is)
+        """
+        data = self._read_body()
+        if data and data.get("pack_id"):
+            code, payload = pack_handlers.get_pack_manager().start_install(
+                str(data["pack_id"]))
+            self._send_json(payload, code)
+            return
+        name = ((data or {}).get("name") or "").strip()
+        model_type = ((data or {}).get("type") or "llama_cpp").strip()
+        if not name:
+            self._send_json({"error": "Missing name"}, 400)
+            return
+        result = pm.mgr.install_model(name, model_type)
+        code = 200 if result.get("status") in ("installed", "already_configured") else 400
+        self._send_json(result, code)
 
     def _handle_switch(self, pm):
         data = self._read_body()
@@ -2861,6 +3289,14 @@ def main():
     server = _create_server()
     server.proxy_mgr = mgr
     server.watchdog = watchdog
+    # PK4 T1: pack uninstall production wiring (real callback injection +
+    # pm.pack_manager mount)
+    from inferfabric.proxy.pack_handlers import attach_pack_uninstaller
+    try:
+        attach_pack_uninstaller(mgr)
+    except Exception as exc:   # wiring failure must not block gateway start; uninstall API will honestly 404
+        logging.getLogger("inferfabric.packs").warning(
+            "pack uninstaller attach failed: %s", exc)
 
     _notify_socket = os.environ.get('NOTIFY_SOCKET')
     _notify_enabled = bool(_notify_socket)
