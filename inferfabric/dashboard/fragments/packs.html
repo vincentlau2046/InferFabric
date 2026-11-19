@@ -1,0 +1,79 @@
+<div class="tab-content" id="tab-packs">
+  <!-- 能力包：目录/装机状态/策略/自定义安装（packs.js 渲染，无 inline onclick） -->
+  <div class="if-card" id="pkCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">能力包</span>
+      <span class="if-card-sub">下载 · 装机 · 卸载 · 进度（阶段指示，不显示下载字节数）</span>
+    </div>
+    <div class="if-card-body">
+      <!-- 装机状态（packs.js 注入；tab 激活时 2s 轮询 /admin/packs/status） -->
+      <div id="pkStatus">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+      <!-- 目录（packs.js 注入；惰性加载 /admin/packs/catalog） -->
+      <div id="pkCatalog">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="if-card" id="pkPolicyCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">装机策略</span>
+      <span class="if-card-sub">准入预算与系统保留（保存后对后续装机即时生效）</span>
+    </div>
+    <div class="if-card-body">
+      <div class="if-grid">
+        <div class="col-6">
+          <label class="if-field-label" for="pkPolicyMaxB">最大模型参数量（B）</label>
+          <input type="number" id="pkPolicyMaxB" class="if-input" min="1" step="1">
+          <p class="if-field-hint">≥1 的整数；超限模型不予装机。</p>
+        </div>
+        <div class="col-6">
+          <label class="if-field-label" for="pkPolicyReserve">系统保留内存（MiB）</label>
+          <input type="number" id="pkPolicyReserve" class="if-input" min="1024" max="65536" step="1">
+          <p class="if-field-hint">范围 [1024, 65536] MiB；参与预算 B = RAM − 保留。</p>
+        </div>
+      </div>
+      <button type="button" class="btn btn-pri btn-sm" data-action="save-policy">保存策略</button>
+    </div>
+  </div>
+
+  <div class="if-card" id="pkCustomCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">自定义包安装</span>
+      <span class="if-card-sub">URL 拉取 → 校验链 → 隔离健康检查；进度走装机状态区</span>
+    </div>
+    <div class="if-card-body">
+      <div class="if-grid">
+        <div class="col-6">
+          <label class="if-field-label" for="pkCustomName">名称</label>
+          <input type="text" id="pkCustomName" class="if-input" placeholder="my-model-4b">
+        </div>
+        <div class="col-6">
+          <label class="if-field-label" for="pkCustomCap">能力</label>
+          <select id="pkCustomCap" class="if-input">
+            <option value="llm">llm</option>
+            <option value="vl">vl</option>
+            <option value="embedding">embedding</option>
+            <option value="rerank">rerank</option>
+            <option value="asr">asr</option>
+            <option value="tts">tts</option>
+            <option value="ocr">ocr</option>
+          </select>
+        </div>
+        <div class="col-6">
+          <label class="if-field-label" for="pkCustomUrl">下载 URL</label>
+          <input type="text" id="pkCustomUrl" class="if-input" placeholder="https://…/model.gguf">
+        </div>
+        <div class="col-6">
+          <label class="if-field-label" for="pkCustomSha">SHA256（可选）</label>
+          <input type="text" id="pkCustomSha" class="if-input" placeholder="留空跳过强校验">
+        </div>
+      </div>
+      <button type="button" class="btn btn-pri btn-sm" data-action="custom-install">开始安装</button>
+    </div>
+  </div>
+
+  <div id="pkModal"></div>
+</div>

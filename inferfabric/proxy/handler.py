@@ -2857,8 +2857,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": f"Invalid action '{action}' — expected "
                                       f"{'/'.join(sorted(valid_actions))}"}, 400)
             return
-        # 能力标签：只收 bool；tag 必须至少带一个（否则为空操作）
-        caps = {}
+        # 能力标签：bool；属性编辑：context_window/max_output_tokens 取 int、
+        # price_input/price_output 取数值（None/空 = 清除属性，update_model_spec 语义）。
+        # tag 必须至少带一个可接受键（否则为空操作）。
+        caps: dict = {}
         for key in ("supports_vision", "supports_tools"):
             if key in data:
                 val = data[key]
@@ -2866,6 +2868,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self._send_json({"error": f"'{key}' must be a boolean"}, 400)
                     return
                 caps[key] = val
+        for key in ("context_window", "max_output_tokens"):
+            if key in data:
+                val = data[key]
+                if val is None or val == "":
+                    caps[key] = None
+                elif isinstance(val, bool) or not isinstance(val, int):
+                    self._send_json({"error": f"'{key}' must be an integer"}, 400)
+                    return
+                else:
+                    caps[key] = val
+        for key in ("price_input", "price_output"):
+            if key in data:
+                val = data[key]
+                if val is None or val == "":
+                    caps[key] = None
+                elif isinstance(val, bool) or not isinstance(val, (int, float)):
+                    self._send_json({"error": f"'{key}' must be a number"}, 400)
+                    return
+                else:
+                    caps[key] = float(val)
         if action == "tag" and not caps:
             self._send_json({"error": "tag requires supports_vision and/or "
                                       "supports_tools"}, 400)
