@@ -1,0 +1,46 @@
+<div class="tab-content" id="tab-security">
+  <!-- 鉴权：状态三态 / 密钥管理 / 一次性明文回显（security.js 渲染，无 inline onclick） -->
+  <div class="if-card" id="secStatusCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">鉴权状态</span>
+      <span class="if-card-sub">密钥存储 / 新策略 / 实际拦截 三态分立 — off 是迁移宽限，不等于无需鉴权</span>
+    </div>
+    <div class="if-card-body">
+      <div id="secStatus">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+      <div class="if-grid" style="margin-top:12px">
+        <button type="button" class="btn btn-pri btn-sm" data-action="sec-enable">开启鉴权</button>
+        <button type="button" class="btn btn-sec btn-sm" data-action="sec-disable">关闭新策略</button>
+      </div>
+      <p class="if-field-hint" id="secEnableHint" style="margin-top:8px"></p>
+    </div>
+  </div>
+
+  <div class="if-card" id="secKeysCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">API 密钥</span>
+      <span class="if-card-sub">库内只存摘要 — 明文仅在创建时回显一次</span>
+    </div>
+    <div class="if-card-body">
+      <div id="secKeys">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+      <div class="if-grid" style="margin-top:12px">
+        <input type="text" id="secKeyName" class="if-input" placeholder="key 名称（默认 macfabric-app）" style="max-width:280px">
+        <button type="button" class="btn btn-pri btn-sm" data-action="sec-create-key">创建密钥</button>
+      </div>
+      <!-- 一次性明文回显区：textContent 渲染；切页/关闭/Esc 即清空 -->
+      <div id="secReveal" class="if-grid" style="display:none;margin-top:12px">
+        <p class="if-field-hint">⚠ 明文仅本次显示 — 请立即复制保存，关闭后无法找回：</p>
+        <p class="mono" id="secRevealToken" style="word-break:break-all;user-select:all"></p>
+        <div>
+          <button type="button" class="btn btn-sec btn-sm" data-action="sec-copy-key">复制</button>
+          <button type="button" class="btn btn-sec btn-sm" data-action="sec-dismiss-key">已保存，关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="secModal"></div>
+</div>

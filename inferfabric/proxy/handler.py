@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 from http.client import HTTPConnection
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dataclasses
+import sqlite3
 
 from inferfabric.state import GPUMode
 from inferfabric.agent_registry import request_protocol
@@ -152,7 +153,7 @@ def _admin_gate(handler, expected_host, write=False):
             return False
     return True
 from inferfabric.proxy_manager import (
-    ProxyManager, PROXY_HOST, PROXY_PORT,
+    ProxyManager, PROXY_HOST, PROXY_PORT, IFF_DATA_DIR,
     HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
 )
 from inferfabric import forwarder, __version__
@@ -323,6 +324,7 @@ def _serve_api_spec(handler, pm):
 # 逻辑模型池管理接口（admin 路由表引用；零协议转换、零出网校验）
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
+from inferfabric.security.auth_facade import SecurityAuth, build_auth  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
@@ -360,6 +362,7 @@ _GET_ROUTES = {
     "/admin/packs/status":     _admin(lambda h, pm: h._handle_pack_status(pm)),
     "/admin/packs/policy":     _admin(lambda h, pm: h._handle_pack_policy_get(pm)),
     "/admin/packs/uninstall-preview": _admin(lambda h, pm: h._handle_pack_uninstall_preview(pm)),
+    "/admin/security/status":  _admin(lambda h, pm: h._handle_security_status(pm)),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
@@ -426,6 +429,9 @@ _POST_ROUTES = {
     # Legacy /admin/packs/download kept as-is (user-imported model path).
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
     "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
+    "/admin/security/enable":       _admin(lambda h, pm: h._handle_security_enable(pm)),
+    "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
+    "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
 }
 
 _DELETE_ROUTES = {
@@ -2110,6 +2116,133 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         result = pm.mgr.install_model(name, model_type)
         code = 200 if result.get("status") in ("installed", "already_configured") else 400
         self._send_json(result, code)
+
+    # ── App 设置页鉴权开关（/admin/security/*，F9-T2；thin handlers 包装
+    #    上游 KeyStore，语义与 fork security.js 消费契约一致） ──────────
+
+    def _handle_security_status(self, pm):
+        """GET /admin/security/status — App 设置页鉴权开关状态 + 密钥清单（无明文）。"""
+        auth = pm.auth
+        if isinstance(auth, SecurityAuth):
+            policy = auth.store.get_policy()
+            enforced = policy == "all" or auth.legacy.enabled
+            keys = [{"id": k.get("id"), "name": k.get("name"),
+                     "created_at": k.get("created_at"),
+                     "revoked": k.get("revoked_at") is not None}
+                    for k in auth.store.list_keys()]
+            self._send_json({"active": True, "policy": policy, "enforced": enforced,
+                             "key_count": sum(1 for k in keys if not k["revoked"]),
+                             "keys": keys})
+        else:
+            self._send_json({"active": False, "policy": None, "enforced": auth.enabled,
+                             "key_count": 0, "keys": []})
+
+    def _handle_security_create_key(self, pm):
+        """POST /admin/security/keys {name?} — 新建 API key（明文仅本次回显一次）。"""
+        data = self._read_body() or {}
+        name = (data.get("name") or "inferfabric-app").strip()[:64] or "inferfabric-app"
+        auth = pm.auth
+        if not isinstance(auth, SecurityAuth):
+            self._send_json({"error": "鉴权未启用 — 先开启 API Key 鉴权"}, 400)
+            return
+        try:
+            entry, token = auth.store.create_key(name, None, None)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+            return
+        except sqlite3.IntegrityError:
+            # 同名冲突（UNIQUE(name) 含已吊销行）：400 让用户改名，而非
+            # 落入 do_POST 的吞异常路径（连接无响应关闭，浏览器侧表现为挂起）
+            self._send_json({"error": f"同名 key 已存在（含已吊销）— 请换一个名称：{name}"}, 400)
+            return
+        log.info("API key created via app settings: name=%s id=%s", name, entry.get("id"))
+        # no-store：明文 key 仅本次回显，绝不进共享缓存（M2-T2）
+        self._send_json({"status": "ok", "key": token, "name": name,
+                         "note": "明文仅本次返回 — 请立即复制保存"},
+                        extra_headers={"Cache-Control": "no-store"})
+
+    def _handle_security_revoke_key(self, pm):
+        """POST /admin/security/keys/revoke {id} — 撤销指定 key。"""
+        data = self._read_body() or {}
+        kid = data.get("id")
+        auth = pm.auth
+        if not isinstance(auth, SecurityAuth):
+            self._send_json({"error": "鉴权未启用"}, 400)
+            return
+        if not isinstance(kid, str) or not kid:
+            self._send_json({"error": "id (string) required"}, 400)
+            return
+        try:
+            auth.store.revoke_key(kid)
+        except KeyError:
+            self._send_json({"error": f"key {kid} 不存在"}, 404)
+            return
+        log.info("API key revoked via app settings: id=%s", kid)
+        self._send_json({"status": "ok"})
+
+    def _handle_security_enable(self, pm):
+        """POST /admin/security/enable {enforce: bool, key_name?: str}
+
+        App 设置页一键鉴权：
+        - enforce=true：security.db/marker 缺失时按启动同源路径初始化并热替换
+          pm.auth / pm.security_admin（与 proxy_manager 构造一致）；policy → 'all'
+          （全部客户端请求需带 key）；无任何 key 时自动生成首个（明文 token
+          仅本次响应返回一次，库内只存摘要）。
+        - enforce=false：policy → 'off'（迁移宽限语义，不删除已建 key）。
+        """
+        data = self._read_body()
+        if data is None:
+            return
+        enforce = bool(data.get("enforce"))
+        key_name = (data.get("key_name") or "inferfabric-app").strip()[:64]
+        try:
+            if enforce:
+                if not isinstance(pm.auth, SecurityAuth):
+                    marker = IFF_DATA_DIR / "security.enabled"
+                    if not marker.exists():
+                        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+                        os.close(fd)
+                    # build_auth 内部 KeyStore(path) 不带 provision — 首次启用时
+                    # DB 尚不存在会直接 [Errno 2]；与启动同源：DB 缺失先按
+                    # provision=True 建库（iff keys init 语义）。
+                    db_path = IFF_DATA_DIR / "security.db"
+                    if not (db_path.exists() or db_path.is_symlink()):
+                        from inferfabric.security.key_store import KeyStore
+                        KeyStore(db_path, provision=True)
+                    pm.auth = build_auth(IFF_DATA_DIR)
+                    if not isinstance(pm.auth, SecurityAuth):
+                        self._send_json({"error": "security init failed"}, 500)
+                        return
+                    from inferfabric.security.admin import SecurityAdmin
+                    configured = os.environ.get("IFF_CONSOLE_ORIGINS", "")
+                    origins = ([o.strip() for o in configured.split(",") if o.strip()]
+                               if configured else
+                               [f"http://127.0.0.1:{PROXY_PORT}",
+                                f"http://localhost:{PROXY_PORT}"])
+                    pm.security_admin = SecurityAdmin(pm.auth.store, origins=origins)
+                    log.info("Security store initialized from app settings toggle")
+                pm.auth.store.set_policy("all")
+                token = None
+                if not pm.auth.store.list_keys():
+                    entry, token = pm.auth.store.create_key(key_name, None, None)
+                    log.info("API key created from app settings: name=%s", key_name)
+                # no-store：本响应可能携带一次性明文 key（M2-T2）
+                self._send_json({"status": "ok", "policy": "all", "enforced": True,
+                                 "key": token,
+                                 "note": None if token else "已有密钥 — 在 /admin/keys 列表管理（明文不再回显）"},
+                                extra_headers={"Cache-Control": "no-store"})
+            else:
+                if isinstance(pm.auth, SecurityAuth):
+                    pm.auth.store.set_policy("off")
+                    self._send_json({"status": "ok", "policy": "off", "enforced": False},
+                                    extra_headers={"Cache-Control": "no-store"})
+                else:
+                    self._send_json({"status": "ok", "policy": None, "enforced": False,
+                                     "note": "鉴权从未启用"},
+                                    extra_headers={"Cache-Control": "no-store"})
+        except (OSError, ValueError, sqlite3.Error) as e:
+            log.error("security enable failed: %s", e)
+            self._send_json({"error": f"security toggle failed: {e}"}, 500)
 
     def _handle_switch(self, pm):
         data = self._read_body()
