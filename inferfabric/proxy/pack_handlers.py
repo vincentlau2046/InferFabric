@@ -211,13 +211,20 @@ class PackManager:
 
     # ── 钩子 ──
 
-    def _write_model_config(self, pack_dir, manifest) -> None:
+    def _write_model_config(self, pack_dir, manifest) -> Path | None:
+        """发布受控 YAML；返回本次写入路径（回滚依据），已存在则 None。
+
+        Task 3：installer 的 fail() 只删本次事务写入的 YAML（终审 F2），
+        因此这里必须回传路径 —— 返回 None 会导致 gateway_reload 失败时
+        新发布的 YAML 残留。
+        """
         port = _free_port()
         cfg = build_model_config(manifest, pack_dir, port=port)
         try:
-            write_managed_yaml(cfg, self.models_d, manifest)
+            return write_managed_yaml(cfg, self.models_d, manifest)
         except ConfigExistsError:
             log.info("pack config already exists: %s", manifest.pack_id)
+            return None
 
     def _reload(self) -> None:
         if self._reload_gateway is not None:

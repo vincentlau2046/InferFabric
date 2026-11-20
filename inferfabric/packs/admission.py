@@ -129,6 +129,11 @@ def _find_reviewed(manifest: PackManifest) -> dict | None:
                           manifest.runtime_template, identities))
 
 
+def reviewed_profile_for(manifest: PackManifest) -> dict | None:
+    """公开只读访问：安装事务 preflight 复用同一审核登记（Task 3）。"""
+    return _find_reviewed(manifest)
+
+
 # ── 三维度判定 ──────────────────────────────────────────────────
 
 def _platform_dim(manifest: PackManifest, facts: PackHostFacts,
