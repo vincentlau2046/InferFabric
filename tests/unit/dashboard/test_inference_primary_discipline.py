@@ -140,6 +140,27 @@ def test_gpu_busy_no_recommendation(render_inference):
     assert out["shrd"].count("btn btn-pri") == 0
 
 
+def test_sleeping_exclusive_excluded_from_recommendation(render_inference):
+    # model-b 停止但处于 L2 sleep → 推荐跳到 model-c（非 sleeping 的首个停止卡）
+    snap = _snapshot("idle")
+    snap["sleep_states"] = {"model-b": {"state": "sleeping"}}
+    out = render_inference(snap)
+    assert out["excl"].count("btn btn-pri") == 1
+    assert out["excl"].count(">建议</span>") == 1
+    c_pos = out["excl"].find("model-c")
+    assert c_pos != -1
+    assert out["excl"].find("btn btn-pri") > c_pos
+
+
+def test_missing_status_never_recommends(render_inference):
+    # cross-review nit4：status 缺失/异常（无 gpu_mode）按非空闲处理，不推荐
+    snap = _snapshot("exclusive")
+    snap["status"] = {}
+    out = render_inference(snap)
+    assert out["excl"].count("btn btn-pri") == 0
+    assert "建议" not in out["excl"]
+
+
 def test_stopped_card_collapses_to_two_slots(render_inference):
     out = render_inference(_snapshot("idle"))
     # 运行卡（model-a）保留 4 槽；停止卡不再有 端口/uptime 死列

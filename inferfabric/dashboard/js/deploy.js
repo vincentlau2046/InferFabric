@@ -175,13 +175,8 @@
     });
   };
 
-  /* ── 激活钩子 ──
-   *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。
-   *   deploy 不再是独立 tab（已并入能力包页）：无 tabRenderers 注册，
-   *   激活事件跟随 tab-packs（无需重绘）。 */
-  store.on('tab_active', function (tab) {
-    if (tab === 'tab-packs') return; // 静态表单 + 按需进度态，无需重绘
-  });
+  /* deploy 不再是独立 tab（已并入能力包页）：无 tabRenderers 注册、无激活钩子——
+   *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。 */
 
   /* ── 事件委托（无 inline onclick）—— 作用域限定 #deploySection，不干扰 packs.js ── */
   var root = $('deploySection');

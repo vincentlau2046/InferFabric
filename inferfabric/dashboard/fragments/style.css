@@ -356,9 +356,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   padding-top: 0;
   border-top: none;
 }
-.if-nav-item.active + .nav-cap,
 .nav-cap + .if-nav-item {
-  /* 组首项与标题的间距略收紧，强化"标题→成员"的从属关系 */
+  /* 组首项与标题的间距略收紧，强化"标题→成员"的从属关系
+     （cross-review nit3：不依赖 .active 相邻选择器，避免切 tab 时 1px 抖动） */
   margin-top: -1px;
 }
 

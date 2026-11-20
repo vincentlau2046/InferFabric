@@ -342,10 +342,11 @@
 
     var g = groupModels(models);
 
-    /* 建议启动（主色纪律）：仅当 GPU 空闲时推荐独占组第一张停止卡——
-       独占启动需要 GPU=idle，共享/空闲组不参与推荐；整页唯一 btn-pri。 */
+    /* 建议启动（主色纪律）：仅当 GPU 明确空闲时推荐独占组第一张停止卡——
+       独占启动需要 GPU=idle，共享/空闲组不参与推荐；整页唯一 btn-pri。
+       status 缺失/异常时按非空闲处理（宁可少推荐，不可忙 GPU 上误推荐）。 */
     var recommendedName = null;
-    if ((status.gpu_mode || 'idle') === 'idle') {
+    if (status.gpu_mode === 'idle') {
       for (var i = 0; i < g.exclusive.length; i++) {
         var m = g.exclusive[i];
         if (m && !m.active && !(sleepStates && sleepStates[m.name])) {
