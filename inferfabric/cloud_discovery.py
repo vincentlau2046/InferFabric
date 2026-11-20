@@ -103,10 +103,11 @@ class CloudModel:
         # 自定义扩展
         if self.extra:
             caps.update(self.extra)
-        # G-2: 价格字段
-        if self.price_input:
+        # G-2: 价格字段（is not None 门 — 0 是合法值，truthy 门曾把 0 价丢掉；
+        # 与 _serialize_providers 同语义，#18 评审 N2）
+        if self.price_input is not None:
             caps["price_input"] = self.price_input
-        if self.price_output:
+        if self.price_output is not None:
             caps["price_output"] = self.price_output
         d["capabilities"] = caps
         return d

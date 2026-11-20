@@ -2198,13 +2198,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             if enforce:
                 if not isinstance(pm.auth, SecurityAuth):
-                    marker = IFF_DATA_DIR / "security.enabled"
-                    if not marker.exists():
-                        fd = os.open(marker, os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-                        os.close(fd)
                     # build_auth 内部 KeyStore(path) 不带 provision — 首次启用时
                     # DB 尚不存在会直接 [Errno 2]；与启动同源：DB 缺失先按
                     # provision=True 建库（iff keys init 语义）。
+                    # 标记（security.enabled）不在此预写：build_auth 成功路径
+                    # 自行落标记 — 预写会在 build_auth 抛异常时残留，重启后
+                    # 状态页误报 active（#18 评审 N3）。
                     db_path = IFF_DATA_DIR / "security.db"
                     if not (db_path.exists() or db_path.is_symlink()):
                         from inferfabric.security.key_store import KeyStore
@@ -2797,14 +2796,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "discovery_interval": cfg.discovery_interval,
                     "include_pattern": cfg.include_pattern,
                     "enabled_models": list(cfg.enabled_models),
-                    # model_specs: [{id, manual, supports_vision, supports_tools}]
+                    # model_specs: [{id, manual, supports_vision, supports_tools,
+                    #   context_window, max_output_tokens, price_input, price_output}]
                     # — manual=true 表示空 spec 手填模型；能力标签三态透传
                     # （未声明 = None/null，显式 false = 排除约束 — 7.8.0
                     # cross-review I-1：bool() 塌缩会让前端无法区分两者）
                     "model_specs": [
                         {"id": mid, "manual": not bool(spec),
                          "supports_vision": (spec or {}).get("supports_vision"),
-                         "supports_tools": (spec or {}).get("supports_tools")}
+                         "supports_tools": (spec or {}).get("supports_tools"),
+                         # 属性四键三态透传（None=未设置）：属性浮窗 openAttrsModal
+                         # 的 findSpec()+spec[k] 以本序列化为回填源 — 缺键即
+                         # 「存得进、读不回」（#18 评审 B1）
+                         "context_window": (spec or {}).get("context_window"),
+                         "max_output_tokens": (spec or {}).get("max_output_tokens"),
+                         "price_input": (spec or {}).get("price_input"),
+                         "price_output": (spec or {}).get("price_output")}
                         for mid, spec in cfg.model_specs.items()
                     ],
                     "candidates": [c.model_id for c in pm.cloud.get_candidates(name)],

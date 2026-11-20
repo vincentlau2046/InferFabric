@@ -83,9 +83,18 @@
   });
 
   /* ── 状态渲染（三态分立） ── */
+  function fmtTime(v) {
+    /* epoch 秒 → 本地时间串；非数值输入原样返回（后端未来改 ISO 兼容） */
+    var n = Number(v);
+    if (!isFinite(n) || n <= 0) return String(v == null || v === '' ? '—' : v);
+    try { return new Date(n * 1000).toLocaleString(); }
+    catch (e) { return String(v); }
+  }
+
   function policyLabel(p) {
     if (p === 'all') return '<span class="badge ok">all — 新策略拦截全部请求</span>';
     if (p === 'off') return '<span class="badge warn">off — 迁移宽限（legacy 鉴权可能仍在拦截）</span>';
+    if (p === 'pools') return '<span class="badge info">pools — 仅池化模型要求 key</span>';
     return '<span class="badge info">未设置</span>';
   }
 
@@ -111,7 +120,7 @@
           ' data-kname="' + escHtml(k.name || '') + '">' + UI.icon('trash', 14) + '吊销</button>';
         return '<tr><td class="mono">' + escHtml(k.id) + '</td>' +
           '<td>' + escHtml(k.name || '—') + '</td>' +
-          '<td>' + escHtml(k.created_at || '—') + '</td>' +
+          '<td>' + escHtml(fmtTime(k.created_at)) + '</td>' +
           '<td>' + act + '</td></tr>';
       }).join('');
       if (rows) {

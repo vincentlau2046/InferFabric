@@ -64,7 +64,8 @@
 
   function stageLabel(stage) {
     if (stage == null || stage === '') return '—';
-    return STAGE_LABELS[stage] || String(stage);   // 未知阶段中性回退
+    // 未知阶段中性回退 — 逃逸后再进 innerHTML（模块 XSS 纪律，评审 N4）
+    return STAGE_LABELS[stage] || escHtml(String(stage));
   }
 
   function $(id) { return document.getElementById(id); }
@@ -104,8 +105,7 @@
     }
     var rows = packs.map(function (p) {
       var failed = p.status === 'failed' || p.stage === 'failed';
-      var inProgress = !failed && p.status !== 'installed' && p.stage !== 'installed' &&
-                       p.status !== 'installed';
+      var inProgress = !failed && p.status !== 'installed' && p.stage !== 'installed';
       var badgeCls = failed ? 'badge crit' : (inProgress ? 'badge warn' : 'badge ok');
       var errTxt = (failed && p.error) ? ' — ' + escHtml(p.error) : '';
       var pathTxt = p.install_path ? ' <span class="mono if-field-hint">' +

@@ -84,3 +84,68 @@ def test_update_spec_rejects_unknown_keys():
     mgr = _mgr_with_spec({})
     mgr.update_model_spec("prov", "m1", {"bogus_key": 1})
     assert "bogus_key" not in mgr._providers["prov"].model_specs["m1"]
+
+
+# ── GET /admin/cloud/providers: attribute backfill (review B1) ────────
+
+class _FakeGetHandler:
+    """GET-only fake: command + _send_json capture (no socket)."""
+
+    command = "GET"
+
+    def __init__(self):
+        self.sent = []
+
+    def _send_json(self, data, status=200, extra_headers=None):
+        self.sent.append(data)
+
+
+def _pm_with(mgr):
+    import types
+    return types.SimpleNamespace(
+        cloud=types.SimpleNamespace(
+            providers=mgr._providers,
+            cloud_models={},
+            get_candidates=lambda name: [],
+            _last_discovery=0.0,
+        ),
+    )
+
+
+def _providers_payload(mgr):
+    from inferfabric.proxy.handler import ProxyHandler
+    h = _FakeGetHandler()
+    ProxyHandler._handle_cloud_providers(h, _pm_with(mgr))
+    assert h.sent, "handler did not reply"
+    return h.sent[0]
+
+
+def test_get_providers_backfills_saved_attrs_roundtrip():
+    """保存 → GET 重开 → 回填值相等（评审 B1 行为断言一）。
+
+    模拟属性浮窗完整回路：POST tag 语义写 spec（update_model_spec），
+    GET providers 序列化必须透传同值 —— 缺键即「存得进、读不回」。"""
+    saved = {"context_window": 128000, "max_output_tokens": 8192,
+             "price_input": 2.5, "price_output": 0.0, "supports_vision": True}
+    mgr = _mgr_with_spec({})
+    mgr.update_model_spec("prov", "m1", dict(saved))
+    specs = _providers_payload(mgr)["providers"][0]["model_specs"]
+    entry = next(s for s in specs if s["id"] == "m1")
+    for k, v in saved.items():
+        assert entry[k] == v, f"backfill lost '{k}': {entry.get(k)!r} != {v!r}"
+
+
+def test_get_providers_backfill_none_tri_state_allows_clear():
+    """清空 → 置 null（评审 B1 行为断言二）。
+
+    清空路径依赖回填源给出 None（而非缺键/undefined）：update_model_spec
+    清除属性后 spec 无键，GET 必须以 None 三态透传，openAttrsModal 才能
+    看到「已清空」并把下次提交发成 null。"""
+    mgr = _mgr_with_spec({})
+    mgr.update_model_spec("prov", "m1", {"context_window": 128000})
+    mgr.update_model_spec("prov", "m1", {"context_window": None})
+    entry = next(s for s in _providers_payload(mgr)["providers"][0]["model_specs"]
+                 if s["id"] == "m1")
+    assert entry["context_window"] is None
+    for k in ("max_output_tokens", "price_input", "price_output"):
+        assert entry[k] is None
