@@ -21,8 +21,10 @@ import hashlib
 import ipaddress
 import http.server
 import socketserver
+import tempfile
 import threading
 import time
+import yaml
 from pathlib import Path
 from urllib.parse import urlparse
 from http.client import HTTPConnection
@@ -2380,13 +2382,21 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def _handle_set_autostart(self, pm):
         """POST /admin/models/set-autostart {name, enabled} — 改 models.d YAML
-        autostart 字段 + 热重载（F9/T3，fork 移植）。默认 False（不自动启动）。
+        autostart 字段 + 热重载（F9/T3，fork 移植）。
 
         行级编辑保持 YAML 可读性（注释/键序不动）；autostart 缺失时插到
-        首个顶级 name: 之后。"""
-        data = self._read_body()
-        name = ((data or {}).get("name") or "").strip()
-        enabled = bool((data or {}).get("enabled", False))
+        首个顶级 name: 之后。评审 PR#19 修复：B1 原子写（读-改-写持全局锁
+        + 同目录 tmp 0600 + safe_load 写前验证 + os.replace——上游
+        load_models 无 per-file 容错，原地截断重写遇重启/断电损坏单文件
+        即全网关崩溃循环）；N1 enabled 严格 bool（缺 key/"false" 字符串
+        一律 400）；N2 写前验证 flag 落位（无可插 name: 行时不再静默
+        no-op 报 ok）；N3 响应带 reload 状态。"""
+        data = self._read_body() or {}
+        name = (data.get("name") or "").strip()
+        if not name or not isinstance(data.get("enabled"), bool):
+            self._send_json({"error": "name (str) and enabled (bool) are required"}, 400)
+            return
+        enabled = data["enabled"]
         model = pm.mgr._models.get(name)
         if model is None:
             self._send_json({"error": "Unknown model: " + name}, 404)
@@ -2395,35 +2405,70 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if not yaml_path or not Path(yaml_path).exists():
             self._send_json({"error": "YAML not found: " + str(yaml_path)}, 404)
             return
+        flag_line = "autostart: " + ("true" if enabled else "false")
         try:
-            text = Path(yaml_path).read_text()
-            lines = text.split("\n")
-            flag_line = "autostart: " + ("true" if enabled else "false")
-            replaced = False
-            out = []
-            for ln in lines:
-                if ln.startswith("autostart:"):
-                    out.append(flag_line)
-                    replaced = True
-                else:
-                    out.append(ln)
-            if not replaced:
-                for i, ln in enumerate(out):
-                    if ln.startswith("name:"):
-                        out.insert(i + 1, flag_line)
-                        break
-            Path(yaml_path).write_text("\n".join(out))
+            # B1：读-改-写全程持锁，防并发 set-autostart 交错丢更新
+            with _AUTOSTART_YAML_LOCK:
+                text = Path(yaml_path).read_text()
+                lines = text.split("\n")
+                replaced = False
+                out = []
+                for ln in lines:
+                    if ln.startswith("autostart:"):
+                        out.append(flag_line)
+                        replaced = True
+                    else:
+                        out.append(ln)
+                if not replaced:
+                    for i, ln in enumerate(out):
+                        if ln.startswith("name:"):
+                            out.insert(i + 1, flag_line)
+                            break
+                new_text = "\n".join(out)
+                # 写前验证：新全文可解析 + N2 flag 确实落位。验证失败时
+                # 原文件分毫未动——不存在"验证前已损坏"窗口。
+                parsed = yaml.safe_load(new_text)
+                if not isinstance(parsed, dict) or parsed.get("autostart") is not enabled:
+                    self._send_json(
+                        {"error": "YAML update verification failed (autostart flag not landed)"}, 500)
+                    return
+                # 同目录 tmp（0600）+ os.replace 原子落盘；异常时清 tmp
+                fd, tmp = tempfile.mkstemp(
+                    dir=str(Path(yaml_path).parent),
+                    prefix=".autostart-", suffix=".yaml.tmp")
+                try:
+                    os.fchmod(fd, 0o600)
+                    with os.fdopen(fd, "w") as f:
+                        f.write(new_text)
+                    os.replace(tmp, yaml_path)
+                except BaseException:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+                    raise
         except Exception as e:
             self._send_json({"error": "YAML update failed: " + str(e)}, 500)
             return
-        # 上游热重载走 config_reloader（连带 dashboard 缓存失效）；
-        # 裸 fake pm（单测）回落 mgr 直调。
-        if getattr(pm, "config_reloader", None):
-            pm.config_reloader.reload_models()
+        # N3：热重载结果进响应——config_reloader（连带 dashboard 缓存
+        # 失效）优先，裸 fake pm（单测）回落 mgr 直调。
+        reload_status = "skipped"
+        reloader = getattr(pm, "config_reloader", None)
+        if reloader is not None:
+            try:
+                reloader.reload_models()
+                reload_status = "ok"
+            except Exception as e:
+                reload_status = "failed: " + str(e)
         elif hasattr(pm.mgr, "reload_models"):
-            pm.mgr.reload_models()
-        log.info("Autostart %s -> %s", name, enabled)
-        self._send_json({"status": "ok", "model": name, "autostart": enabled})
+            try:
+                pm.mgr.reload_models()
+                reload_status = "ok"
+            except Exception as e:
+                reload_status = "failed: " + str(e)
+        log.info("Autostart %s -> %s (reload: %s)", name, enabled, reload_status)
+        self._send_json({"status": "ok", "model": name, "autostart": enabled,
+                         "reload": reload_status})
 
     def _handle_cache_toggle(self, pm):
         """POST /admin/cache/toggle — 切换响应缓存开关。"""
@@ -3463,6 +3508,74 @@ def _create_server(retries: int = 5, retry_delay: float = 2.0):
     raise RuntimeError("unreachable")
 
 
+
+# F9/T3：set-autostart 的读-改-写全局锁（评审 PR#19 B1：防并发交错丢更新）。
+_AUTOSTART_YAML_LOCK = threading.Lock()
+
+
+def _run_autostart(mgr):
+    """F9/T3（unification，fork 移植）：autostart 模型开机拉起线程体。
+
+    默认 False——不自动启动是安全缺省。评审 PR#19 修复：
+    - B2：不做 active_services 预检——SQLite 持久态脏关机后可能陈旧，
+      盲信会静默空转；switch() 自带 already_active 健康检查 + GPU 占用/
+      port 属主现实校验，交由它裁决，这里只记日志。
+    - N4：exclusive 互斥预检——两个 exclusive autostart 反复互踢会白付
+      两次 vLLM 全量加载，只启动先到者，其余告警跳过。
+    - N5：失败（异常 / switch 拒绝）补 AnomalyEvent，不再只有 INFO 日志。
+    - N6：模块级函数 + 按 name 排序确定性顺序，可测。
+    """
+    time.sleep(2)  # 等服务端口就绪
+    models = sorted(getattr(mgr.mgr, "_models", {}).values(), key=lambda m: m.name)
+    anomalies = getattr(mgr, "anomalies", None)
+    exclusive_taken = None
+    for m in models:
+        if not getattr(m, "autostart", False):
+            continue
+        name = m.name
+        if getattr(m, "is_exclusive", False) and exclusive_taken is not None:
+            log.warning("Autostart %s skipped: exclusive GPU slot taken by %s",
+                        name, exclusive_taken)
+            if anomalies is not None:
+                anomalies.record(AnomalyEvent(
+                    category="model", severity="warning", model=name,
+                    message=f"Autostart skipped: exclusive GPU slot taken by {exclusive_taken}",
+                    possible_cause="多个 exclusive 模型同时设 autostart——只保留先到者，"
+                                   "其余改 shared 或去掉 autostart",
+                ))
+            continue
+        log.info("Autostart: launching %s (autostart: true)", name)
+        try:
+            result = mgr.mgr.switch(name)
+        except Exception as e:
+            log.error("Autostart %s failed: %s", name, e)
+            if anomalies is not None:
+                anomalies.record(AnomalyEvent(
+                    category="model", severity="error", model=name,
+                    message=f"Autostart {name} failed: {e}",
+                    possible_cause="vLLM 启动失败 / OOM / 配置错误 / 模型文件损坏。检查网关日志。",
+                ))
+            continue
+        status = (result or {}).get("status")
+        if status == "ok":
+            log.info("Autostart %s -> ok", name)
+        elif status == "already_active":
+            # B2：真已驻留（或 DB 陈旧但现实校验通过）——记录即可，不视为失败
+            log.info("Autostart %s skipped: already active (verified by switch)", name)
+        else:
+            log.warning("Autostart %s -> %s: %s", name, status,
+                        (result or {}).get("message", ""))
+            if anomalies is not None:
+                anomalies.record(AnomalyEvent(
+                    category="model", severity="error", model=name,
+                    message=f"Autostart {name} -> {status}: {(result or {}).get('message', '')}",
+                    possible_cause="switch 被拒（GPU 占用 / 内存不足 / 切换中）。"
+                                   "检查网关日志或 iff status。",
+                ))
+        if status in ("ok", "already_active") and getattr(m, "is_exclusive", False):
+            exclusive_taken = name
+
+
 def main():
     # R7: --async flag → aiohttp async server
     if "--async" in sys.argv:
@@ -3557,24 +3670,9 @@ def main():
     mgr.config_reloader = config_reloader
     config_reloader.setup()
 
-    # F9/T3（unification，fork 移植）：autostart 模型开机拉起。
-    # 默认 False —— 不自动启动是安全缺省；best-effort 逐个 switch，
-    # 失败仅记日志不阻断网关启动。
-    def _autostart_models():
-        time.sleep(2)  # 等服务端口就绪
-        for m in mgr.mgr._models.values():
-            if not getattr(m, "autostart", False):
-                continue
-            name = m.name
-            if name in mgr.mgr.active_services:
-                continue
-            log.info("Autostart: launching %s (autostart: true)", name)
-            try:
-                result = mgr.mgr.switch(name)
-                log.info("Autostart %s -> %s", name, result.get("status"))
-            except Exception as e:
-                log.error("Autostart %s failed: %s", name, e)
-    threading.Thread(target=_autostart_models, daemon=True,
+    # F9/T3：autostart 模型开机拉起（daemon 线程，失败不阻断启动）。
+    # 线程体为模块级 _run_autostart（评审 PR#19 N6：可测）。
+    threading.Thread(target=_run_autostart, args=(mgr,), daemon=True,
                      name="inferfabric-autostart").start()
 
     def watchdog_loop():
