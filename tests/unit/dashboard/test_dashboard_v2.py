@@ -66,7 +66,7 @@ def test_js_modules_list():
     assert getattr(dash, "JS_MODULES", None) == [
         "ui", "store", "charts", "overview", "inference",
         "monitor", "deploy", "cloud", "model-pools", "anomaly",
-        "packs", "security",
+        "packs", "security", "connect",
     ]
 
 

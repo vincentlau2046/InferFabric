@@ -1,0 +1,16 @@
+<div class="tab-content" id="tab-connect">
+  <!-- 接入：Claude Code / Codex 配置托管（connect.js 渲染，无 inline onclick）。
+       进入页面只读状态不改配置；托管/回退均显式确认；一次性 key 输入。 -->
+  <div class="if-card" id="connStatusCard">
+    <div class="if-card-hdr">
+      <span class="if-card-title">本机客户端接入</span>
+      <span class="if-card-sub">把 Claude Code / Codex 指向本网关 — 写前确认 + 备份回退；进入本页不修改任何配置</span>
+    </div>
+    <div class="if-card-body">
+      <div id="connStatus">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+    </div>
+  </div>
+  <div id="connModalHolder"></div>
+</div>
