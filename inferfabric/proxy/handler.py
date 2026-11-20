@@ -39,6 +39,7 @@ from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.anomaly_collector import AnomalyEvent
 from inferfabric.proxy import pack_handlers
+from inferfabric.proxy import deploy_wizard as dw
 
 # Admin token for control-plane routes (/switch, /stop, /deploy, /pull, etc.)
 # If set, requests must include X-Admin-Token header matching this value.
@@ -373,6 +374,8 @@ _GET_ROUTES = {
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
+    # 部署向导：能力×引擎×平台收窄选项（Task 2，纯只读）
+    "/admin/deploy/options":    _admin(lambda h, pm: h._send_json(dw.deploy_options())),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
     "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
