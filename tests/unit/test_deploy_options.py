@@ -46,11 +46,18 @@ class TestPlatformNarrowing:
         assert "vllm" not in ids and "sglang" not in ids
         assert "llama_cpp" in ids
 
-    def test_probe_failure_treated_as_no_nvidia(self):
-        # Review Focus 2：探测失真按「无 NVIDIA」收窄，绝不出 vllm 选项
-        opts = dw.deploy_options(os_name="linux", arch="x86_64", has_nvidia=None)
+    def test_probe_failure_treated_as_no_nvidia(self, monkeypatch):
+        # Review Focus 2：探测失真按「无 NVIDIA」收窄，绝不出 vllm 选项。
+        # PR #21 实测评审 I1：has_nvidia=None 语义是「执行真实探测」而非
+        # 「探测失败」—— 有卡的机器上该写法恒红。改为在 subprocess 层
+        # 模拟探测失败（nvidia-smi 挂起），走缺省探测路径验证收窄契约。
+        def _hang(*a, **k):
+            raise TimeoutError("nvidia-smi hung")
+        monkeypatch.setattr(dw.subprocess, "run", _hang)
+        opts = dw.deploy_options(os_name="linux", arch="x86_64")
         ids = [e["id"] for e in opts["engines"]]
         assert "vllm" not in ids and "sglang" not in ids
+        assert opts["platform"]["nvidia"] is False
 
     def test_darwin_x86_still_narrows_to_llama_cpp(self):
         # 平台收窄裁决只对 darwin/arm64 放开——但 darwin 任何情况无 vllm/sglang

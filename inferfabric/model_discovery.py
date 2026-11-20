@@ -186,18 +186,22 @@ vllm:
 """
     elif model_type.startswith("llama_cpp"):
         port = max([p for p in used_ports if p >= 11435] + [11434]) + 1
+        # PR #21 实测评审 B1：GGUF 查找+缺失报错平台无关 —— 非 macOS 分支
+        # 此前无条件写 `~/models/{name}/`（Linux 一键链假成功：YAML 落盘、
+        # model_path 指向不存在目录、首请求必败）。Metal 专属字段
+        # （ledger_mode/binary_path/gpu_layers=99）仍留平台分支。
+        gguf = ""
+        for base in [models_dir.parents[1] / "models", Path.home() / "models"]:
+            if base.exists():
+                hits = sorted(base.glob(f"**/{name}*.gguf")) or sorted(base.glob(f"**/{name}/*.gguf"))
+                if hits:
+                    gguf = str(hits[0])
+                    break
+        if not gguf:
+            return {"status": "error",
+                    "message": f"GGUF for {name} not found under workspace models dir or ~/models"}
         from .platform import probe as _platform_probe
         if _platform_probe.IS_MACOS:
-            gguf = ""
-            for base in [models_dir.parents[1] / "models", Path.home() / "models"]:
-                if base.exists():
-                    hits = sorted(base.glob(f"**/{name}*.gguf")) or sorted(base.glob(f"**/{name}/*.gguf"))
-                    if hits:
-                        gguf = str(hits[0])
-                        break
-            if not gguf:
-                return {"status": "error",
-                        "message": f"GGUF for {name} not found under workspace models dir or ~/models"}
             binary = models_dir.parents[1] / "engines" / "llama-b12361" / "llama-server"
             binary_lines = f"  binary_path: {binary}\n" if binary.exists() else ""
             label = model_type_label or "llm"
@@ -218,11 +222,11 @@ llama_cpp:
 """
         else:
             yaml_content = f"""name: {name}
-description: "{name} (auto-deployed, llama.cpp)"
+description: "{name} (auto-installed, llama.cpp)"
 type: llama_cpp
 gpu_role: none
 llama_cpp:
-  model_path: ~/models/{name}/
+  model_path: {gguf}
   port: {port}
   threads: 16
   context_size: 16384

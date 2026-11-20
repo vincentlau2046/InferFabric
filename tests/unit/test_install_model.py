@@ -12,6 +12,12 @@ import pytest
 from inferfabric.manager import ModelManager
 
 
+def _patch_linux(monkeypatch):
+    """install_yaml 的平台分支打桩：强制走非 macOS 分支（本机为 macOS）。"""
+    from inferfabric.platform import probe as _probe
+    monkeypatch.setattr(_probe, "IS_MACOS", False)
+
+
 def _mgr(tmp_path: Path) -> ModelManager:
     # 两层布局（<ws>/models.d）：install_yaml 的 GGUF 查找目录 = parents[1]/models
     # （生产语义：<workspace>/models.d → <workspace>/models）
@@ -78,3 +84,37 @@ class TestInstallNameValidation:
         mgr = _mgr(tmp_path)
         assert mgr.install_model("", "llama_cpp")["status"] == "error"
         assert mgr.install_model("x" * 65, "llama_cpp")["status"] == "error"
+
+
+class TestInstallYamlLinuxGgufContract:
+    """PR #21 实测评审 B1（Blocking）：GGUF 查找+缺失报错必须平台无关。
+
+    Linux 实测：非 macOS 分支不做 glob 校验，无条件写 `~/models/{name}/`
+    → 一键链「假成功」（YAML model_path 指向不存在目录，首请求必败）。
+    Metal 字段（ledger_mode/binary_path/gpu_layers=99）保留平台分支。
+    """
+
+    def test_linux_llama_cpp_resolves_downloaded_gguf(self, tmp_path, monkeypatch):
+        _patch_linux(monkeypatch)
+        mgr = _mgr(tmp_path)
+        ws_models = Path(mgr.models_dir).parents[1] / "models" / "m"
+        ws_models.mkdir(parents=True)
+        gguf = ws_models / "m-q4_k_m.gguf"
+        gguf.write_bytes(b"GGUF")
+        monkeypatch.setattr(mgr, "reload_models", lambda: None)
+        result = mgr.install_model("m", "llama_cpp")
+        assert result["status"] == "installed", result
+        yaml_text = (Path(mgr.models_dir) / "m.yaml").read_text(encoding="utf-8")
+        assert "model_path: ~/models/m/" not in yaml_text, \
+            "B1：不得写不存在的字面量目录（假成功）"
+        assert f"model_path: {gguf}" in yaml_text, "model_path 须指向真实 GGUF"
+
+    def test_linux_llama_cpp_missing_gguf_is_error(self, tmp_path, monkeypatch):
+        _patch_linux(monkeypatch)
+        mgr = _mgr(tmp_path)
+        monkeypatch.setattr(mgr, "reload_models", lambda: None)
+        result = mgr.install_model("nope", "llama_cpp")
+        assert result["status"] == "error"
+        assert "GGUF" in result["message"]
+        assert not (Path(mgr.models_dir) / "nope.yaml").exists(), \
+            "B1：失败不得落 YAML（UI 显示已装载的假成功源头）"
