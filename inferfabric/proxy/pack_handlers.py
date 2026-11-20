@@ -236,7 +236,18 @@ class PackManager:
 
     # ── 查询 ──
 
-    def catalog_payload(self) -> dict:
+    def catalog_payload(self, facts=None, runtime=None, resources=None) -> dict:
+        # 阶段 1 Task 2：可选附加式准入决策。只吃注入的已测事实
+        # （facts/runtime/resources），渲染目录绝不下载、启动或探测设备。
+        def _decision(manifest):
+            if facts is None or runtime is None or resources is None:
+                return None
+            from inferfabric.packs.admission import evaluate_pack, get_template
+            d = evaluate_pack(manifest, facts,
+                              get_template(manifest.runtime_template),
+                              runtime, resources, operation="install")
+            return d.to_dict()
+
         packs = [{
             "pack_id": e.manifest.pack_id,
             "display_name": e.display_name,
@@ -246,6 +257,8 @@ class PackManager:
             "builtin": e.builtin,
             "risk_level": e.risk_level,
             "manifest": e.manifest.to_dict(),
+            **({"decision": _decision(e.manifest)}
+               if _decision(e.manifest) else {}),
         } for e in self.catalog.entries]
         # 统一架构（2026-11-16）：用户自定义包与官方包同目录展示；
         # 校验链未走完的失败残项合成占位 manifest（可重试，错误在卡上可见）
