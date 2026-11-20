@@ -124,6 +124,14 @@ class TestSelectFiles:
         with pytest.raises(ValueError):
             dd.select_files(files, "nope.gguf")
 
+    def test_multi_variant_error_carries_choices(self):
+        # 前端变体 picker 数据源：结构化 choices，不解析错误文案
+        files = [{"path": "m-q4.gguf", "size": 1, "sha256": ""},
+                 {"path": "m-q8.gguf", "size": 1, "sha256": ""}]
+        with pytest.raises(dd.MultiVariantError) as ei:
+            dd.select_files(files, None)
+        assert ei.value.choices == ["m-q4.gguf", "m-q8.gguf"]
+
 
 class TestDownloadFlow:
     def test_requires_path_when_multiple_variants(self, tmp_path):

@@ -30,6 +30,15 @@ _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # split 分片名：xxx-00001-of-00004.gguf（llama.cpp 需整套，按家族归并）
 _SPLIT_RE = re.compile(r"^(?P<base>.+)-(?P<idx>\d{5})-of-(?P<total>\d{5})\.gguf$")
 
+
+class MultiVariantError(ValueError):
+    """repo 有多个量化变体且未指定 path；choices 供前端渲染 picker。"""
+
+    def __init__(self, choices):
+        self.choices = list(choices)
+        super().__init__("multiple gguf variants — 需指定 path "
+                         f"（可选: {', '.join(self.choices)}）")
+
 _Status = namedtuple("_Status", "stage model_id files_total files_done "
                                 "current_file error dest_dir")
 
@@ -87,8 +96,7 @@ def select_files(files: list[dict], chosen_path: str | None) -> list[str]:
     if chosen_path is None:
         if len(paths) == 1:
             return paths
-        raise ValueError("multiple gguf variants — 需指定 path "
-                         f"（可选: {', '.join(paths)}）")
+        raise MultiVariantError(paths)
     if chosen_path not in paths:
         raise ValueError(f"unknown gguf path: {chosen_path!r}")
     m = _SPLIT_RE.match(chosen_path)
@@ -207,6 +215,11 @@ def handle_deploy_download(handler, pm) -> None:
         result = start_download(body.get("model_id", ""), ws_root,
                                 path=body.get("path"))
     except ValueError as e:
+        if isinstance(e, MultiVariantError):
+            handler._send_json({"error": str(e), "code": "select_file",
+                                "choices": e.choices}, 400,
+                               extra_headers={"Cache-Control": "no-store"})
+            return
         code = 502 if str(e).startswith("listing_failed") else 400
         handler._send_json({"error": str(e)}, code,
                            extra_headers={"Cache-Control": "no-store"})

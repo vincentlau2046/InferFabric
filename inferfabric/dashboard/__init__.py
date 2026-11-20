@@ -18,7 +18,7 @@ _cached_html: str | None = None
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
 JS_MODULES = ["ui", "store", "charts", "overview", "inference",
               "monitor", "deploy", "cloud", "model-pools", "anomaly",
-              "packs", "security", "connect"]
+              "packs", "security", "connect", "wizard"]
 # 注意：deploy.js 仍在 JS_MODULES（部署表单已并入能力包页 deploySection，
 # 但其事件委托/进度逻辑仍由 deploy.js 承载；deploy 不再是独立 fragment/tab）。
 
@@ -32,8 +32,10 @@ def get_html() -> str:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
         # 替换 fragment 占位符
         for frag_name in ("overview", "inference", "monitor", "cloud",
-                          "model-pools", "anomaly", "packs", "security",
-                          "connect"):
+                          "model-pools", "wizard", "anomaly", "packs",
+                          "security", "connect"):
+            # wizard 排在 model-pools 之后：其占位符位于 model-pools.html
+            # 内部（向导卡挂模型池 tab），替换按序生效
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"
             try:
                 frag = frag_path.read_text(encoding="utf-8")
