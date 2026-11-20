@@ -1,91 +1,52 @@
-# 能力包平台适配 — 平台框架 + 底层隔离底座（spec）
+# 能力包平台适配：先验证隔离与生命周期，再扩目录
 
-状态：草案（2026-11-20，待用户终审后进入 PR-A 实现）
+状态：2026-11-20，用户确认修订方向；本文件取代原「先上 platforms 字段」方案。当前只完成设计和实施计划，尚未恢复代码实现。
 
-## 0. 裁决记录
+## 1. 目标与边界
 
-- 2026-11-20 用户裁决：**混合方案**（manifest 平台字段 + 校验过滤 + 能力包 tab 内平台分组展示）。
-- 2026-11-20 用户裁决：**平台框架与底层沙箱/隔离方案先定**，asr/tts 首批预置随后；Linux 端产出并向 Mac 端提案（跨平台协作总线）。
-- 事实修正记录：最初调查误判「ninfer 已迁 conda」；运行态证实 ninfer/sglang 均为 **docker 现役**（PM launcher 即 Docker container lifecycle），vLLM 双形态（conda + docker）。
+InferFabric 把已验证的本地「运行时 + 引擎 + 模型产物 + 性能配置」变成可重复装载、启停和卸载的单元。**统一目录、准入结果和用户操作；不统一 Linux 与 Mac 的隔离实现。** Dashboard 默认显示本机可用项；其他平台可查看、不可执行。ASR/TTS 是两端的正式预设能力，不是自定义链接的替代品，随底座验证后进入目录。
 
-## 1. 现状事实（已核实）
+考虑过另做统一启动器，但会复制已有引擎生命周期和资源编排。保留既有 EngineAdapter / ProcessManager，仅为受管包附加可验证的启动约束。仅靠页面分栏或 manifest 字段不能执行准入；不把现役配置直接批量转换为包。非目标：换主网关路由、升级既有 vLLM 0.24、切换 Qwen38-27B-VL、接管或覆盖现役部署、增加任意镜像/脚本/新能力类别的自助准入。vLLM-Omni 两模型试点独立于本计划，不阻塞本计划，也不自动入正式目录。
 
-| 层 | Mac（darwin-arm64） | Linux x86+NVIDIA（本机现役） |
+## 2. 已核实的起点
+
+- NInfer 与 SGLang 已有 Docker 生命周期，vLLM 支持 Docker 和 conda。NInfer 现役路径有只读权重挂载，但发布端口未限定宿主回环；SGLang/vLLM 现有 Docker 命令还使用宿主 IPC 和共享缓存。它们是复用对象，不是新包隔离的验收证据。
+- Mac 的 `probe_sandbox()` 探测 SBPL 符号，现有 `PackManager` 装配的是 `NoopProvider`，`healthcheck_llama_cpp()` 直接启动子进程。符号可用不等于隔离已施加。
+- 现有 llama.cpp Mac 运行时模板具有明确平台；Linux BGE embedding 使用 `gpu_layers: 0`。4B/8GiB 是现有通用策略，不能把 27B NInfer 包直接套进默认对话门槛。现有策略不得全局放宽。
+
+## 3. 平台、隔离、资源是三个不同判定
+
+| 维度 | 结果 | 规则 |
 |---|---|---|
-| 隔离底座 | SBPL / sandbox-exec（`packs/sandbox.py` PK0 冻结：probe full/degraded/unavailable，降级不冒充） | **docker**（PM.ninfer / PM.sglang = container lifecycle + `ensure_image_pulled`；vLLM `start_vllm_docker`）；conda 原生为 legacy/degraded |
-| runtime_template | `llama-cpp-macos-arm64-v1`（唯一已实现） | 无 pack 模板（引擎直跑，YAML 直接声明 docker_image/container_name） |
-| 平台感知 | `platform/probe.py` IS_MACOS 门禁；pack schema **无 platform 字段** | 同左 |
+| 平台 | `compatible / incompatible / unknown` | 主机事实来自 `inferfabric.platform`：OS、架构、加速器；NInfer 旗舰另要求已验证的 SM 12.x / GPU 规格。命令在 PATH 不代表设备可用，探测失败不是 CPU 正常态。|
+| 隔离 | `verified / degraded / unverified / unavailable` | 只有审核过的运行时配置及生效证据才可称 `verified`。进程组仅负责进程树管理，最多 `degraded`；须模板、包均显式允许，默认不把不可用的 Docker 或 Mac 沙箱降级成裸跑。Linux BGE CPU 试点允许显式降级，不代表完整沙箱。|
+| 资源 | `ready / busy / insufficient / unknown` | 区分装载所需磁盘、验证时所需资源、正式启动时所需 RAM/VRAM。Linux 独立显存和 Mac 统一内存不可互换。缺遥测不为旗舰包盲放行。|
 
-四种目标组合（docker+ninfer / docker+sglang / docker+vllm / llama.cpp+模型）**launcher 层零缺口**，缺口仅在 pack 体系（schema、模板注册、准入、呈现、预置 catalog）。
+共享 wire 契约：三个维度各自返回枚举；操作返回 `allowed`、稳定的 `reason_code`，可附人类可读详情。首轮 reason 包括 `platform_mismatch`、`platform_unverified`、`runtime_unavailable`、`isolation_unverified`、`isolation_degraded_not_allowed`、`resource_busy`、`resource_insufficient`、`resource_unknown`、`ownership_conflict`、`runtime_identity_mismatch`。成功 `reason_code=null`；显式降级成功仍保留 `isolation=degraded`。相同判定规则服务目录和执行闸；UI 用 API 结果展示，不能成为权限闸。并发/重读时的执行结果可比目录快照更严格。
 
-## 2. 设计
+### 目录与旧包
 
-### §1 manifest 平台字段（schema.py）
+- 可选 `platforms` 申明只**收窄**审核过的模板范围，不能扩大；旧包未声明时按模板推断，已知 Mac 模板绝不变成跨平台，未知模板为 `unknown`、不可新装。禁止新明确通配；需要多平台时列出对应平台，运行时仍需匹配各自模板。平台键首轮提议 `linux-nvidia` / `linux-cpu` / `darwin-arm`；CPU BGE 可以在 Linux NVIDIA 主机跑，不要求没有 GPU。Mac wire 名称需 #23 对齐后冻结。
+- 已有包不被迁移、重装、自动停止或重新打隔离标签。旧包保留原启停、查询、卸载路径；新装/升级进入新版模板的旧包，必须明确满足该模板的准入条件。目录原有方式无法判定的旧条目只读，显示「未验证」；不能在新受管包启动入口借用 legacy 路径。
 
-```yaml
-pack_id: llm.qwen38-ninfer
-platforms: [linux-nvidia]        # 新增；缺省 [any]（向后兼容，旧 manifest 视为 any）
-platforms: [darwin-arm, linux-nvidia]
-```
+## 4. 受管包的执行约束
 
-- 平台键枚举（与 `platform/probe.py` 对齐）：`linux-nvidia` / `linux-cpu` / `darwin-arm` / `any`。
-- 解析规则：manifest `platforms` 与 probe 结果求交；交集空 → **不可安装**（UI 只读展示，理由文案给出平台不匹配）。
-- 校验：未知平台键 = ManifestError（严格，不做静默映射）。
+- **同一个审核过的运行时策略覆盖临时验证和正式启动**。两者实例名、端口可不同，但不能因验证是临时的就绕开隔离。试点需要从零取证：只有不进目录、明确授权的私有试点配置可进入「临时取证」动作；先检查可验证的运行配置，再检查实际实例并验证业务，失败不得发布配置。该动作不是对外装载或启动的例外，不允许未审核的策略或产物。持久化解析后的模板/产物标识与包所有权；正式启动读回并校验。坏引用、缺失记录、模板或镜像不匹配均拒绝，不能默认为 legacy。发现旧实例时只认属于自己的已验证身份，不按端口或名字收养/停止现役实例。
+- **Linux 容器**：用审核镜像的不可变身份（本地构建可用匹配的本地 image ID，发布时用固定 digest）；端口只发布到宿主 `127.0.0.1`，权重只读、可写目录限包专用路径。不得使用 privileged、宿主 IPC/网络、宿主 Docker socket、全局可写缓存或任意透传 flags/env；GPU 只给获准设备。默认不需要联网的运行时不得访问外部网络；入站回环与出站限制分别验证。涉及额外权限或无法证明的限制时，停止试点并记录，不把默认 Docker 等同于沙箱。
+- **Linux 原生**：BGE embedding 走 CPU，包内/审核的 llama-server；显式回环监听、进程组收割。仅当模板和 manifest 同意时以 `degraded` 运行；不声称限制了宿主文件访问或出站网络。
+- **Mac 原生**：由 Mac 端选定可执行的 provider，反馈对同一包验证与正式启动均生效的证据；仅 API 存在或 health 200 不足以标记 `verified`。无证据只能按显式允许的降级策略运行，或不可执行。
+- **事务与 GPU**：装载不切换现役模型、不改路由、不启动常驻包。GPU 临时验证只在已有 GPU 管理锁下且确认 GPU 可用时运行；占用时返回 `resource_busy`，不挤占现役服务、不执行 GPU reset。验证实例使用独立包身份和端口；先完成验证/停止，再发布受管配置并热加载；失败只清理本次拥有的配置、实例和 staging。包安装初期不自动收养共享产物；试点借用明确批准的现有只读权重时，所有权标为外部，卸载行为不得删除其数据或改变现用容器。正式试点启动继续使用现有资源编排，准入拒绝不得先停旧服务。
+- **资源政策**：保留旧 LLM/VL 默认 4B 和系统预留 8192 MiB。Linux NInfer 工作站例外只用于审核登记的包版本/模板/产物，取真实设备能力、RAM/VRAM/磁盘预算，不允许 manifest、自定义包、`force` 或篡改 YAML 提升权限。内存报价先实测后冻结；不假设名义 32GB 等于可分配预算。CPU 包不触碰 GPU 锁/重置。
 
-### §2 隔离底座矩阵（substrate）
+## 5. 分阶段与退出标准
 
-每个 runtime_template 声明其隔离底座，准入时对照平台探测结果：
-
-| substrate | 平台 | 隔离边界 | 健康检查 | 降级语义 |
-|---|---|---|---|---|
-| `docker` | linux-nvidia（darwin 不支持 GPU 直通场景不列） | 容器（image + container_name 单一事实源） | `docker inspect` 运行态 + 端口 health | docker 不可用 → 拒绝安装（不降级到裸跑） |
-| `sbpl` | darwin-arm | sandbox-exec profile（PK0 已冻结接口） | probe full/degraded + 现有 healthcheck | degraded 保留诊断（沿用 PK0 纪律） |
-| `process-group` | 任意（legacy/degraded） | 进程组 + 目录隔离 + 资源监控（sandbox.py degraded 兜底语义） | 现有 healthcheck | 显式标注「非完整隔离」，不冒充 |
-
-**纪律**：Linux 侧 docker 是一等底座（容器即隔离边界），conda 原生模板一律标 `process-group` 并在 UI/日志显式披露降级；与 PK0「不把降级冒充完整隔离」同一原则。
-
-### §3 runtime_template 注册表
-
-命名 `<engine>-<substrate>-v<N>`（platform 编码进 substrate/校验，不再进模板名后缀堆叠）：
-
-- 首批新增：`docker-ninfer-v1`、`docker-sglang-v1`、`docker-vllm-v1`、`native-llama-cpp-v1`（darwin-arm 由 SBPL/二进制来源字段区分，保留旧名 `llama-cpp-macos-arm64-v1` 兼容映射）。
-- `docker-*` 模板必填字段：`image`（建议 digest pin）、`container_name`、`port`——全部映射进 ModelConfig 既有字段（`docker_image` / `container_name`），**不改 config.py 结构**。
-- `runtime_prep.py`：`docker-*` 模板 prepare_runtime = 校验 image 可用（`ensure_image_pulled` 语义复用）+ 校验字段齐全，无解包动作。
-
-### §4 准入流程（installer 接线）
-
-install 时序：平台求交（§1）→ policy 门禁（既有 4B/8GB）→ runtime_template 在平台注册表 → substrate 可用性探测（docker/ sbpl probe）→ 装载。任一步失败 = 诚实失败 + 明确错误码（沿用 installer 事务零残留纪律）。
-
-### §5 Dashboard 呈现（能力包 tab 平台分组）
-
-- 当前平台可用包置顶正常态；其他平台包折叠分组、只读、标注「不适用于本机（darwin-arm / linux-nvidia）」。
-- 不做双份存储：同一 catalog，渲染层按 `platforms` 过滤分组（跨端同 catalog 各自过滤，服务 Mac 端同构）。
-
-### §6 首批预置包（现役反向抽象）
-
-| pack_id | 模板 | 来源（现役事实） |
+| 阶段 | 范围 | 退出标准 |
 |---|---|---|
-| llm.qwen38-ninfer | docker-ninfer-v1 | Qwen38-27B-TXT.yaml（ninfer:accept-map-v2, :8007） |
-| vl.qwen38-ninfer | docker-ninfer-v1 | Qwen38-27B-VL.yaml（:8009） |
-| llm.muse-glimmer | docker-sglang-v1 | muse-glimmer-vl.yaml（sglang:dev-muse-glimmer） |
-| embedding.bge-m3 / rerank.bge-reranker | native-llama-cpp-v1 | bge-m3.yaml / bge-reranker-v2-m3.yaml |
-| asr.sensevoice / tts.qwen3 | conda process-group 模板（第二批，随 §3 扩表） | asr-sensevoice.yaml / tts-qwen3.yaml |
-| t2i.comfyui | conda process-group 模板（第二批） | comfyui.yaml |
+| 0 契约 | 本文、#23、阶段 1 计划；对齐枚举与权威证据 | Linux 可做本地验证准备；Mac 未给证据时不冻结双平台能力声明。|
+| 1 双路径试点 | Linux：NInfer TXT + Docker、llama.cpp + BGE embedding；Mac 并行用一个原生包验证相同契约 | 非生产实例完整走装载、临时检查、启动、停止、回滚、卸载；验证业务端点、端口范围和运行时身份。NInfer 在授权的 GPU 窗口，同镜像、权重、NVFP4/上下文/MTP 配置同负载比对 TTFT、吞吐、显存峰值。未核实的性能标未验证，明显退化不得晋级。Mac 同样用真实执行证据，不用探针替代。|
+| 2 Dashboard | 共用目录，当前平台可用项置顶，其他平台只读；显示缺 runtime、隔离降级、资源不足和操作说明 | Linux/Mac 隔离代理上的真实浏览器复验装载、不匹配、失败恢复，后端与界面一致；不拿生产代理做交互。|
+| 3 扩目录 | SGLang、vLLM、BGE rerank；SenseVoice/Qwen3-TTS 与 Mac 对应首批音频包 | 模板先验证再纳入；ASR 用真实短音频确认文本，TTS 用文本确认可解码音频；端口 200 不算业务验收。未知链接/品类是后续扩展，只能进入审核过的模板，不接受可执行钩子。|
 
-qwen36-35b-ninfer 待其 serve 验证后入表（依 qwen36-35b-ninfer-migration 状态）。
+各代码批次：Python 3.10+，不升级既有 vLLM 0.24，不改代理转发核心；sandbox-first，unit+integration、`import inferfabric`、隔离代理核心 API 冒烟、fresh-context cross-review、干净提交树复验。Dashboard 阶段另加 Playwright 门禁。未经单独授权不重启生产，不启动真实 GPU 试点。
 
-## 3. 分批
-
-- **PR-A**（本 spec 主体）：schema `platforms` 字段 + 平台键校验 + 准入接线 + substrate 矩阵常量 + 单测。
-- **PR-B**：docker-* 模板族 + 首批预置包（llm/vl/embedding/rerank）+ catalog。
-- **PR-C**：dashboard 平台分组呈现 + 浏览器门禁（真实浏览器交互测试，非文本断言）。
-
-## 4. 测试门禁
-
-- 单测：平台求交（空交集拒绝/any 兼容）、未知平台键 ManifestError、docker 模板字段校验、准入序列各失败点诚实错误码。
-- 每批全量 pytest + import 冒烟 + 干净 worktree 复验；PR-C 加 Playwright 真实交互门禁。
-- cross-review：fresh-context subagent 一轮。
-
-## 5. Mac 提案（跨平台总线）
-
-Linux 端将本 spec §1–§2 作为提案发 GitHub issue 征询 Mac 端意见（darwin-arm 平台键命名、SBPL substrate 与本框架的对接方式、Mac 首批包清单由 Mac 端谁提谁建）。审阅性意见不阻塞 PR-A 落地（bidirectional flow：main 归 Linux 端）。
+阶段 1 的可执行任务见 [实施计划](../../docs/superpowers/plans/2026-11-20-packs-runtime-pilot.md)。阶段 2/3 只列依赖与发布门槛，不提前锁定尚未由试点验证的模板/实现。
