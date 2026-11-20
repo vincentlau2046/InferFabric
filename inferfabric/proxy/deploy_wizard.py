@@ -10,8 +10,11 @@
 llama_cpp 查 packs 可复用引擎或 PATH 上的 llama-server；vllm/sglang 查
 PATH 二进制。
 """
+import json
 import platform
+import re
 import shutil
+import urllib.request
 
 ENGINE_LABELS = {
     "llama_cpp": "llama.cpp",
@@ -73,3 +76,101 @@ def deploy_options(os_name: str | None = None, arch: str | None = None,
         "platform": {"os": os_name, "arch": arch, "nvidia": has_nvidia},
         "deployment_modes": {k: list(v) for k, v in DEPLOYMENT_MODES.items()},
     }
+
+
+# ─── ModelScope 搜索代理（GET /admin/deploy/search）──────────────────────
+# 线上校准（2026-11-21，真实 curl）：搜索为 PUT（POST 404）
+#   PUT https://modelscope.cn/api/v1/dolphin/models
+#   {"Name": q, "PageSize": N, "PageNumber": P}
+#   → Data.Model.Models[]{Path, Name, Downloads, Pipelines, ...}
+#     + Data.Model.TotalCount
+MODELSCOPE_SEARCH_URL = "https://modelscope.cn/api/v1/dolphin/models"
+SEARCH_TIMEOUT = 5            # 网络对面可能变动/被限流 → 超时兜底
+SEARCH_PAGE_SIZE = 20
+SEARCH_MAX_PAGE = 100
+# pull_model 白名单正则同形态（Review Focus 4）：id 允许字母数字._-:/，
+# 拒绝路径穿越（..）——搜索归一化层据此跳过畸形/恶意条目
+_SEARCH_ID_RE = re.compile(r'^(?!.*\.\.)[\w.\-:/]+$')
+
+
+def _default_search_transport(url: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="PUT",
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def search_models(transport=None, q: str = "", capability: str | None = None,
+                  page: int = 1) -> dict:
+    """ModelScope 搜索代理：归一化 + 错误归一，前端不因半截 JSON 崩。
+
+    transport 注入 `(url, payload) -> dict`（测试密闭化；默认 urllib PUT）。
+    错误形态 {"error", "code"}：invalid_request（本地参数）|
+    search_failed（网络/响应畸形）。
+    """
+    if transport is None:
+        transport = _default_search_transport
+    q = (q or "").strip()
+    if not q or ".." in q or len(q) > 200:
+        return {"error": "invalid query", "code": "invalid_request"}
+    if not isinstance(page, int) or page < 1 or page > SEARCH_MAX_PAGE:
+        return {"error": "invalid page", "code": "invalid_request"}
+    payload = {"Name": q, "PageSize": SEARCH_PAGE_SIZE, "PageNumber": page}
+    try:
+        raw = transport(MODELSCOPE_SEARCH_URL, payload)
+        if not isinstance(raw, dict):
+            raise ValueError("response is not an object")
+        data = raw.get("Data")
+        if not isinstance(data, dict):
+            raise ValueError("Data missing")
+        bucket = data.get("Model")
+        if not isinstance(bucket, dict):
+            raise ValueError("Model bucket missing")
+        models_raw = bucket.get("Models")
+        if not isinstance(models_raw, list):
+            raise ValueError("Models is not a list")
+        total = int(bucket.get("TotalCount") or 0)
+    except Exception as e:  # 网络/超时/畸形响应统一归一（不崩、不透传半截 JSON）
+        return {"error": f"search_failed: {e}", "code": "search_failed"}
+    models = []
+    for m in models_raw:
+        if not isinstance(m, dict):
+            continue
+        path, name = m.get("Path"), m.get("Name")
+        if not path or not name:
+            continue
+        mid = f"{path}/{name}"
+        # ModelScope id 形态恒为 org/name 两段：Path 段含 / 或整体不过
+        # pull_model 白名单形态的条目跳过（Review Focus 4）
+        if "/" in str(path) or not _SEARCH_ID_RE.match(mid):
+            continue
+        pipelines = m.get("Pipelines") or []
+        blob = f"{name} {' '.join(map(str, pipelines))}".lower()
+        models.append({
+            "id": mid,
+            "name": name,
+            "downloads": int(m.get("Downloads") or 0),
+            # 能力猜测：仅 UI 提示，最终能力由用户在步骤①声明
+            "capability_guess": "embedding" if "embed" in blob else "llm",
+            "pipeline": pipelines[0] if pipelines else None,
+        })
+    return {"models": models, "total": total}
+
+
+def handle_deploy_search(handler, pm) -> None:
+    """GET /admin/deploy/search?q=&page= — _admin 门内调用（handler.py 路由）。"""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        qs = parse_qs(urlparse(handler.path).query)
+        q = qs.get("q", [""])[0]
+        page = int(qs.get("page", ["1"])[0])
+    except Exception:
+        handler._send_json({"error": "invalid request",
+                            "code": "invalid_request"}, 400,
+                           extra_headers={"Cache-Control": "no-store"})
+        return
+    result = search_models(q=q, page=page)
+    status = 400 if result.get("code") == "invalid_request" else 200
+    handler._send_json(result, status,
+                       extra_headers={"Cache-Control": "no-store"})

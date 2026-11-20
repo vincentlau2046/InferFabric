@@ -376,6 +376,8 @@ _GET_ROUTES = {
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
     # 部署向导：能力×引擎×平台收窄选项（Task 2，纯只读）
     "/admin/deploy/options":    _admin(lambda h, pm: h._send_json(dw.deploy_options())),
+    # 部署向导：ModelScope 搜索代理（Task 3，只读、不回显凭据、no-store）
+    "/admin/deploy/search":     _admin(dw.handle_deploy_search),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
     "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
