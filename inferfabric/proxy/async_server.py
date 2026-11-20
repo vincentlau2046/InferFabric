@@ -250,6 +250,14 @@ def _build_shim(request, body, pm, watchdog, wfile, loop):
     h.send_response = _send_response
     h.send_header = _send_header
     h.end_headers = _end_headers
+
+    # Connect（F10）门禁用：对端只信 socket peer（request.transport），
+    # 缺失（或异常）即 None → connect_handlers 拒绝；绝不读转发头。
+    try:
+        h._peer_address = (request.transport.get_extra_info("peername")
+                           if request.transport is not None else None)
+    except Exception:
+        h._peer_address = None
     return h
 
 
@@ -258,10 +266,15 @@ def _build_shim(request, body, pm, watchdog, wfile, loop):
 # ═══════════════════════════════════════════════════════════════
 
 def _json_response(payload, status=200):
-    """JSON 响应体与 stdlib forwarder.send_json 逐字节一致（ensure_ascii=False）。"""
+    """JSON 响应体与 stdlib forwarder.send_json 逐字节一致（ensure_ascii=False）。
+
+    评审 I2：shim 生成的 JSON 错误响应（413/404/500）统一 no-store，
+    与 threaded 侧 read_body/send_json 错误路径的缓存语义对齐。
+    """
     body = json.dumps(payload, ensure_ascii=False).encode()
     return web.Response(status=status, body=body,
-                       content_type="application/json", charset="utf-8")
+                       content_type="application/json", charset="utf-8",
+                       headers={"Cache-Control": "no-store"})
 
 
 def _filtered_headers(captured: dict) -> dict:

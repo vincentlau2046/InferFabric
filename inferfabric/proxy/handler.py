@@ -160,6 +160,9 @@ from inferfabric.proxy_manager import (
 )
 from inferfabric import forwarder, __version__
 from inferfabric.proxy.chat_handlers import handle_chat, handle_ollama_native
+from inferfabric.proxy.connect_handlers import (
+    handle_connect_apply, handle_connect_rollback, handle_connect_status,
+)
 from inferfabric.proxy.metrics import handle_vllm_metrics
 from inferfabric.engine_adapter import get_adapter
 from inferfabric.watchdog import ModelWatchdog
@@ -365,6 +368,7 @@ _GET_ROUTES = {
     "/admin/packs/policy":     _admin(lambda h, pm: h._handle_pack_policy_get(pm)),
     "/admin/packs/uninstall-preview": _admin(lambda h, pm: h._handle_pack_uninstall_preview(pm)),
     "/admin/security/status":  _admin(lambda h, pm: h._handle_security_status(pm)),
+    "/admin/connect/status":    lambda h, pm: handle_connect_status(h, pm),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
@@ -435,6 +439,10 @@ _POST_ROUTES = {
     "/admin/security/enable":       _admin(lambda h, pm: h._handle_security_enable(pm)),
     "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
     "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
+    # Connect（F10）：自带更严门禁（回环对端 + 精确 authority + 强制 token），
+    # 不走 _admin 的无 token 兼容放行 — 见 connect_handlers._gate。
+    "/admin/connect/apply":     lambda h, pm: handle_connect_apply(h, pm),
+    "/admin/connect/rollback":  lambda h, pm: handle_connect_rollback(h, pm),
 }
 
 _DELETE_ROUTES = {
