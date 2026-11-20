@@ -49,15 +49,20 @@ def test_born_token_generates_when_missing(tmp_path, monkeypatch):
     assert proxy_handler._ensure_admin_token(env_file) == token
 
 
-def test_born_token_reads_existing_iff_value(tmp_path):
+def test_born_token_reads_existing_iff_value(tmp_path, monkeypatch):
+    # CloudDiscovery._inject_secrets_env（ProxyManager 构造副作用）会把真实
+    # secrets.env 的 IFF_ADMIN_TOKEN setdefault 进 os.environ——born-token 语义
+    # 是「显式 env 覆盖」，本测试须先清掉环境才能验证文件读取路径。
+    monkeypatch.delenv("IFF_ADMIN_TOKEN", raising=False)
     env_file = tmp_path / "secrets.env"
     env_file.write_text("IFF_ADMIN_TOKEN=existing-value-123\n# comment\nOTHER=x\n")
     env_file.chmod(0o600)
     assert proxy_handler._ensure_admin_token(env_file) == "existing-value-123"
 
 
-def test_born_token_reads_legacy_macfabric_value(tmp_path):
+def test_born_token_reads_legacy_macfabric_value(tmp_path, monkeypatch):
     """Fork-parity alias: legacy MACFABRIC_ADMIN_TOKEN entries honored read-only."""
+    monkeypatch.delenv("IFF_ADMIN_TOKEN", raising=False)
     env_file = tmp_path / "secrets.env"
     env_file.write_text("MACFABRIC_ADMIN_TOKEN=legacy-value-456\n")
     env_file.chmod(0o600)
