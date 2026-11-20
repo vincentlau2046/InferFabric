@@ -35,6 +35,7 @@ from .health_checker import DefaultHealthChecker
 from .interfaces import IStateDB, IProcessManager, IHealthChecker, IGPULock
 from .model_discovery import discover_local_models as _discover_local_models
 from .model_discovery import auto_deploy as _auto_deploy
+from .model_discovery import install_yaml
 from .gpu_state import GpuStateMachine
 from .model_lifecycle import ModelLifecycle
 
@@ -713,6 +714,19 @@ class ModelManager:
         # deploy always fails with "Unknown model".  Reload and retry.
         self.reload_models()
         return self.switch(name)
+
+    def install_model(self, name: str, model_type: str, model_type_label: str = "") -> dict:
+        """安装模型 = 生成 models.d YAML + 热重载，**不启动服务**。
+
+        Mac 语义（用户裁决：模型不要默认启动）——装载留给首请求自动唤醒
+        或用户在本地推理页手动切换。与 /admin/packs/uninstall 对称。
+        （自 fork manager.py 移植 — 上游 /deploy 路由既有调用点缺此方法，
+        部署向导计划 Task 1 断链修复。）"""
+        result = install_yaml(name, model_type, self.models_dir, self._models,
+                              model_type_label=model_type_label)
+        if result.get("status") == "installed":
+            self.reload_models()
+        return result
 
     def pull_model(self, name: str, framework: str) -> dict:
         """Pull/download a model before deployment."""
