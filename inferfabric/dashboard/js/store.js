@@ -239,12 +239,12 @@ class StateStore {
     if (this._switchLocked) return;
     // Deactivate all tabs
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.if-nav-item').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.if-nav-item').forEach(t => { t.classList.remove('active'); t.removeAttribute('aria-current'); });
     // Activate target
     const target = document.getElementById(tabId);
     if (target) target.classList.add('active');
     const btn = document.querySelector(`.if-nav-item[data-tab="${tabId}"]`);
-    if (btn) btn.classList.add('active');
+    if (btn) { btn.classList.add('active'); btn.setAttribute('aria-current', 'page'); }
     // Store + notify
     this._tabActive = tabId;
     this.set('tab_active', tabId);
@@ -254,7 +254,13 @@ class StateStore {
 
   restoreTab() {
     try {
-      const saved = localStorage.getItem('iff_active_tab');
+      let saved = localStorage.getItem('iff_active_tab');
+      // 旧版遗留 tab 迁移：部署已并入能力包页（2026-11-20），否则全 tab 失活
+      const LEGACY_TAB_MAP = { 'tab-deploy': 'tab-packs' };
+      if (saved && LEGACY_TAB_MAP[saved]) {
+        saved = LEGACY_TAB_MAP[saved];
+        try { localStorage.setItem('iff_active_tab', saved); } catch(e) {}
+      }
       // Restore last active tab (anomaly is a regular nav item in v2, no longer hidden)
       if (saved) this.switchTab(saved);
     } catch(e) {}

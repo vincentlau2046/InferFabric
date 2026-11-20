@@ -19,6 +19,8 @@ _cached_html: str | None = None
 JS_MODULES = ["ui", "store", "charts", "overview", "inference",
               "monitor", "deploy", "cloud", "model-pools", "anomaly",
               "packs", "security", "connect"]
+# 注意：deploy.js 仍在 JS_MODULES（部署表单已并入能力包页 deploySection，
+# 但其事件委托/进度逻辑仍由 deploy.js 承载；deploy 不再是独立 fragment/tab）。
 
 
 def get_html() -> str:
@@ -29,7 +31,7 @@ def get_html() -> str:
     try:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
         # 替换 fragment 占位符
-        for frag_name in ("overview", "inference", "monitor", "deploy", "cloud",
+        for frag_name in ("overview", "inference", "monitor", "cloud",
                           "model-pools", "anomaly", "packs", "security",
                           "connect"):
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"

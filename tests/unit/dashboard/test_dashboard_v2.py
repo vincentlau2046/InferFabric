@@ -1112,7 +1112,7 @@ def test_inference_no_new_api():
 
 
 def test_deploy_structure():
-    """部署页 DOM 契约：部署表单卡 + 拉取表单卡 + 长任务进度态。
+    """部署段 DOM 契约（2026-11-20 并入能力包页 #deploySection）：部署表单卡 + 拉取表单卡 + 长任务进度态。
 
     断言 get_html() 含（R12：仅 name + engine 类型，无 dead fields）：
       - 部署表单：#depName（name input）、#depType（engine type select）、
@@ -1120,6 +1120,7 @@ def test_deploy_structure():
       - 拉取表单：#pullName（name input）、#pullFw（framework select）、
         data-action="pull"（拉取按钮）
       - #deployProgress（长任务进度态容器）
+      - #deploySection 存在于能力包页；导航不再有独立部署 tab
     """
     html = _html()
     for el in (
@@ -1130,11 +1131,17 @@ def test_deploy_structure():
         'id="pullFw"',           # 拉取表单：框架选择
         'data-action="pull"',    # 拉取表单：拉取按钮
         'id="deployProgress"',   # 长任务进度态容器
+        'id="deploySection"',    # 部署段容器（能力包页内）
     ):
         assert el in html, "missing deploy contract id: %s" % el
+    # 部署不再是独立 tab：导航无 tab-deploy 按钮，独立 fragment 已删除
+    assert 'data-tab="tab-deploy"' not in html, "deploy must not be a standalone nav tab"
+    assert not (_DASHBOARD_DIR / "fragments" / "deploy.html").exists(), (
+        "deploy.html should be merged into packs.html"
+    )
     # 引擎类型选项契约（R14：仅 auto_deploy 支持的类型 vllm + llama_cpp；
     # sglang/ninfer/ollama 服务不被 auto_deploy 支持，提供即误导——会返回 200+error）
-    frag = (_DASHBOARD_DIR / "fragments" / "deploy.html").read_text(encoding="utf-8")
+    frag = (_DASHBOARD_DIR / "fragments" / "packs.html").read_text(encoding="utf-8")
     for opt in ('value="vllm"', 'value="llama_cpp"'):
         assert opt in frag, "missing auto-deployable engine option: %s" % opt
     for bad in ('value="sglang"', 'value="ninfer"'):
@@ -1146,13 +1153,16 @@ def test_deploy_structure():
 def test_deploy_js_present():
     """deploy.js 模块存在并被 get_html() 内联装配（tabRenderers 注册 + doDeploy/doPull）。
 
-    断言：文件存在；get_html() 含 tabRenderers['tab-deploy'] 注册；
+    断言：文件存在；get_html() 含 #deploySection 事件委托根；
     doDeploy / doPull 全局函数；两个端点契约；admin header 调用。"""
     js_path = ROOT / "inferfabric" / "dashboard" / "js" / "deploy.js"
     assert js_path.exists(), "deploy.js missing"
     html = _html()
-    assert "window.tabRenderers['tab-deploy'] = renderDeploy" in html, (
-        "deploy.js tab renderer registration not inlined into HTML"
+    assert "$('deploySection')" in html, (
+        "deploy.js must delegate events on #deploySection (merged into packs page)"
+    )
+    assert "window.tabRenderers['tab-deploy']" not in html, (
+        "tab-deploy renderer registration must be gone (deploy is not a tab)"
     )
     assert "window.doDeploy" in html, "window.doDeploy not inlined into HTML"
     assert "window.doPull" in html, "window.doPull not inlined into HTML"
@@ -1184,7 +1194,7 @@ def test_deploy_no_dead_fields():
     后端 auto_deploy 自动生成 YAML，不读这些字段（handler.py:1055 _handle_deploy
     仅取 name + type）。旧字段误导用户以为可配置部署参数。"""
     import re
-    frag = (_DASHBOARD_DIR / "fragments" / "deploy.html").read_text(encoding="utf-8")
+    frag = (_DASHBOARD_DIR / "fragments" / "packs.html").read_text(encoding="utf-8")
     # dead field 标识符不得出现（含 id= / name= 形式或裸标识符）
     for dead in ("model_dir", "gpu_mem", "slider"):
         assert dead not in frag, (
@@ -1197,8 +1207,8 @@ def test_deploy_no_dead_fields():
 
 
 def test_deploy_no_inline_onclick():
-    """deploy.html 不得含任何 inline onclick= 属性（事件委托约束）。"""
-    frag = (_DASHBOARD_DIR / "fragments" / "deploy.html").read_text(encoding="utf-8")
+    """packs.html（含并入的部署段）不得含任何 inline onclick= 属性（事件委托约束）。"""
+    frag = (_DASHBOARD_DIR / "fragments" / "packs.html").read_text(encoding="utf-8")
     assert "onclick=" not in frag, (
         "deploy.html contains inline onclick= — must use event delegation"
     )
@@ -1498,10 +1508,12 @@ def test_no_app_js_reference():
 
 
 def test_all_tab_renderers_registered():
-    """全部 6 个 TAB 的 tabRenderers 注册必须出现在 served HTML（Task 10 收口）。"""
+    """全部 TAB 的 tabRenderers 注册必须出现在 served HTML（Task 10 收口）。
+
+    2026-11-20：deploy 并入能力包页，不再是独立 tab。"""
     html = _html()
     for tab in ("tab-overview", "tab-inference", "tab-monitor",
-                "tab-deploy", "tab-cloud", "tab-anomaly"):
+                "tab-cloud", "tab-anomaly", "tab-packs"):
         assert "window.tabRenderers['%s']" % tab in html, (
             "missing tabRenderers registration: %s" % tab
         )
@@ -1517,7 +1529,7 @@ def test_skeleton_in_data_driven_tabs():
     assert "UI.skeleton" in cloud_js, "cloud.js must call UI.skeleton on initial load"
     assert "UI.skeleton" in anomaly_js, "anomaly.js must call UI.skeleton on load"
     frag_dir = ROOT / "inferfabric" / "dashboard" / "fragments"
-    for name in ("cloud.html", "anomaly.html", "deploy.html"):
+    for name in ("cloud.html", "anomaly.html", "packs.html"):
         frag = (frag_dir / name).read_text(encoding="utf-8")
         assert "加载中" not in frag, (
             "%s still uses static 加载中 placeholder (use skeleton)" % name

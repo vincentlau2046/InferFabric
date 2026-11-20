@@ -174,34 +174,37 @@
   <div class="if-body">
     <!-- ══ 侧边栏（56px 图标导航） ══ -->
     <aside class="if-sidebar">
+      <!-- IA v3：10 平铺 tab → 5 组导航（2026-11-20 评审裁决：状态/推理与池/网关策略/可观测/接入） -->
       <nav class="if-nav">
+        <span class="nav-cap" aria-hidden="true">状态</span>
         <button class="if-nav-item active" data-tab="tab-overview" onclick="switchTab('tab-overview')" title="总览">
           <svg><use href="#s-chart"/></svg><span>总览</span>
         </button>
+        <span class="nav-cap" aria-hidden="true">推理与池</span>
         <button class="if-nav-item" data-tab="tab-inference" onclick="switchTab('tab-inference')" title="推理">
           <svg><use href="#s-cube"/></svg><span>推理</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-monitor" onclick="switchTab('tab-monitor')" title="监控">
-          <svg><use href="#s-gpu"/></svg><span>监控</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-deploy" onclick="switchTab('tab-deploy')" title="部署">
-          <svg><use href="#s-server"/></svg><span>部署</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-cloud" onclick="switchTab('tab-cloud')" title="云端">
-          <svg><use href="#s-cloud"/></svg><span>云端</span>
         </button>
         <button class="if-nav-item" data-tab="tab-model-pools" onclick="switchTab('tab-model-pools')" title="模型池">
           <svg><use href="#s-database"/></svg><span>模型池</span>
         </button>
-        <button class="if-nav-item" data-tab="tab-anomaly" onclick="switchTab('tab-anomaly')" title="异常">
-          <svg><use href="#s-alert"/></svg><span>异常</span>
-        </button>
+        <span class="nav-cap" aria-hidden="true">网关策略</span>
         <button class="if-nav-item" data-tab="tab-packs" onclick="switchTab('tab-packs')" title="能力包">
           <svg><use href="#s-download"/></svg><span>能力包</span>
         </button>
         <button class="if-nav-item" data-tab="tab-security" onclick="switchTab('tab-security')" title="鉴权">
           <svg><use href="#s-key"/></svg><span>鉴权</span>
         </button>
+        <button class="if-nav-item" data-tab="tab-cloud" onclick="switchTab('tab-cloud')" title="云端">
+          <svg><use href="#s-cloud"/></svg><span>云端</span>
+        </button>
+        <span class="nav-cap" aria-hidden="true">可观测</span>
+        <button class="if-nav-item" data-tab="tab-monitor" onclick="switchTab('tab-monitor')" title="监控">
+          <svg><use href="#s-gpu"/></svg><span>监控</span>
+        </button>
+        <button class="if-nav-item" data-tab="tab-anomaly" onclick="switchTab('tab-anomaly')" title="异常">
+          <svg><use href="#s-alert"/></svg><span>异常</span>
+        </button>
+        <span class="nav-cap" aria-hidden="true">接入</span>
         <button class="if-nav-item" data-tab="tab-connect" onclick="switchTab('tab-connect')" title="接入">
           <svg><use href="#s-swap"/></svg><span>接入</span>
         </button>
@@ -249,7 +252,6 @@
         <!-- FRAGMENT:overview -->
         <!-- FRAGMENT:inference -->
         <!-- FRAGMENT:monitor -->
-        <!-- FRAGMENT:deploy -->
         <!-- FRAGMENT:cloud -->
         <!-- FRAGMENT:model-pools -->
         <!-- FRAGMENT:anomaly -->
@@ -282,11 +284,11 @@ window.switchTab = function(tabId) {
   }
   // Fallback: direct DOM (before Store loads)
   document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
-  document.querySelectorAll('.if-nav-item').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.if-nav-item').forEach(function(t) { t.classList.remove('active'); t.removeAttribute('aria-current'); });
   var tab = document.getElementById(tabId);
   if (tab) tab.classList.add('active');
   var btn = document.querySelector('[data-tab="' + tabId + '"]');
-  if (btn) btn.classList.add('active');
+  if (btn) { btn.classList.add('active'); btn.setAttribute('aria-current', 'page'); }
 };
 <!-- JS:echarts -->
 <!-- JS:ui -->

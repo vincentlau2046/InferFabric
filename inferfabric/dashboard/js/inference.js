@@ -103,13 +103,24 @@
     return { exclusive: excl, shared: shrd, none: free };
   }
 
-  /* ── 单张模型卡 ── */
-  function modelCard(m, info, sleepState, scenarioActive) {
+  /* ── 单张模型卡 ──
+   * 主色纪律（2026-11-20 评审 P2）：整页至多一张卡携带红色主按钮 ——
+   * 仅当 GPU 空闲（gpu_mode=idle）时，独占组第一张停止卡为「建议启动」
+   * （btn-pri + 建议 徽标）；其余停止卡一律中性 btn-sec。红色归还给
+   * "唯一行动"与运行卡的危险操作。
+   * 停止卡卡体塌缩：4 个 meta 槽位（端口/uptime/精度/场景）对停止态是
+   * 四列死 "—"（评审 P2），改为两槽摘要（模式/精度）；等高不受影响 ——
+   * 对齐是结构保证（inf-card-grid 拉伸 + .if-card-actions margin-top:auto
+   * 钉底，见 style.css:489 注释），不依赖槽位数一致。 */
+  var MODE_LABEL = { exclusive: '独占', shared: '共享', none: '空闲' };
+
+  function modelCard(m, info, sleepState, scenarioActive, isRecommended) {
     var name = m.name || '';
     var type = (info && info.type) || m.type || '';
     var port = info && info.port ? info.port : null;
     var sleeping = !!sleepState;
     var active = !!m.active && !sleeping;
+    var stopped = !active && !sleeping;
 
     // 场景徽标（D5：数据源 = snapshot.status.scenario_active，直读应用层文件 ≡ 容器值）
     // default（= 模型 YAML 当前值）灰显；非 default 场景琥珀色
@@ -147,21 +158,45 @@
       actions += '<button type="button" class="btn btn-danger btn-sm" data-action="stop" data-model="' + nm + '">' +
         UI.icon('stop', 14) + 'Stop</button>';
     } else {
-      actions += '<button type="button" class="btn btn-pri btn-sm" data-action="switch" data-model="' + nm + '">' +
-        UI.icon('play', 14) + '启动</button>';
+      var startCls = isRecommended ? 'btn-pri' : 'btn-sec';
+      var startTitle = isRecommended ? ' title="GPU 空闲，建议启动"' : '';
+      actions += '<button type="button" class="btn ' + startCls + ' btn-sm" data-action="switch" data-model="' + nm + '"' +
+        startTitle + '>' + UI.icon('play', 14) + '启动</button>';
     }
     // 场景控件：所有卡可见（default 也是合法目标——手改 YAML 后重启生效；
     // 无预设的模型打开弹窗只有 default 一项，引擎不支持时预览会明确报错）
     actions += '<button type="button" class="btn btn-sec btn-sm" data-action="scenario" data-model="' + nm + '">' +
       UI.icon('gear', 14) + '场景</button>';
 
-    /* 卡片解剖统一：4 个固定 meta 槽位（端口/uptime/精度/场景），缺失值显式
-       占位 "—"。同组/跨组所有卡同构 → 列宽恒定、卡高一致、操作行钉底对齐。
-       （此前端口仅 active 渲染、精度仅量化非空渲染 → 每卡槽数不同 → 列参差。） */
-    var portVal = (port != null && active) ? ':' + escHtml(port) : '—';
-    var upVal = active ? UI.fmtDur(upSecs) : '—';
+    // 建议启动徽标（仅推荐卡）
+    var recBadge = (stopped && isRecommended)
+      ? '<span class="badge warn" title="GPU 空闲，独占组首个停止模型">建议</span>'
+      : '';
+
+    // 卡体：运行/休眠卡保留 4 槽位（端口/uptime/精度/场景）；
+    // 停止卡塌缩为 2 槽摘要（模式/精度）——端口与 uptime 对停止态无意义。
     var quantVal = m.quantization ? escHtml(m.quantization) : '—';
     var scnTitle = escHtml(scn === 'default' ? 'default（= 模型 YAML 当前值）' : '已应用场景 ' + scn);
+    var bodyHtml;
+    if (stopped) {
+      var modeVal = escHtml(MODE_LABEL[m.mode] || '独占');
+      bodyHtml =
+          '<dl class="inf-stats">' +
+            '<div class="inf-stat"><dt>模式</dt><dd class="mono">' + modeVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>精度</dt><dd class="mono">' + quantVal + '</dd></div>' +
+          '</dl>';
+    } else {
+      var portVal = (port != null && active) ? ':' + escHtml(port) : '—';
+      var upVal = active ? UI.fmtDur(upSecs) : '—';
+      bodyHtml =
+          '<dl class="inf-stats">' +
+            '<div class="inf-stat"><dt>端口</dt><dd class="mono">' + portVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>uptime</dt><dd class="mono">' + upVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>精度</dt><dd class="mono">' + quantVal + '</dd></div>' +
+            '<div class="inf-stat"><dt>场景</dt><dd class="mono inf-scenario' + scnCls + '" title="' +
+              scnTitle + '">' + escHtml(scn) + '</dd></div>' +
+          '</dl>';
+    }
 
     return '' +
       '<div class="if-card inf-card">' +
@@ -169,22 +204,15 @@
           '<span class="status-dot ' + dotCls + '" title="' + escHtml(stateTxt) + '"></span>' +
           '<span class="if-card-title">' + escHtml(name) + '</span>' +
           '<span class="badge">' + escHtml(engineLabel(type)) + '</span>' +
+          recBadge +
         '</div>' +
-        '<div class="if-card-body">' +
-          '<dl class="inf-stats">' +
-            '<div class="inf-stat"><dt>端口</dt><dd class="mono">' + portVal + '</dd></div>' +
-            '<div class="inf-stat"><dt>uptime</dt><dd class="mono">' + upVal + '</dd></div>' +
-            '<div class="inf-stat"><dt>精度</dt><dd class="mono">' + quantVal + '</dd></div>' +
-            '<div class="inf-stat"><dt>场景</dt><dd class="mono inf-scenario' + scnCls + '" title="' +
-              scnTitle + '">' + escHtml(scn) + '</dd></div>' +
-          '</dl>' +
-        '</div>' +
+        '<div class="if-card-body">' + bodyHtml + '</div>' +
         '<div class="if-card-actions">' + actions + '</div>' +
       '</div>';
   }
 
   /* ── 渲染一个分组 ── */
-  function renderGroup(groupEl, countEl, listEl, models, sleepStates, servicesInfo, scenarioActive) {
+  function renderGroup(groupEl, countEl, listEl, models, sleepStates, servicesInfo, scenarioActive, recommendedName) {
     if (!groupEl || !listEl || !countEl) return;
 
     if (models === undefined) {
@@ -211,7 +239,8 @@
       var info = (servicesInfo && servicesInfo[m.name]) || null;
       var sleep = (sleepStates && sleepStates[m.name]) || null;
       var scn = scenarioActive && scenarioActive[m.name];
-      html += modelCard(m, info, sleep, scn || 'default');
+      var rec = recommendedName && m.name === recommendedName;
+      html += modelCard(m, info, sleep, scn || 'default', rec);
     }
     listEl.innerHTML = html;
   }
@@ -313,12 +342,25 @@
 
     var g = groupModels(models);
 
+    /* 建议启动（主色纪律）：仅当 GPU 空闲时推荐独占组第一张停止卡——
+       独占启动需要 GPU=idle，共享/空闲组不参与推荐；整页唯一 btn-pri。 */
+    var recommendedName = null;
+    if ((status.gpu_mode || 'idle') === 'idle') {
+      for (var i = 0; i < g.exclusive.length; i++) {
+        var m = g.exclusive[i];
+        if (m && !m.active && !(sleepStates && sleepStates[m.name])) {
+          recommendedName = m.name;
+          break;
+        }
+      }
+    }
+
     renderGroup($('infExclGroup'), $('infExclCount'), $('infExclList'),
-                g.exclusive, sleepStates, servicesInfo, scenarioActive);
+                g.exclusive, sleepStates, servicesInfo, scenarioActive, recommendedName);
     renderGroup($('infShrdGroup'), $('infShrdCount'), $('infShrdList'),
-                g.shared, sleepStates, servicesInfo, scenarioActive);
+                g.shared, sleepStates, servicesInfo, scenarioActive, null);
     renderGroup($('infFreeGroup'), $('infFreeCount'), $('infFreeList'),
-                g.none, sleepStates, servicesInfo, scenarioActive);
+                g.none, sleepStates, servicesInfo, scenarioActive, null);
 
     renderGateway();
   }
@@ -651,7 +693,10 @@
         return;
       }
       if (act === 'goto-deploy') {
-        store.switchTab('tab-deploy');
+        // 部署已并入能力包页「扩展 · 部署」段：切过去并滚到该段
+        store.switchTab('tab-packs');
+        var sec = document.getElementById('deploySection');
+        if (sec) setTimeout(function () { sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60);
         return;
       }
       // 场景控件：所有模型卡可见（default 也是合法目标）

@@ -1,5 +1,6 @@
-/* InferFabric Console — Deploy tab (v2, Task 7)
+/* InferFabric Console — Deploy section（并入能力包页，2026-11-20 用户裁决）
  * 部署表单（name + engine 类型）+ 拉取表单（name + framework）+ 长任务进度态。
+ * 不再是独立 tab：DOM 挂在 packs.html 的 #deploySection，激活事件跟随 tab-packs。
  *
  * 数据源：
  *   - POST /deploy {name, type}     — 生成 YAML 并切换（admin header）
@@ -17,7 +18,6 @@
  *   - /pull 同步无流式：in-flight 期间显示不定进度指示器，响应后替换为结果文本。
  *
  * 暴露：
- *   - window.tabRenderers['tab-deploy'] = renderDeploy
  *   - window.doDeploy() / window.doPull()
  */
 (function () {
@@ -175,22 +175,16 @@
     });
   };
 
-  /* ── 渲染入口 ──
+  /* ── 激活钩子 ──
    *   部署/拉取表单为静态（无 snapshot 数据依赖）；进度卡由 doDeploy/doPull 显隐。
-   *   渲染器仅作注册占位，保持与其他 TAB 一致的 tabRenderers 契约。 */
-  function renderDeploy() {
-    // 静态表单无需重绘；保留供 store.tab_active 订阅与未来扩展。
-  }
-
-  window.renderDeploy = renderDeploy;
-  window.tabRenderers['tab-deploy'] = renderDeploy;
-
+   *   deploy 不再是独立 tab（已并入能力包页）：无 tabRenderers 注册，
+   *   激活事件跟随 tab-packs（无需重绘）。 */
   store.on('tab_active', function (tab) {
-    if (tab === 'tab-deploy') renderDeploy();
+    if (tab === 'tab-packs') return; // 静态表单 + 按需进度态，无需重绘
   });
 
-  /* ── 事件委托（无 inline onclick） ── */
-  var root = $('tab-deploy');
+  /* ── 事件委托（无 inline onclick）—— 作用域限定 #deploySection，不干扰 packs.js ── */
+  var root = $('deploySection');
   if (root) {
     root.addEventListener('click', function (ev) {
       var btn = ev.target.closest('[data-action]');
