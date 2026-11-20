@@ -17,6 +17,9 @@ CAPABILITIES = frozenset(
     {"llm", "vl", "asr", "tts", "embedding", "rerank", "ocr"})
 ARTIFACT_KINDS = frozenset({"model", "runtime", "resource"})
 GPU_ROLES = frozenset({"exclusive", "shared", "none"})
+# 平台键白名单（specs/packs-platform-adaptation §3）：可选 platforms 申明
+# 只收窄审核过的模板范围；不设 "any" 通配键——spec 明令禁止新明确通配。
+PLATFORM_KEYS = frozenset({"linux-nvidia", "linux-cpu", "darwin-arm"})
 LIFECYCLE_MODES = frozenset({"on_demand", "resident"})
 PACK_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -73,9 +76,11 @@ class PackManifest:
     healthcheck: str
     sandbox_policy: str
     degraded_install_allowed: bool
+    # 可选平台申明：None = 未申明（按模板推断），绝不等价于全平台通配
+    platforms: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "pack_id": self.pack_id,
             "pack_version": self.pack_version,
             "capability": self.capability,
@@ -100,6 +105,10 @@ class PackManifest:
                         "degraded_install_allowed":
                             self.degraded_install_allowed},
         }
+        # 未申明 platforms 的旧 manifest 不新增该键（roundtrip 恒等）
+        if self.platforms is not None:
+            d["platforms"] = list(self.platforms)
+        return d
 
     def to_dict_yaml(self) -> str:
         return yaml.safe_dump(self.to_dict(), sort_keys=False,
@@ -130,8 +139,27 @@ def parse_manifest(text: str | dict) -> PackManifest:
     d = yaml.safe_load(text) if isinstance(text, str) else dict(text)
     if not isinstance(d, dict):
         raise ManifestError("", f"manifest must be a mapping, got {type(d).__name__}")
-    _reject_unknown("", d, _TOP)
+    _reject_unknown("", d, list(_TOP) + ["platforms"])
     _require("", d, tuple(_TOP))
+
+    # platforms（可选）：缺省 None；出现时必须是非空 list[str]，键严格
+    # 白名单、无重复；无 "any" 通配键（spec §3 禁止新明确通配）。
+    platforms_raw = d.get("platforms")
+    if platforms_raw is not None:
+        if not isinstance(platforms_raw, list) or not platforms_raw or \
+                not all(isinstance(p, str) and p for p in platforms_raw):
+            raise ManifestError("platforms", "expected non-empty list of str")
+        if len(set(platforms_raw)) != len(platforms_raw):
+            raise ManifestError("platforms",
+                                f"duplicate entries in {platforms_raw!r}")
+        unknown_plats = set(platforms_raw) - PLATFORM_KEYS
+        if unknown_plats:
+            raise ManifestError(
+                "platforms",
+                f"{sorted(unknown_plats)} not in {sorted(PLATFORM_KEYS)}")
+        platforms: tuple[str, ...] | None = tuple(platforms_raw)
+    else:
+        platforms = None
 
     pack_id, capability = d["pack_id"], str(d["capability"])
     if not isinstance(pack_id, str) or not PACK_ID_RE.match(pack_id):
@@ -232,4 +260,5 @@ def parse_manifest(text: str | dict) -> PackManifest:
         model_config_template=str(exe["model_config_template"]),
         healthcheck=str(exe["healthcheck"]),
         sandbox_policy=str(sb["policy"]),
-        degraded_install_allowed=sb["degraded_install_allowed"])
+        degraded_install_allowed=sb["degraded_install_allowed"],
+        platforms=platforms)
