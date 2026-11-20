@@ -18,7 +18,7 @@ _cached_html: str | None = None
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
 JS_MODULES = ["ui", "store", "charts", "overview", "inference",
               "monitor", "deploy", "cloud", "model-pools", "anomaly",
-              "packs"]
+              "packs", "security"]
 
 
 def get_html() -> str:
@@ -30,7 +30,7 @@ def get_html() -> str:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
         # 替换 fragment 占位符
         for frag_name in ("overview", "inference", "monitor", "deploy", "cloud",
-                          "model-pools", "anomaly", "packs"):
+                          "model-pools", "anomaly", "packs", "security"):
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"
             try:
                 frag = frag_path.read_text(encoding="utf-8")
