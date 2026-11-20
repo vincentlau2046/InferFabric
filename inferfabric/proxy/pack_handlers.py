@@ -346,7 +346,16 @@ class PackManager:
             if pack_id in self._in_progress:
                 self._in_progress[pack_id] = stage
 
-    def start_install(self, pack_id: str) -> tuple[int, dict]:
+    def start_install(self, pack_id: str, gpu_devices: str | None = None) \
+            -> tuple[int, dict]:
+        import re as _re
+        if gpu_devices is not None \
+                and not (isinstance(gpu_devices, str)
+                         and _re.fullmatch(r"[0-9]+(,[0-9]+)*",
+                                           gpu_devices.strip())):
+            return 400, {"error": f"invalid gpu_devices {gpu_devices!r} — "
+                                  "only numeric device ids allowed "
+                                  "(e.g. \"0\" or \"0,1\")"}
         entry = self.catalog.find(pack_id)
         if entry is None:
             # 自定义包失败重试：从注册表重启下载（同一 URL，同一校验链）
@@ -364,12 +373,13 @@ class PackManager:
                 return 409, {"error": f"install already in progress for "
                                       f"{pack_id!r}"}
             self._in_progress[pack_id] = "preflight"
-        t = threading.Thread(target=self._run_install, args=(entry,),
+        t = threading.Thread(target=self._run_install,
+                             args=(entry, gpu_devices),
                              daemon=True, name=f"pack-install-{pack_id}")
         t.start()
         return 202, {"pack_id": pack_id, "status": "preflight"}
 
-    def _run_install(self, entry) -> None:
+    def _run_install(self, entry, gpu_devices: str | None = None) -> None:
         pack_id = entry.manifest.pack_id
         try:
             res = self.installer.install(entry)
@@ -382,10 +392,14 @@ class PackManager:
         now = int(time.time())
         try:
             if res_ok:
+                # 终审 F5/F6：所有权（含设备域）在安装事务内持久化，
+                # 启动时读回校验 —— YAML marker 不是权威。
                 self.store.set(PackRecord(
                     pack_id=pack_id, pack_version=entry.manifest.pack_version,
                     status="installed", stage="installed", error=None,
-                    sandbox_degraded=res.sandbox_degraded, installed_at=now))
+                    sandbox_degraded=res.sandbox_degraded, installed_at=now,
+                    ownership={"marker_version": 1, "role": "owned",
+                               "gpu_devices": gpu_devices}))
             else:
                 self.store.set(PackRecord(
                     pack_id=pack_id, pack_version=entry.manifest.pack_version,
@@ -539,7 +553,9 @@ class PackManager:
             self.store.set(PackRecord(
                 pack_id=pack_id, pack_version=manifest.pack_version,
                 status="installed", stage="installed", error=None,
-                sandbox_degraded=False, installed_at=int(time.time())))
+                sandbox_degraded=False, installed_at=int(time.time()),
+                ownership={"marker_version": 1, "role": "owned",
+                           "gpu_devices": None}))
             shutil.rmtree(staging, ignore_errors=True)
         except Exception as exc:
             import time as _t

@@ -31,6 +31,8 @@ from tests.unit.tests_fixtures_packs import A64 as _A64
 TEMPLATE_NAME = "ninfer-nvfp4-linux-v1"
 PACK_ID = "llm.pilot-ninfer-27b"
 
+_NO_DEFAULT = object()
+
 
 # ── 夹具 ─────────────────────────────────────────────────────────
 
@@ -70,9 +72,16 @@ sandbox: {{policy: verified-local-pack-v1, degraded_install_allowed: false}}
 """
 
 
-def _install_pack(tmp_path, marker=None):
-    """在 store + pack_root 落一个已装包（含 manifest.yaml + 产物占位）。"""
+def _install_pack(tmp_path, marker=None, ownership=_NO_DEFAULT):
+    """在 store + pack_root 落一个已装包（含 manifest.yaml + 产物占位）。
+
+    ownership：持久化所有权段（终审 F5）；默认与 marker role 一致。
+    """
     marker = marker or _marker()
+    if ownership is _NO_DEFAULT:
+        ownership = {"marker_version": 1,
+                     "role": marker.get("role", "owned"),
+                     "gpu_devices": None}
     root = tmp_path / "packs_root"
     pack_dir = root / marker["pack_id"] / marker["pack_version"]
     pack_dir.mkdir(parents=True)
@@ -84,7 +93,7 @@ def _install_pack(tmp_path, marker=None):
     store.set(PackRecord(
         pack_id=marker["pack_id"], pack_version=marker["pack_version"],
         status="installed", stage="installed", error=None,
-        sandbox_degraded=False, installed_at=0))
+        sandbox_degraded=False, installed_at=0, ownership=ownership))
     return store, root
 
 
@@ -388,7 +397,10 @@ def _bge_pack(tmp_path, marker=None):
     store.set(PackRecord(
         pack_id=marker["pack_id"], pack_version=marker["pack_version"],
         status="installed", stage="installed", error=None,
-        sandbox_degraded=True, installed_at=0))
+        sandbox_degraded=True, installed_at=0,
+        ownership={"marker_version": 1,
+                   "role": marker.get("role", "owned"),
+                   "gpu_devices": None}))
     return store, pack_dir
 
 
@@ -544,3 +556,117 @@ sandbox: {{policy: verified-local-pack-v1, degraded_install_allowed: true}}
         "借用权重绝不删除"
     assert not (tmp_path / "packs_root" / "embedding.bge-cpu").exists()
     assert not (models_d / "pack-bge-cpu-1-0-0.yaml").exists()
+
+
+# ── 9. 终审修复：fail-closed 默认 + 持久化所有权权威 ─────────────
+
+def test_gpu_admission_requires_wired_busy_probe(tmp_path):
+    """GPU 包 + busy 探测未注入 → resource_unknown（fail-closed），
+    绝不静默跳过 idle-only 检查。"""
+    store, _ = _install_pack(tmp_path)
+    _model_yaml(tmp_path, "pilot", marker=_marker())
+    model = _load_one(tmp_path, "pilot")
+    rt = ManagedRuntime(store=store, pack_root=tmp_path / "packs_root",
+                        registry_lookup=admission.get_template,
+                        probe_gpu_busy=None, models_lookup={})
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.check_start(model, proc=MagicMock())
+    assert ei.value.reason_code == "resource_unknown"
+
+
+def test_collision_check_requires_model_registry(tmp_path):
+    """模型注册表未注入 → 拒绝解析（无法排除 legacy 端口冲突 = 不得启动）。"""
+    store, _ = _install_pack(tmp_path)
+    _model_yaml(tmp_path, "pilot", marker=_marker())
+    model = _load_one(tmp_path, "pilot")
+    rt = ManagedRuntime(store=store, pack_root=tmp_path / "packs_root",
+                        registry_lookup=admission.get_template,
+                        probe_gpu_busy=lambda: False, models_lookup=None)
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(model)
+    assert ei.value.reason_code == "runtime_unavailable"
+
+
+def test_resolve_refuses_unpersisted_ownership(tmp_path):
+    """store 记录无所有权段（旧记录/绕过安装事务）→ 拒绝启动，要求重装。"""
+    store, _ = _install_pack(tmp_path, ownership=None)
+    _model_yaml(tmp_path, "pilot", marker=_marker())
+    model = _load_one(tmp_path, "pilot")
+    rt = _runtime(tmp_path, store)
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(model)
+    assert ei.value.reason_code == "ownership_conflict"
+
+
+def test_resolve_refuses_marker_role_contradicting_record(tmp_path):
+    """marker 声明的 role 与持久化所有权矛盾（YAML 篡改信号）→ 拒绝。"""
+    store, _ = _install_pack(tmp_path)
+    _model_yaml(tmp_path, "pilot", marker=_marker(role="external"))
+    model = _load_one(tmp_path, "pilot")
+    rt = _runtime(tmp_path, store)
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(model)
+    assert ei.value.reason_code == "runtime_identity_mismatch"
+
+
+def test_device_scope_comes_from_persisted_record_not_marker(tmp_path):
+    """设备白名单权威 = 安装事务持久化的所有权段；marker 里的
+    gpu_devices 一律忽略（YAML 不可提权）。"""
+    store, _ = _install_pack(
+        tmp_path, ownership={"marker_version": 1, "role": "owned",
+                             "gpu_devices": "0"})
+    _model_yaml(tmp_path, "pilot",
+                marker=_marker(gpu_devices="1,2,3"))
+    model = _load_one(tmp_path, "pilot")
+    rt = _runtime(tmp_path, store)
+    inst = rt.resolve(model)
+    assert inst.gpu_devices == "0"
+
+
+def test_install_persists_ownership_record(tmp_path):
+    """安装事务成功 → PackRecord.ownership 持久化（role=owned +
+    可选设备域），启动时读回校验（spec §4）。"""
+    from inferfabric.proxy.pack_handlers import PackManager
+
+    def _cat(pack_id):
+        cat = tmp_path / f"catalog-{pack_id}.yaml"
+        cat.write_text(yaml.safe_dump({"packs": [{
+            "pack_id": pack_id, "display_name": "Own", "summary": "s",
+            "tags": ["llm"], "risk_level": "verified", "builtin": True,
+            "manifest": yaml.safe_load(_rollback_manifest(pack_id))}]}),
+            encoding="utf-8")
+        return cat
+
+    pm = PackManager(tmp_path / "pk-own", tmp_path / "models.d",
+                     catalog_path=_cat("llm.own-a"), fetcher=_BoomFetch(),
+                     reload_gateway=lambda: None,
+                     prepare_runtime=lambda *a, **k: None,
+                     run_healthcheck=lambda *a, **k: None,
+                     memory_available_mb=lambda: 100_000)
+    entry = pm.catalog.find("llm.own-a")
+    pm._run_install(entry)                      # 同步直调（线程目标）
+    rec = pm.store.get("llm.own-a")
+    assert rec is not None and rec.status == "installed"
+    assert rec.ownership == {"marker_version": 1, "role": "owned",
+                             "gpu_devices": None}
+
+    # 安装时授予设备域 → 持久化；非法设备域 → 400 且不启动安装
+    pm2 = PackManager(tmp_path / "pk-own2", tmp_path / "models.d",
+                      catalog_path=_cat("llm.own-b"), fetcher=_BoomFetch(),
+                      reload_gateway=lambda: None,
+                      prepare_runtime=lambda *a, **k: None,
+                      run_healthcheck=lambda *a, **k: None,
+                      memory_available_mb=lambda: 100_000)
+    entry2 = pm2.catalog.find("llm.own-b")
+    pm2._run_install(entry2, gpu_devices="0")
+    rec2 = pm2.store.get("llm.own-b")
+    assert rec2.ownership["gpu_devices"] == "0"
+
+    code, payload = pm2.start_install("llm.own-b", gpu_devices="--privileged")
+    assert code == 400
+    assert pm2.store.get("llm.own-b").ownership["gpu_devices"] == "0"
+
+
+class _BoomFetch:
+    def fetch(self, *a, **k):
+        raise AssertionError("builtin pack must not download")

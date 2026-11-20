@@ -2125,8 +2125,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """
         data = self._read_body()
         if data and data.get("pack_id"):
+            # 终审 F6：可选设备域（安装事务持久化为所有权段；YAML 不可提权）
+            gpu_devices = data.get("gpu_devices")
             code, payload = pack_handlers.get_pack_manager().start_install(
-                str(data["pack_id"]))
+                str(data["pack_id"]),
+                gpu_devices=str(gpu_devices) if gpu_devices is not None
+                else None)
             self._send_json(payload, code)
             return
         name = ((data or {}).get("name") or "").strip()
