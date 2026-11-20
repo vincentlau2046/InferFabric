@@ -721,7 +721,19 @@ class ModelManager:
         Mac 语义（用户裁决：模型不要默认启动）——装载留给首请求自动唤醒
         或用户在本地推理页手动切换。与 /admin/packs/uninstall 对称。
         （自 fork manager.py 移植 — 上游 /deploy 路由既有调用点缺此方法，
-        部署向导计划 Task 1 断链修复。）"""
+        部署向导计划 Task 1 断链修复。）
+
+        评审 F1（Critical）：name 是文件系统边界 —— 服务端校验单文件名
+        组件（拒穿越/绝对路径/分隔符）+ YAML 歧义名（name: on 会被
+        safe_load 解析为布尔），校验先于一切查找。）"""
+        import re as _re
+        name = str(name or "").strip()
+        if (not _re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", name)
+                or name.lower() in ("on", "off", "yes", "no", "true",
+                                    "false", "null", "none", "~")):
+            return {"status": "error",
+                    "message": f"无效名称: {name!r} — 需为 1-64 位字母/数字/._-"
+                               "（非 YAML 布尔/空值字面量）"}
         result = install_yaml(name, model_type, self.models_dir, self._models,
                               model_type_label=model_type_label)
         if result.get("status") == "installed":

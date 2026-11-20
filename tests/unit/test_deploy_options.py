@@ -76,9 +76,43 @@ class TestShape:
         monkeypatch.setattr(dw.platform, "system", lambda: "Darwin")
         monkeypatch.setattr(dw.platform, "machine", lambda: "arm64")
         monkeypatch.setattr(dw.shutil, "which", lambda p: None)
+        # GPU 探测走 nvidia-smi -L 子进程（评审 F7：二进制存在 ≠ 有可用 GPU）
+        monkeypatch.setattr(dw.subprocess, "run",
+                            lambda *a, **k: _raise(TimeoutError("slow")))
         # 引擎真实探测已由 autouse _stub_engine_probe 打桩（避免 packs 单例污染）
         opts = dw.deploy_options()
         assert [e["id"] for e in opts["engines"]] == ["llama_cpp"]
+
+    def test_nvidia_probe_requires_device_list(self, monkeypatch):
+        # nvidia-smi 在 PATH 但无 GPU 设备（容器）→ 按无 NVIDIA 收窄
+        import types
+        monkeypatch.setattr(dw.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(dw.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(dw.shutil, "which", lambda p: "/usr/bin/nvidia-smi")
+        ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        monkeypatch.setattr(dw.subprocess, "run", lambda *a, **k: ok)
+        opts = dw.deploy_options()
+        assert "vllm" not in [e["id"] for e in opts["engines"]]
+        # 有设备清单 → 放开
+        ok2 = types.SimpleNamespace(returncode=0,
+                                    stdout="GPU 0: Tesla (uuid...)\n", stderr="")
+        monkeypatch.setattr(dw.subprocess, "run", lambda *a, **k: ok2)
+        opts = dw.deploy_options()
+        assert "vllm" in [e["id"] for e in opts["engines"]]
+
+    def test_nvidia_probe_nonzero_exit_is_no_gpu(self, monkeypatch):
+        import types
+        monkeypatch.setattr(dw.platform, "system", lambda: "Linux")
+        monkeypatch.setattr(dw.platform, "machine", lambda: "x86_64")
+        monkeypatch.setattr(dw.shutil, "which", lambda p: "/usr/bin/nvidia-smi")
+        bad = types.SimpleNamespace(returncode=9, stdout="", stderr="driver err")
+        monkeypatch.setattr(dw.subprocess, "run", lambda *a, **k: bad)
+        opts = dw.deploy_options()
+        assert "vllm" not in [e["id"] for e in opts["engines"]]
+
+
+def _raise(exc):
+    raise exc
 
 
 class TestRouteWiring:

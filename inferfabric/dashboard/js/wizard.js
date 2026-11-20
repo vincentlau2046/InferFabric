@@ -29,6 +29,7 @@
   var URL_DL_STATUS = '/admin/deploy/download/status';
   var URL_INSTALL = '/admin/packs/install';
   var URL_AUTOSTART = '/admin/models/set-autostart';
+  var URL_LOCAL_MODELS = '/local-models';
   var POLL_MS = 1500;
   var SEARCH_DEBOUNCE = 300;
 
@@ -47,6 +48,7 @@
   var _options = null;
   var _open = false;
   var _busy = false;              // 一键序列在途（防双击/防重复提交）
+  var _runSeq = 0;                // 评审 F4：在途序列 token —— 重置/重开即失效旧回调
   var _pollTimer = null;
   var _searchTimer = null;
   var _searchQ = '', _searchPage = 1, _searchTotal = 0, _searchItems = [];
@@ -128,8 +130,13 @@
       var modes = (_options && _options.deployment_modes &&
                    _options.deployment_modes[wiz.engine]) || [];
       modes.forEach(function (m) {
-        html += btn('pick-mode', escHtml(MODE_LABELS[m] || m),
-                    ' data-mode="' + escHtml(m) + '"', false) + ' ';
+        /* 评审 F3：向导不出走不通的通道 —— local-dir（vLLM/SGLang 权重目录
+         * 装载）本期未接线，禁用并明示，不得点了才失败 */
+        var wired = (m === 'local-gguf' || m === 'packs-catalog');
+        var dis = wired ? '' : ' disabled';
+        html += btn('pick-mode', escHtml(MODE_LABELS[m] || m) +
+                    (wired ? '' : '（本版本未接线）'),
+                    ' data-mode="' + escHtml(m) + '"' + dis, false) + ' ';
       });
     } else if (wiz.step === 4) {
       html += '<input type="text" id="wizSearchInput" class="if-input"' +
@@ -205,8 +212,10 @@
   }
 
   function doSearch(q, page) {
+    var run = ++_runSeq;          // 新搜索使旧搜索/旧序列回调失效（F4）
     _fetch(URL_SEARCH + '?q=' + encodeURIComponent(q) + '&page=' + page, {},
            function (err, j) {
+      if (run !== _runSeq) return;      // 评审 F4：陈旧回调不得写状态
       if (err) { _searchState = 'failed'; renderSearch();
         UI.toast('搜索失败：' + err.message, 'error'); return; }
       _searchTotal = (j && j.total) || 0;
@@ -221,14 +230,15 @@
     if (_pollTimer) { clearTimeout(_pollTimer); _pollTimer = null; }
   }
 
-  function pollStatus(downloadId) {
+  function pollStatus(downloadId, run) {
     stopPoll();
     _pollTimer = setTimeout(function () {
       _fetch(URL_DL_STATUS + '?download_id=' + encodeURIComponent(downloadId),
              {}, function (err, j) {
-        if (err) { _finishOneClick(false, '下载状态查询失败：' + err.message); return; }
-        if (j.stage === 'done') { _installModel(); return; }
-        if (j.stage === 'error') { _finishOneClick(false, '下载失败：' + (j.error || '')); return; }
+        if (run !== _runSeq) return;  // 评审 F4：重置/重开后旧轮询不写状态
+        if (err) { _finishOneClick(false, '下载状态查询失败：' + err.message, run); return; }
+        if (j.stage === 'done') { _installModel(run); return; }
+        if (j.stage === 'error') { _finishOneClick(false, '下载失败：' + (j.error || ''), run); return; }
         var el = $('wizBody');
         if (el) {
           var pct = j.files_total ? (j.files_done + '/' + j.files_total) : '';
@@ -236,15 +246,16 @@
             '<p>下载中 ' + escHtml(j.current_file || '') + ' ' + escHtml(pct) +
             '（切换页面不会中断下载，但本页不再跟踪进度）</p>';
         }
-        pollStatus(downloadId);
+        pollStatus(downloadId, run);
       });
     }, POLL_MS);
   }
 
-  function startDownload(path) {
+  function startDownload(path, run) {
     var body = { model_id: wiz.model.id };
     if (path) body.path = path;
     _fetch(URL_DOWNLOAD, { method: 'POST', body: body }, function (err, j) {
+      if (run !== _runSeq) return;    // 评审 F4：陈旧回调不触发装载
       if (err) {
         if (err.code === 'select_file') {
           _choices = err.choices || [];
@@ -252,45 +263,48 @@
           renderStep();
           return;
         }
-        _finishOneClick(false, '下载启动失败：' + err.message); return;
+        _finishOneClick(false, '下载启动失败：' + err.message, run); return;
       }
       _choices = null;
       var el = $('wizBody');
       if (el) el.innerHTML = stepBar() + '<p>开始下载 ' +
         escHtml(String(j.total_bytes)) + ' 字节…</p>';
-      pollStatus(j.download_id);
+      pollStatus(j.download_id, run);
     });
   }
 
-  function _installModel() {
+  function _installModel(run) {
     _fetch(URL_INSTALL, { method: 'POST',
                           body: { name: wiz.params.name, type: wiz.engine } },
            function (err, j) {
-      if (err) { _finishOneClick(false, '装载失败：' + err.message); return; }
+      if (run !== _runSeq) return;    // 评审 F4：陈旧回调不触发后续写
+      if (err) { _finishOneClick(false, '装载失败：' + err.message, run); return; }
       if (j.status === 'already_configured') {
         // Review Focus 3：已配置可继续（提示 + 允许 switch/自启），不是失败
-        if (wiz.params.autostart) { _setAutostart('已配置（可直接切换）'); return; }
-        _finishOneClick(true, '已配置，可直接切换（未重复装载）');
+        if (wiz.params.autostart) { _setAutostart('已配置（可直接切换）', run); return; }
+        _finishOneClick(true, '已配置，可直接切换（未重复装载）', run);
         return;
       }
       if (j.status !== 'installed') {
-        _finishOneClick(false, '装载失败：' + (j.message || j.status)); return;
+        _finishOneClick(false, '装载失败：' + (j.message || j.status), run); return;
       }
-      if (wiz.params.autostart) { _setAutostart('已装载'); return; }
-      _finishOneClick(true, '已装载（未启动服务 — 首请求唤醒或手动切换）');
+      if (wiz.params.autostart) { _setAutostart('已装载', run); return; }
+      _finishOneClick(true, '已装载（未启动服务 — 首请求唤醒或手动切换）', run);
     });
   }
 
-  function _setAutostart(prefix) {
+  function _setAutostart(prefix, run) {
     _fetch(URL_AUTOSTART, { method: 'POST',
                             body: { name: wiz.params.name, enabled: true } },
            function (err) {
-      if (err) { _finishOneClick(true, prefix + '；自启设置失败：' + err.message); return; }
-      _finishOneClick(true, prefix + '；已设为自启');
+      if (run !== _runSeq) return;
+      if (err) { _finishOneClick(true, prefix + '；自启设置失败：' + err.message, run); return; }
+      _finishOneClick(true, prefix + '；已设为自启', run);
     });
   }
 
-  function _finishOneClick(ok, msg) {
+  function _finishOneClick(ok, msg, run) {
+    if (run !== undefined && run !== _runSeq) return;   // 陈旧收尾不覆盖新状态
     _busy = false;
     stopPoll();
     if (!ok) { renderStep(); UI.toast(msg, 'error'); return; }
@@ -308,12 +322,22 @@
       UI.toast('装载名称需为字母/数字/._-:/（不含 ..）', 'error'); return;
     }
     _busy = true;
+    _runSeq += 1;
+    var run = _runSeq;
     renderStep();
-    startDownload(_choices ? (_choices.indexOf(wiz.params.quant) >= 0
-                              ? wiz.params.quant : _choices[0]) : null);
+    /* 评审 F8：已配置模型先查 /local-models —— configured 含该名称时
+     * 直接走 install（already_configured 续行），不重复下载 */
+    _fetch(URL_LOCAL_MODELS, {}, function (err, j) {
+      if (run !== _runSeq) return;
+      var configured = (!err && j && j.configured) || [];
+      if (configured.indexOf(name) >= 0) { _installModel(run); return; }
+      startDownload(_choices ? (_choices.indexOf(wiz.params.quant) >= 0
+                                ? wiz.params.quant : _choices[0]) : null, run);
+    });
   }
 
   function resetWizard() {
+    _runSeq += 1;                 // 评审 F4：重置即在途回调全部失效
     stopPoll();
     if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = null; }
     _busy = false;
@@ -354,8 +378,10 @@
       wiz.mode = t.getAttribute('data-mode');
       if (wiz.mode === 'packs-catalog') {
         // packs 目录装机：跳本向导，deep-link 能力包 tab
+        // （评审 F10：store.set 只改状态不切可见 tab，须 switchTab）
         resetWizard();
-        if (store && store.set) store.set('tab_active', 'tab-packs');
+        if (store && store.switchTab) { store.switchTab('tab-packs'); }
+        else if (store && store.set) { store.set('tab_active', 'tab-packs'); }
         return;
       }
       wiz.step = 4; renderStep();
@@ -365,7 +391,9 @@
       var id = t.getAttribute('data-model');
       var name = t.getAttribute('data-name') || '';
       wiz.model = { id: id, name: name };
-      wiz.params.name = name.replace(/\.gguf$/i, '');
+      /* 评审 F2：装载名默认 org__name —— 与下载落盘目录
+       * <ws>/models/org__name 一一对应，install_yaml glob 恰命中产物 */
+      wiz.params.name = id.replace('/', '__');
       wiz.step = 5; renderStep();
     } else if (act === 'wiz-submit') {
       var nameEl = $('wizName'), portEl = $('wizPort'), autoEl = $('wizAutostart'),
@@ -408,6 +436,7 @@
   window.Wizard = {
     open: function (capability) {
       _open = true;
+      _runSeq += 1;               // 评审 F4：重开向导，旧序列回调全部失效
       var card = $('tab-deploy-wizard');
       if (card) card.style.display = '';
       wiz.step = 1;

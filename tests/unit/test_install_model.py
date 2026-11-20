@@ -49,3 +49,32 @@ def test_install_model_existing_yaml_is_already_configured(tmp_path):
     (ydir / "m1.yaml").write_text("name: m1\ntype: llama_cpp\n", encoding="utf-8")
     result = mgr.install_model("m1", "llama_cpp")
     assert result["status"] == "already_configured"
+
+
+class TestInstallNameValidation:
+    """评审 F1（Critical）：服务端文件系统边界 —— 浏览器正则不是边界。
+
+    断言错误消息含「无效名称」：校验必须先于 GGUF 查找（否则 macOS
+    分支的 GGUF-glob 巧合会掩盖穿越名，在其他平台/类型下不设防）。
+    """
+
+    def test_rejects_path_traversal_and_absolute(self, tmp_path):
+        mgr = _mgr(tmp_path)
+        for bad in ("../evil", "/abs/evil", "a/b", "..", "sub/dir"):
+            result = mgr.install_model(bad, "llama_cpp")
+            assert result["status"] == "error", bad
+            assert "无效名称" in result["message"], bad
+            assert not list(Path(mgr.models_dir).parents[1].rglob("*evil*"))
+
+    def test_rejects_yaml_ambiguous_names(self, tmp_path):
+        # name: on 会被 yaml 解析为布尔 True，破坏后续加载（评审 F1）
+        mgr = _mgr(tmp_path)
+        for bad in ("on", "true", "yes", "null", "off"):
+            result = mgr.install_model(bad, "llama_cpp")
+            assert result["status"] == "error", bad
+            assert "无效名称" in result["message"], bad
+
+    def test_rejects_empty_and_overlong(self, tmp_path):
+        mgr = _mgr(tmp_path)
+        assert mgr.install_model("", "llama_cpp")["status"] == "error"
+        assert mgr.install_model("x" * 65, "llama_cpp")["status"] == "error"

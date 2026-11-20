@@ -102,6 +102,45 @@ class TestErrorNormalization:
             r = dw.search_models(_fake_transport([]), "qwen", page=page)
             assert r["code"] == "invalid_request", page
 
+    def test_row_level_schema_garbage_skipped_not_crash(self):
+        # 评审 F6：单行 Downloads 非数值 → 跳过该行，整页不得 500/崩
+        models = [{"Path": "ok", "Name": "m1", "Downloads": 5},
+                  {"Path": "bad", "Name": "m2", "Downloads": "many"}]
+        r = dw.search_models(_fake_transport(models), "x")
+        assert [m["id"] for m in r["models"]] == ["ok/m1"]
+
+    def test_handler_search_failed_is_502(self, monkeypatch):
+        # 评审 F6：超时/上游失败不得 200+{error}（前端会显示「无结果」）
+        import types
+        from inferfabric.proxy.handler import ProxyHandler
+        def boom(url, payload):
+            raise TimeoutError("upstream slow")
+        monkeypatch.setattr(dw, "_default_search_transport", boom)
+        h = ProxyHandler.__new__(ProxyHandler)
+        h.command = "GET"
+        h.path = "/admin/deploy/search?q=x"
+        h.headers = {}
+        h._sent = []
+        h._send_json = lambda data, status=200, extra_headers=None: \
+            h._sent.append((data, status))
+        dw.handle_deploy_search(h, None)
+        data, status = h._sent[-1]
+        assert status == 502
+        assert data["code"] == "search_failed"
+
+    def test_handler_body_parse_error_400(self):
+        from inferfabric.proxy.handler import ProxyHandler
+        h = ProxyHandler.__new__(ProxyHandler)
+        h.command = "GET"
+        h.path = "/admin/deploy/search?page=abc"
+        h.headers = {}
+        h._sent = []
+        h._send_json = lambda data, status=200, extra_headers=None: \
+            h._sent.append((data, status))
+        dw.handle_deploy_search(h, None)
+        _, status = h._sent[-1]
+        assert status == 400
+
 
 class TestRouteWiring:
     def test_route_registered_with_admin_gate(self):

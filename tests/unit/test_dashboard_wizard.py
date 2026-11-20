@@ -83,3 +83,28 @@ class TestSourceContract:
         # 「自启」是显式勾选项，非默认（Mac 语义）
         assert "autostart" in _JS
         assert "checked" in _JS
+
+
+class TestReviewFixes:
+    """全分支评审（fresh reviewer）修复轮的回归钉。"""
+
+    def test_run_token_stale_guards(self):
+        # 评审 F4：切出重开后旧回调不得写新状态/触发装载 → run token
+        assert "_runSeq" in _JS
+        assert "run !== _runSeq" in _JS
+
+    def test_unwired_modes_disabled(self):
+        # 评审 F3：向导不得提供走不通的通道（vllm/sglang local-dir 未接线）
+        assert "本版本未接线" in _JS
+
+    def test_configured_precheck_before_download(self):
+        # 评审 F8：已配置模型先查 /local-models，不必再下载即可继续
+        assert "/local-models" in _JS
+
+    def test_packs_deeplink_uses_switchtab(self):
+        # 评审 F10：store.set 只改状态不切可见 tab → 用 switchTab
+        assert "switchTab('tab-packs')" in _JS
+
+    def test_name_default_from_model_id(self):
+        # 评审 F2：装载名默认 org__name，与下载落盘目录一一对应
+        assert "replace('/', '__')" in _JS

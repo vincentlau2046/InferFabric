@@ -45,6 +45,9 @@ _Status = namedtuple("_Status", "stage model_id files_total files_done "
 # 状态注册表（_PACK_DOWNLOADS 同款：模块级 dict + 锁；daemon 线程写）
 _DOWNLOADS: dict[str, dict] = {}
 _LOCK = threading.Lock()
+# 评审 F5：在途落盘目录集合 —— 锁保护的是文件不是状态记录；
+# 同 dest 并发下载会互相追加同一 .part
+_ACTIVE_DESTS: set[str] = set()
 
 
 def normalize_model_id(raw: str) -> str:
@@ -91,14 +94,32 @@ def select_files(files: list[dict], chosen_path: str | None) -> list[str]:
     """多量化变体 repo 必须显式选文件；选中 split 第一分片 → 同家族全部分片。
 
     只下单个变体而非全 repo（Qwen 系 repo 全部 .gguf 可达数十 GB）。
+    评审 F9：split 分片必须成族完整（N 片齐且连续）才可被选中/提供——
+    截断清单不得把「半套分片」当单个变体报 done。
     """
     paths = [f["path"] for f in files]
+
+    def _family_complete(p: str) -> bool:
+        m = _SPLIT_RE.match(p)
+        if not m:
+            return True
+        base, total = m.group("base"), int(m.group("total"))
+        siblings = [q for q in paths if _SPLIT_RE.match(q)
+                    and _SPLIT_RE.match(q).group("base") == base]
+        if len(siblings) != total:
+            raise ValueError(f"incomplete_split_family: {base} 清单缺 "
+                             f"{total - len(siblings)}/{total} 个分片 — 拒绝半套下载")
+        return True
+
     if chosen_path is None:
+        for p in paths:      # 族完整性先于单文件捷径（评审 F9：半套分片不得报 done）
+            _family_complete(p)
         if len(paths) == 1:
             return paths
         raise MultiVariantError(paths)
     if chosen_path not in paths:
         raise ValueError(f"unknown gguf path: {chosen_path!r}")
+    _family_complete(chosen_path)
     m = _SPLIT_RE.match(chosen_path)
     if not m:
         return [chosen_path]
@@ -129,6 +150,12 @@ def _run(download_id: str, model_id: str, sources: list[dict],
                                                current_file=item["path"])
             dest = dest_dir / item["path"]
             part = dest.with_suffix(dest.suffix + ".part")
+            # 评审 F5：staging 边界 —— .part 已存在/为符号链接时拒绝
+            # （fetcher 以追加模式打开，会穿透既有链接目标）
+            if part.is_symlink() or part.exists():
+                raise ValueError(
+                    f"staging conflict: {part.name} 已存在（疑似上次中断"
+                    "残留或符号链接）— 请先清理目标目录")
             url = (f"https://modelscope.cn/models/{model_id}"
                    f"/resolve/master/{item['path']}")
             fetcher.fetch(namedtuple("_A", "source")(url), part)
@@ -148,6 +175,9 @@ def _run(download_id: str, model_id: str, sources: list[dict],
     except Exception as e:
         with _LOCK:
             _DOWNLOADS[download_id].update(stage="error", error=str(e))
+    finally:
+        with _LOCK:
+            _ACTIVE_DESTS.discard(str(dest_dir))
 
 
 def start_download(model_id: str, ws_root, fetcher=None, transport=None,
@@ -164,8 +194,12 @@ def start_download(model_id: str, ws_root, fetcher=None, transport=None,
     if not files:
         raise ValueError(f"no_gguf_files: {model_id} 仓库无 .gguf 文件")
     chosen = select_files(files, path)
-    name = model_id.split("/")[-1]
-    dest_dir = Path(ws_root) / "models" / name
+    org, _, name = model_id.partition("/")
+    # 评审 F2：org__name 隔离两名发布者的同名 repo；目录名=装载默认名，
+    # install_yaml 的 **/{name}/*.gguf glob 恰命中刚下载的产物
+    dest_dir = Path(ws_root) / "models" / f"{org}__{name}"
+    if str(dest_dir) in _ACTIVE_DESTS:
+        raise ValueError(f"download_in_progress: {dest_dir} 已有下载进行中")
     dest_dir.mkdir(parents=True, exist_ok=True)
     by_path = {f["path"]: f for f in files}
     sources = [by_path[p] for p in chosen]
@@ -181,6 +215,8 @@ def start_download(model_id: str, ws_root, fetcher=None, transport=None,
     if fetcher is None:
         from inferfabric.proxy.pack_handlers import HttpArtifactFetcher
         fetcher = HttpArtifactFetcher()
+    with _LOCK:
+        _ACTIVE_DESTS.add(str(dest_dir))
     threading.Thread(target=_run, args=(download_id, model_id, sources,
                                         dest_dir, fetcher),
                      daemon=True, name=f"deploy-dl-{download_id}").start()
@@ -204,6 +240,8 @@ def handle_deploy_download(handler, pm) -> None:
     渲染变体选择）；listing 网络失败 → 502；其余 ValueError → 400。
     """
     body = handler._read_body()
+    if body is None:
+        return          # read_body 已发送 400/413（评审 F6：不得二次响应）
     if not isinstance(body, dict):
         handler._send_json({"error": "body must be a JSON object"}, 400,
                            extra_headers={"Cache-Control": "no-store"})

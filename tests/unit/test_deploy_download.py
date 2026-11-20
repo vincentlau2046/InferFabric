@@ -11,6 +11,7 @@
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
@@ -24,6 +25,8 @@ from inferfabric.proxy import deploy_download as dd
 
 
 _SHA_A = "aa" * 32
+_PAYLOAD = b"GGUF-payload"      # Gate fetcher 落盘内容
+_SHA_PAYLOAD = __import__("hashlib").sha256(_PAYLOAD).hexdigest()
 
 
 def _files_transport(files=None):
@@ -119,6 +122,23 @@ class TestSelectFiles:
         assert dd.select_files(files, "m-q4_k_m-00001-of-00002.gguf") == [
             "m-q4_k_m-00001-of-00002.gguf", "m-q4_k_m-00002-of-00002.gguf"]
 
+    def test_incomplete_split_family_not_offered(self):
+        # 评审 F9：截断清单只有分片 1/2 → 不得作为变体选项报 done
+        files = [{"path": "m-q4_k_m-00001-of-00002.gguf", "size": 1,
+                  "sha256": ""}]
+        with pytest.raises(ValueError) as ei:
+            dd.select_files(files, None)
+        assert "incomplete_split_family" in str(ei.value)
+
+    def test_chosen_split_requires_full_family(self):
+        # 显式选中分片 1 但清单缺分片 2 → 拒绝整套下载
+        files = [{"path": "m-q4_k_m-00001-of-00002.gguf", "size": 1,
+                  "sha256": ""},
+                 {"path": "m-q8_0.gguf", "size": 1, "sha256": ""}]
+        with pytest.raises(ValueError) as ei:
+            dd.select_files(files, "m-q4_k_m-00001-of-00002.gguf")
+        assert "incomplete_split_family" in str(ei.value)
+
     def test_unknown_path_rejected(self):
         files = [{"path": "m-q4.gguf", "size": 1, "sha256": ""}]
         with pytest.raises(ValueError):
@@ -157,7 +177,8 @@ class TestDownloadFlow:
         st = _wait_done(dl["download_id"])
         assert st["stage"] == "done"
         assert st["files_done"] == 1 and st["files_total"] == 1
-        dest = tmp_path / "models" / "Qwen2.5-7B-GGUF" / "model-q4_k_m.gguf"
+        dest = (tmp_path / "models" / "Qwen__Qwen2.5-7B-GGUF"
+                / "model-q4_k_m.gguf")
         assert dest.exists()
         assert dest.read_bytes() == payload
         # 源 URL 形态 = 线上校准的 resolve/master
@@ -207,6 +228,71 @@ class TestDownloadFlow:
 
     def test_status_unknown_id(self):
         assert dd.download_status("nope") is None
+
+    def test_duplicate_dest_rejected(self, tmp_path):
+        # 评审 F5：并发同目标下载会互相追加同一 .part → 拒绝第二个
+        import threading
+        gate = threading.Event()
+
+        class Gate:
+            def fetch(self, artifact, dest):
+                gate.wait(5)
+                dest.write_bytes(_PAYLOAD)
+
+        dl = dd.start_download("a/m", tmp_path, fetcher=Gate(),
+                               transport=_files_transport(
+                                   [{"Type": "blob", "Path": "m.gguf",
+                                     "Size": 1, "Sha256": _SHA_PAYLOAD}]))
+        time.sleep(0.1)
+        try:
+            with pytest.raises(ValueError) as ei:
+                dd.start_download("a/m", tmp_path, fetcher=_FakeFetcher(),
+                                  transport=_files_transport(
+                                      [{"Type": "blob", "Path": "m.gguf",
+                                        "Size": 1, "Sha256": _SHA_A}]))
+            assert "download_in_progress" in str(ei.value)
+        finally:
+            gate.set()
+        st = _wait_done(dl["download_id"])
+        assert st["stage"] == "done"
+
+    def test_symlink_staging_rejected(self, tmp_path):
+        # 评审 F5：.part 为既有符号链接 → 追加写会穿透目标文件
+        # F2 后落盘目录为 a__m（model_id "a/m" → org__name）；符号链接指向
+        # 非敏感路径，断言其不被穿透写入
+        dest_dir = tmp_path / "models" / "a__m"
+        dest_dir.mkdir(parents=True)
+        target = tmp_path / "symlink-victim"
+        target.write_bytes(b"victim")
+        (dest_dir / "m.gguf.part").symlink_to(target)
+        dl = dd.start_download("a/m", tmp_path,
+                               fetcher=_FakeFetcher(b"GGUF-real"),
+                               transport=_files_transport(
+                                   [{"Type": "blob", "Path": "m.gguf",
+                                     "Size": 1, "Sha256": _SHA_A}]))
+        st = _wait_done(dl["download_id"])
+        assert st["stage"] == "error"
+        assert "staging" in st["error"].lower()
+        assert target.read_bytes() == b"victim", "符号链接目标不得被穿透写入"
+
+    def test_dest_dir_includes_publisher(self, tmp_path):
+        # 评审 F2：两名发布者同名 repo 共享落盘目录 → org__name 隔离
+        dl = dd.start_download("org/m", tmp_path, fetcher=_FakeFetcher(),
+                               transport=_files_transport(
+                                   [{"Type": "blob", "Path": "m.gguf",
+                                     "Size": 1, "Sha256": _SHA_A}]))
+        assert dl["dest_dir"] == str(tmp_path / "models" / "org__m")
+
+
+class TestHandlerBodyContract:
+    def test_body_none_sends_no_second_response(self, tmp_path):
+        # 评审 F6：read_body 413/400 已发送响应后返回 None → 不得二次发送
+        h = SimpleNamespace(_read_body=lambda: None, _sent=[])
+        h._send_json = lambda data, status=200, extra_headers=None: \
+            h._sent.append((data, status))
+        pm = SimpleNamespace(mgr=SimpleNamespace(models_dir=str(tmp_path)))
+        dd.handle_deploy_download(h, pm)
+        assert h._sent == [], "read_body 已响应后不得二次发送"
 
 
 class TestRouteWiring:

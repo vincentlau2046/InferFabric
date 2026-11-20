@@ -14,6 +14,7 @@ import json
 import platform
 import re
 import shutil
+import subprocess
 import urllib.request
 
 ENGINE_LABELS = {
@@ -60,6 +61,23 @@ def narrowed_engines(os_name: str, has_nvidia: bool | None,
              "available": bool(engine_available(eid))} for eid in ids]
 
 
+def _probe_nvidia() -> bool:
+    """评审 F7：nvidia-smi 在 PATH ≠ 有可用 GPU（容器常见）。
+
+    以有界 `nvidia-smi -L` 探测设备清单：二进制缺失/超时/非零退出/
+    空清单一律按无 NVIDIA 收窄（绝不出 vllm 选项）。
+    """
+    try:
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
+                           text=True, timeout=3)
+    except Exception:
+        return False
+    if r.returncode != 0:
+        return False
+    return any(ln.strip().startswith("GPU")
+               for ln in (r.stdout or "").splitlines())
+
+
 def deploy_options(os_name: str | None = None, arch: str | None = None,
                    has_nvidia: bool | None = None,
                    engine_available=None) -> dict:
@@ -69,7 +87,7 @@ def deploy_options(os_name: str | None = None, arch: str | None = None,
     if arch is None:
         arch = platform.machine().lower()
     if has_nvidia is None:
-        has_nvidia = shutil.which("nvidia-smi") is not None
+        has_nvidia = _probe_nvidia()
     return {
         "capabilities": list(CAPABILITIES),
         "engines": narrowed_engines(os_name, has_nvidia, engine_available),
@@ -135,27 +153,34 @@ def search_models(transport=None, q: str = "", capability: str | None = None,
         return {"error": f"search_failed: {e}", "code": "search_failed"}
     models = []
     for m in models_raw:
-        if not isinstance(m, dict):
-            continue
-        path, name = m.get("Path"), m.get("Name")
-        if not path or not name:
-            continue
-        mid = f"{path}/{name}"
-        # ModelScope id 形态恒为 org/name 两段：Path 段含 / 或整体不过
-        # pull_model 白名单形态的条目跳过（Review Focus 4）
-        if "/" in str(path) or not _SEARCH_ID_RE.match(mid):
-            continue
-        pipelines = m.get("Pipelines") or []
-        blob = f"{name} {' '.join(map(str, pipelines))}".lower()
-        models.append({
-            "id": mid,
-            "name": name,
-            "downloads": int(m.get("Downloads") or 0),
-            # 能力猜测：仅 UI 提示，最终能力由用户在步骤①声明
-            "capability_guess": "embedding" if "embed" in blob else "llm",
-            "pipeline": pipelines[0] if pipelines else None,
-        })
+        try:
+            models.append(_normalize_row(m))
+        except Exception:
+            continue      # 评审 F6：单行 schema 垃圾跳过，整页不得崩
     return {"models": models, "total": total}
+
+
+def _normalize_row(m) -> dict:
+    if not isinstance(m, dict):
+        raise ValueError("row is not an object")
+    path, name = m.get("Path"), m.get("Name")
+    if not path or not name:
+        raise ValueError("row missing Path/Name")
+    mid = f"{path}/{name}"
+    # ModelScope id 形态恒为 org/name 两段：Path 段含 / 或整体不过
+    # pull_model 白名单形态的条目跳过（Review Focus 4）
+    if "/" in str(path) or not _SEARCH_ID_RE.match(mid):
+        raise ValueError("row id rejected")
+    pipelines = m.get("Pipelines") or []
+    blob = f"{name} {' '.join(map(str, pipelines))}".lower()
+    return {
+        "id": mid,
+        "name": name,
+        "downloads": int(m.get("Downloads") or 0),
+        # 能力猜测：仅 UI 提示，最终能力由用户在步骤①声明
+        "capability_guess": "embedding" if "embed" in blob else "llm",
+        "pipeline": pipelines[0] if pipelines else None,
+    }
 
 
 def handle_deploy_search(handler, pm) -> None:
@@ -171,6 +196,12 @@ def handle_deploy_search(handler, pm) -> None:
                            extra_headers={"Cache-Control": "no-store"})
         return
     result = search_models(q=q, page=page)
-    status = 400 if result.get("code") == "invalid_request" else 200
+    # 评审 F6：错误必须走非 2xx 契约 —— 200+{error} 会被前端当「无结果」
+    if result.get("code") == "invalid_request":
+        status = 400
+    elif result.get("code") == "search_failed":
+        status = 502
+    else:
+        status = 200
     handler._send_json(result, status,
                        extra_headers={"Cache-Control": "no-store"})
