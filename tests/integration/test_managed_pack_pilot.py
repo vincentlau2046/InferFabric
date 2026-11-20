@@ -370,3 +370,177 @@ def test_managed_start_threads_resolved_runtime_to_launcher(tmp_path):
         assert kwargs.get("managed") == inst
     finally:
         set_managed_runtime(None)
+
+
+# ── 8. BGE CPU embedding 试点（Task 5）──────────────────────────
+
+def _bge_pack(tmp_path, marker=None):
+    """落一个已装的 BGE CPU embedding 包：包内 runtime/engine + models/model。"""
+    marker = marker or _marker(pack_id="embedding.bge-cpu",
+                               runtime_template="llama-cpp-linux-cpu-v1")
+    pack_dir = tmp_path / "packs_root" / marker["pack_id"] / marker["pack_version"]
+    (pack_dir / "runtime").mkdir(parents=True, exist_ok=True)
+    (pack_dir / "runtime" / "engine").write_text("binary", encoding="utf-8")
+    (pack_dir / "models").mkdir(parents=True, exist_ok=True)
+    (pack_dir / "models" / "model").write_text("gguf", encoding="utf-8")
+    store = PackStore(tmp_path / "packs" / "state.json")
+    from inferfabric.packs.store import PackRecord
+    store.set(PackRecord(
+        pack_id=marker["pack_id"], pack_version=marker["pack_version"],
+        status="installed", stage="installed", error=None,
+        sandbox_degraded=True, installed_at=0))
+    return store, pack_dir
+
+
+def test_bge_cpu_uses_approved_binary_and_explicit_degraded_mode(
+        tmp_path, monkeypatch):
+    """受管 embedding：核准包内二进制、强制 CPU、loopback 绑定、
+    /v1/embeddings 就绪探测（超越端口健康）；进程组收割。"""
+    import io as _io
+    import json as _json
+
+    store, pack_dir = _bge_pack(tmp_path)
+    marker = _marker(pack_id="embedding.bge-cpu",
+                     runtime_template="llama-cpp-linux-cpu-v1")
+    from inferfabric.packs.managed_runtime import ResolvedRuntime
+    inst = ResolvedRuntime(
+        pack_id="embedding.bge-cpu", pack_version="1.0.0",
+        template_name="llama-cpp-linux-cpu-v1",
+        artifact_identities=(_A64,), role="owned",
+        model_name="pack-bge-cpu-1-0-0", marker=dict(marker),
+        pack_dir=str(pack_dir))
+
+    from inferfabric.config import LlamaCppConfig
+    cfg = LlamaCppConfig(model_path=str(pack_dir / "models" / "model"),
+                         binary_path=str(pack_dir / "runtime" / "engine"),
+                         served_name="bge-m3", port=8123, threads=4,
+                         context_size=8192,
+                         gpu_layers=99,   # 即使 YAML 误配 GPU，受管也强制 CPU
+                         extra_flags="--alias bge-m3")
+
+    popens, probes, killpgs = [], [], []
+
+    class _FakeProc:
+        pid = 4321
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kw):
+        popens.append(cmd)
+        assert kw.get("start_new_session") is True, "进程组隔离（start_new_session）"
+        return _FakeProc()
+
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.time.sleep",
+                        lambda s: None)
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.wait_http",
+                        lambda url, timeout=120: True)
+
+    class _FakeResp:
+        status = 200
+        def read(self):
+            return _json.dumps({"data": [{"embedding": [0.0]}]}).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=10):
+        probes.append(req)
+        return _FakeResp()
+
+    import urllib.request as _urlreq
+    monkeypatch.setattr(_urlreq, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.os.killpg",
+        lambda pgid, sig: killpgs.append((pgid, sig)))
+
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    from inferfabric.state import StateDB
+    pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+    r = pm.start_llama_cpp(cfg, "embedding", managed=inst)
+    assert r["status"] == "healthy", r
+
+    cmd = popens[0]
+    assert cmd[0] == str(pack_dir / "runtime" / "engine"), \
+        "必须用包内核准二进制（approved runtime path）"
+    assert cmd[cmd.index("--host") + 1] == "127.0.0.1", "受管绑定 loopback"
+    assert "-ngl" not in cmd, "受管 embedding 强制 CPU（gpu_layers 不透传）"
+    assert "--embeddings" in cmd
+    # 就绪探测超越 /health：真实 /v1/embeddings 机制探测
+    assert len(probes) == 1 and probes[0].full_url.endswith("/v1/embeddings")
+    assert killpgs == []    # 成功路径不收割
+
+    # 探测失败 → 进程组收割（degraded 隔离的清理手段；不碰 GPU 锁/复位）
+    probes.clear()
+    popens.clear()
+    killpgs.clear()
+
+    class _BadResp:
+        status = 500
+        def read(self):
+            return b"boom"
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=10: _BadResp())
+    r2 = pm.start_llama_cpp(cfg, "embedding", managed=inst)
+    assert r2["status"] == "error" and "embeddings probe failed" in r2["message"]
+    assert killpgs and killpgs[0][0] == 4321, "失败路径必须收割进程组"
+
+
+def test_uninstall_managed_pack_never_deletes_borrowed_weights(tmp_path):
+    """role=external（借用既有产物）：卸载只删包自有目录与受控 YAML，
+    绝不触碰借用权重（spec §7.2「只删包自有」）。"""
+    store, pack_dir = _bge_pack(tmp_path, marker=_marker(
+        pack_id="embedding.bge-cpu", runtime_template="llama-cpp-linux-cpu-v1",
+        role="external"))
+    borrowed = tmp_path / "borrowed" / "bge-m3.gguf"
+    borrowed.parent.mkdir(parents=True, exist_ok=True)
+    borrowed.write_text("borrowed-weights", encoding="utf-8")
+
+    # 受控 YAML 的 model_path 指向包外借用权重
+    models_d = tmp_path / "models.d"
+    models_d.mkdir(exist_ok=True)
+    (models_d / "pack-bge-cpu-1-0-0.yaml").write_text(yaml.safe_dump({
+        "name": "pack-bge-cpu-1-0-0", "type": "llama_cpp",
+        "gpu_role": "none", "model_type": "embedding",
+        "managed_by_pack": _marker(pack_id="embedding.bge-cpu",
+                                   runtime_template="llama-cpp-linux-cpu-v1",
+                                   role="external"),
+        "llama_cpp": {"model_path": str(borrowed), "binary_path":
+                      str(pack_dir / "runtime" / "engine"),
+                      "served_name": "bge-m3", "port": 8123,
+                      "threads": 4, "context_size": 8192,
+                      "gpu_layers": 0},
+    }), encoding="utf-8")
+
+    from inferfabric.packs.schema import parse_manifest
+    manifest = parse_manifest(f"""
+pack_id: embedding.bge-cpu
+pack_version: 1.0.0
+capability: embedding
+model: {{id: bge-m3, parameter_count_b: 1, quantization: q8_0, license: mit}}
+runtime: {{engine: llama_cpp, runtime_template: llama-cpp-linux-cpu-v1}}
+resources: {{download_mb: 1200, disk_mb: 1500, peak_memory_mb: 1500, gpu_role: none}}
+lifecycle: {{mode: on_demand}}
+network: {{listen: loopback, allowed_upstream: []}}
+artifacts:
+  - {{id: model, kind: model, source: "https://example.com/bge.gguf", sha256: "{_A64}"}}
+execution: {{model_config_template: llama_cpp_embedding_v1, healthcheck: openai_chat_ready_v1}}
+sandbox: {{policy: verified-local-pack-v1, degraded_install_allowed: true}}
+""")
+    from inferfabric.packs.uninstaller import PackUninstaller
+    un = PackUninstaller(root=tmp_path / "packs_root", store=store,
+                         models_d=models_d, supervisor=MagicMock(),
+                         manifest_for=lambda pid, *a, **k: manifest,
+                         is_alive_fn=lambda names: False)
+    code, payload = un.uninstall("embedding.bge-cpu", confirmed=True)
+    assert code == 200, payload
+    assert borrowed.read_text(encoding="utf-8") == "borrowed-weights", \
+        "借用权重绝不删除"
+    assert not (tmp_path / "packs_root" / "embedding.bge-cpu").exists()
+    assert not (models_d / "pack-bge-cpu-1-0-0.yaml").exists()

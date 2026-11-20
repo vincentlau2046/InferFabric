@@ -20,11 +20,53 @@ log = logging.getLogger("inferfabric")
 class LlamaCppProcessManager(BaseProcessManager):
     """Llama.cpp / llama-server process lifecycle: start, stop."""
 
-    def start_llama_cpp(self, cfg: "LlamaCppConfig", model_type: str = "") -> dict:
+    def _probe_embeddings(self, port: int, timeout: int = 10) -> tuple[bool, str]:
+        """受管 embedding 就绪探测（Task 5）：真实 /v1/embeddings 机制探测，
+        超越端口健康 —— /health 200 不代表 embedding 端点可用。
+
+        Returns: (ok, detail)。响应必须是含 "data" 的 JSON（OpenAI 形态）。
+        """
+        import json as _json
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/v1/embeddings"
+        req = urllib.request.Request(
+            url, method="POST",
+            data=_json.dumps({"input": "pack readiness probe",
+                              "model": "probe"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return False, f"HTTP {resp.status}"
+                body = _json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as e:   # 探测失败即就绪失败，不区分异常类型
+            return False, str(e)
+        if not isinstance(body, dict) or "data" not in body:
+            return False, "response missing embeddings data"
+        return True, ""
+
+    @staticmethod
+    def _kill_process_group(pid: int) -> None:
+        """进程组收割（degraded 隔离的清理手段；start_new_session → pgid=pid）。"""
+        import signal
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    def start_llama_cpp(self, cfg: "LlamaCppConfig", model_type: str = "",
+                        *, managed=None) -> dict:
         """Start Llama.cpp / llama.cpp server for a specific model.
 
         Each model gets its own process with process group isolation.
         Uses llama-server binary (OpenAI-compatible API).
+
+        Task 5（BGE CPU 试点）：managed=ResolvedRuntime 时 —— 只认包内核准
+        二进制（binary_path 必须在 pack_dir 内，否则 runtime_identity_mismatch）、
+        强制 CPU（gpu_layers 不透传，绝不 -ngl / 绝不 CUDA build）、loopback
+        绑定、/health 后追加 /v1/embeddings 机制探测，失败即收割进程组
+        （start_new_session → pgid=pid）。进程组隔离是 degraded 级别，
+        不声称文件/网络容器化（spec §4）。managed=None 行为不变。
         """
         from inferfabric.config import LlamaCppConfig
         model_path = Path(cfg.model_path).expanduser().resolve()
@@ -36,7 +78,25 @@ class LlamaCppProcessManager(BaseProcessManager):
         # otherwise gpu_layers != 0 → CUDA build (GPU offload),
         # gpu_layers == 0 → CPU-only build (no CUDA runtime overhead)
         llama_cpp_base = Path.home() / "llama-cpp"
-        if getattr(cfg, "binary_path", ""):
+        if managed is not None:
+            # 核准运行时路径：只认包内 binary_path；包外/缺失一律拒绝
+            binary = (Path(cfg.binary_path).expanduser()
+                      if getattr(cfg, "binary_path", "") else None)
+            pack_dir = Path(managed.pack_dir).resolve() if managed.pack_dir \
+                else None
+            if binary is None or not binary.exists():
+                return {"status": "error",
+                        "message": (f"managed pack {managed.pack_id}: "
+                                    "binary_path missing — approved runtime "
+                                    "path required")}
+            if pack_dir is None or pack_dir not in binary.expanduser().resolve().parents:
+                return {"status": "error",
+                        "reason_code": "runtime_identity_mismatch",
+                        "message": (f"managed pack {managed.pack_id}: binary "
+                                    f"{binary} outside pack dir — not an "
+                                    "approved runtime path")}
+            llama_server = binary
+        elif getattr(cfg, "binary_path", ""):
             llama_server = Path(cfg.binary_path).expanduser()
             if not llama_server.exists():
                 return {"status": "error", "message": f"llama-server not found at {llama_server} (binary_path)"}
@@ -59,10 +119,11 @@ class LlamaCppProcessManager(BaseProcessManager):
                     else:
                         return {"status": "error", "message": f"llama-server not found"}
 
+        host = "127.0.0.1" if managed is not None else "0.0.0.0"
         cmd = [
             str(llama_server),
             "-m", str(model_path),
-            "--host", "0.0.0.0",
+            "--host", host,
             "--port", str(cfg.port),
             "-c", str(cfg.context_size),
             "-t", str(cfg.threads),
@@ -73,7 +134,8 @@ class LlamaCppProcessManager(BaseProcessManager):
         else:
             # embedding (default) and other types get embeddings endpoint
             cmd.append("--embeddings")
-        if cfg.gpu_layers != 0:
+        # 受管（Task 5）：强制 CPU，gpu_layers 不透传（embedding 必然 CPU）
+        if managed is None and cfg.gpu_layers != 0:
             cmd.extend(["-ngl", str(cfg.gpu_layers)])
         # Passthrough extra_flags
         if cfg.extra_flags:
@@ -117,6 +179,16 @@ class LlamaCppProcessManager(BaseProcessManager):
             time.sleep(0.5)
 
         healthy = wait_http(f"http://localhost:{cfg.port}/health", timeout=120)
+        if healthy and managed is not None:
+            # Task 5 受管：/health 之上追加 embedding 机制探测；失败收割
+            # 进程组（degraded 隔离清理），不留半就绪进程
+            ok, detail = self._probe_embeddings(cfg.port)
+            if not ok:
+                self._kill_process_group(proc.pid)
+                pid_file.unlink(missing_ok=True)
+                log.error("managed embeddings probe failed: %s", detail)
+                return {"status": "error",
+                        "message": f"embeddings probe failed: {detail}"}
         if healthy:
             return {"status": "healthy", "port": cfg.port, "pid": proc.pid}
         else:

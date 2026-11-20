@@ -24,7 +24,7 @@ CAPABILITY_TO_MODEL_TYPE = {
 
 # 已实现模板注册表（单一事实源）：installer 预检据此提前拒绝未实现模板，
 # 避免下载数 GB 后才在 writing_config 失败（deferred #5）。
-KNOWN_TEMPLATES = frozenset({"llama_cpp_chat_v1"})
+KNOWN_TEMPLATES = frozenset({"llama_cpp_chat_v1", "llama_cpp_embedding_v1"})
 
 
 class ConfigExistsError(ValueError):
@@ -52,10 +52,15 @@ def build_model_config(manifest, pack_dir, port: int) -> ModelConfig:
     tpl = manifest.model_config_template
     if tpl == "llama_cpp_chat_v1":
         return _build_llama_cpp(manifest, pack_dir, port)
+    if tpl == "llama_cpp_embedding_v1":
+        # Task 5（BGE CPU 试点）：embedding 受管配置 —— CPU（gpu_layers=0）、
+        # 无 chat 专用 --jinja；PM 层受管路径再强制 CPU 双保险。
+        return _build_llama_cpp(manifest, pack_dir, port, embedding=True)
     raise ValueError(f"unknown model_config_template {tpl!r}")
 
 
-def _build_llama_cpp(manifest, pack_dir, port: int) -> ModelConfig:
+def _build_llama_cpp(manifest, pack_dir, port: int,
+                     embedding: bool = False) -> ModelConfig:
     pack_dir = _require_managed_dir(pack_dir)
     model_art = next(a for a in manifest.artifacts if a.kind == "model")
     engine_art = next((a for a in manifest.artifacts if a.kind == "runtime"),
@@ -82,8 +87,9 @@ def _build_llama_cpp(manifest, pack_dir, port: int) -> ModelConfig:
             port=port,
             threads=8,
             context_size=8192,
-            gpu_layers=99,
-            extra_flags=f"--alias {manifest.model_id} --jinja",
+            gpu_layers=0 if embedding else 99,
+            extra_flags=(f"--alias {manifest.model_id}" if embedding
+                         else f"--alias {manifest.model_id} --jinja"),
         ),
     )
 

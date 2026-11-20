@@ -38,12 +38,18 @@ class LlamaCppAdapter(EngineAdapter):
             issues.append(f"Invalid llama_cpp.port: {model.llama_cpp.port}")
         return issues
 
-    def start(self, model: ModelConfig) -> dict:
-        """Start llama_cpp via ProcessManager delegation."""
+    def start(self, model: ModelConfig, managed=None) -> dict:
+        """Start llama_cpp via ProcessManager delegation.
+
+        managed=ResolvedRuntime（Task 5 BGE CPU 试点）：贯通受管 CPU/loopback/
+        embedding 探测策略；None = legacy 启动不变。model_type 传引擎选择端点
+        （rerank→--reranking，其余→--embeddings）。
+        """
         if self._proc is None:
             raise RuntimeError("ProcessManager not set — call inject ._proc on the adapter instance first")
         cfg = getattr(model, 'llama_cpp')
-        return self._proc.start_llama_cpp(cfg)
+        return self._proc.start_llama_cpp(cfg, getattr(model, 'model_type', ''),
+                                          managed=managed)
 
     def stop(self, model: ModelConfig) -> dict:
         """Stop llama_cpp via ProcessManager delegation."""

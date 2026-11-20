@@ -33,7 +33,9 @@ ENGINE_NAME = "llama-server"
 
 # 已实现运行时模板（与 config_gen.KNOWN_TEMPLATES 的模型模板正交：
 # 那张表管 model_config_template，这里管 runtime_template）
-_TEMPLATES = {"llama-cpp-macos-arm64-v1"}
+# llama-cpp-linux-cpu-v1（Task 5 BGE CPU 试点）：与 Mac 模板同一解包路径
+# —— 发行包 tar.gz → runtime/ 摊平；平台差异只影响二进制本身，不在解包。
+_TEMPLATES = {"llama-cpp-macos-arm64-v1", "llama-cpp-linux-cpu-v1"}
 
 
 def prepare_runtime(pack_dir, manifest) -> None:
@@ -57,7 +59,9 @@ def _prep_llama_cpp(pack_dir: Path) -> None:
         with tarfile.open(gz, "r:gz") as tf:
             members = tf.getmembers()
             _validate_members(members)
-            tf.extractall(work)   # 成员已校验：仅相对普通文件/目录
+            # 成员已逐一校验（_validate_members）；filter="data" 钉死安全
+            # 语义（py3.14 起默认，显式声明消 DeprecationWarning）
+            tf.extractall(work, filter="data")
         gz.unlink()   # 数据已进 work；entry 二进制随后会占据 runtime/engine
         _flatten_and_place(work, pack_dir / "runtime")
     finally:
