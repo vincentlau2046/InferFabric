@@ -24,6 +24,8 @@ from .config import (
     ModelConfig,
     load_models,
 )
+from inferfabric.packs.managed_runtime import _managed_marker
+
 from .state import StateDB, ServiceState, GPUMode, validate_transition
 from .gpu_lock import GPULock
 from .process_manager import ProcessManager
@@ -371,6 +373,21 @@ class ModelManager:
         model = self._models.get(target)
         if not model:
             return {"status": "error", "message": f"Unknown model: {target}. Available: {list(self._models.keys())}"}
+
+        # ── 受管能力包准入（spec §4）：解析+复核+idle-only 检查必须
+        # 发生在任何 stop/切换副作用之前；拒绝时 force 不可越过。
+        if _managed_marker(model) is not None:
+            from .packs.managed_runtime import (get_managed_runtime,
+                                                PackRuntimeError)
+            rt = get_managed_runtime()
+            if rt is None:
+                return {"status": "error", "reason_code": "runtime_unavailable",
+                        "message": "managed pack runtime not wired"}
+            try:
+                rt.check_start(model, proc=self._proc)
+            except PackRuntimeError as e:
+                return {"status": "error", "reason_code": e.reason_code,
+                        "message": str(e)}
 
         # Already running? (P0-1: check config drift before skipping)
         if target in self.active_services:

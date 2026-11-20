@@ -126,7 +126,11 @@ class PackInstaller:
         # 参数门禁复用 policy.check_param_gate（单一事实源，deferred #7）
         param_err = pack_policy_mod.check_param_gate(manifest, policy)
         if param_err:
-            return False, param_err, False
+            # 阶段 1 Task 3：同一准入路径的唯一例外是审核登记（精确
+            # pack_id/version/模板/产物标识；manifest/自定义包/force 均不可触达）
+            from inferfabric.packs.admission import reviewed_profile_for
+            if reviewed_profile_for(manifest) is None:
+                return False, param_err, False
         # 运行时模板门禁：未实现模板 preflight 即拒，早于下载（deferred #5）
         if manifest.model_config_template not in KNOWN_TEMPLATES:
             return False, (f"model_config_template_not_implemented:"
@@ -245,14 +249,28 @@ class PackInstaller:
         if entry.builtin:
             shutil.rmtree(staging, ignore_errors=True)
             pack_dir.mkdir(parents=True, exist_ok=True)
+            # builtin 走同一阶段机（spec §7.1）：每阶段独立失败码，回滚
+            # 语义与非 builtin 一致，gateway_reload 失败不得标 preparing_runtime
+            self._report(manifest.pack_id, "preparing_runtime")
             try:
-                self._report(manifest.pack_id, "preparing_runtime")
                 self._prepare_runtime(pack_dir, manifest)
-                remember_written(self._write_model_config(pack_dir, manifest))
-                self._run_healthcheck(pack_dir, manifest)
-                self._reload_gateway()
             except Exception as exc:
                 return fail("preparing_runtime", f"builtin_hook_error:{exc}")
+            self._report(manifest.pack_id, "writing_config")
+            try:
+                remember_written(self._write_model_config(pack_dir, manifest))
+            except Exception as exc:
+                return fail("writing_config", f"builtin_hook_error:{exc}")
+            self._report(manifest.pack_id, "isolated_healthcheck")
+            try:
+                self._run_healthcheck(pack_dir, manifest)
+            except Exception as exc:
+                return fail("isolated_healthcheck", f"builtin_hook_error:{exc}")
+            self._report(manifest.pack_id, "gateway_reload")
+            try:
+                self._reload_gateway()
+            except Exception as exc:
+                return fail("gateway_reload", f"builtin_hook_error:{exc}")
             return InstallResult(ok=True, stage="installed",
                                  pack_dir=pack_dir,
                                  sandbox_degraded=sandbox_degraded)

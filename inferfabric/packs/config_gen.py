@@ -106,7 +106,8 @@ def write_managed_yaml(cfg: ModelConfig, models_d, manifest) -> Path:
         # ledger lifecycle (manifest.lifecycle_mode) intentionally not written:
         # upstream `mode` is a gpu_role alias (G1 dual-semantics lands with the
         # ledger entry) — writing on_demand here would corrupt gpu_role.
-        "managed_by_pack": {"pack_id": manifest.pack_id,
+        "managed_by_pack": {"marker_version": 1,
+                            "pack_id": manifest.pack_id,
                             "pack_version": manifest.pack_version},
         "llama_cpp": {
             "model_path": cfg.llama_cpp.model_path,

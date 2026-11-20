@@ -18,6 +18,8 @@ from .config import (
     ModelConfig,
     load_models,
 )
+from inferfabric.packs.managed_runtime import _managed_marker
+
 from .gpu_state import GpuStateMachine
 from .state import GPUMode, ServiceState, StateDB, validate_transition
 
@@ -125,6 +127,22 @@ class ModelLifecycle:
           {"status": "error"/"timeout", ...} on failure.
         """
         from inferfabric.engine_adapter import get_adapter
+        # 受管能力包：调度边界复核已解析身份（spec §4）——失效绝不落入
+        # 通用启动路径。
+        if _managed_marker(model) is not None:
+            from .packs.managed_runtime import (get_managed_runtime,
+                                                PackRuntimeError)
+            rt = get_managed_runtime()
+            if rt is None:
+                return {"status": "error", "reason_code": "runtime_unavailable",
+                        "message": "managed pack runtime not wired"}
+            try:
+                inst = rt.resolve(model)
+                if inst is not None:
+                    rt.verify(inst)
+            except PackRuntimeError as e:
+                return {"status": "error", "reason_code": e.reason_code,
+                        "message": str(e)}
         try:
             adapter = get_adapter(model.type)
             adapter.set_process_manager(self._proc)

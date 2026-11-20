@@ -20,6 +20,9 @@ class PackRecord:
     error: str | None
     sandbox_degraded: bool
     installed_at: int | None
+    # 受管所有权（阶段 1 Task 3）：None = 旧记录（无所有权段）；
+    # {"marker_version": 1, "role": "owned"|"external", ...}
+    ownership: dict | None = None
 
 
 class PackStore:
