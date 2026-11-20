@@ -130,8 +130,12 @@ class TestStartDetached:
     def _patch_detached(self, monkeypatch, *, run_rc=0, run_stdout="abc123",
                         run_stderr="", liveness="true", wait_ok=True,
                         logs_rc=0, logs_stdout="engine boot failed: boom",
-                        logs_stderr="", logs_exc=False):
+                        logs_stderr="", logs_exc=False,
+                        launched_image="ninfer:latest"):
         """detached 全套替身。
+
+        launched_image：`docker inspect -f {{.Config.Image}}` 应答（Task 4
+        受管身份核对替身）；与 cfg.docker_image 不一致时启动后身份核对失败。
 
         liveness：单值或逐轮序列，每轮 —
           "true"  → 存活探测 rc=0 Running=true
@@ -150,6 +154,10 @@ class TestStartDetached:
                 return MagicMock(returncode=run_rc, stdout=run_stdout,
                                  stderr=run_stderr)
             if args[:2] == ["docker", "inspect"]:
+                if args[3] == "{{.Config.Image}}":
+                    calls["inspect"] += 1
+                    return MagicMock(returncode=0, stdout=launched_image,
+                                     stderr="")
                 if "\t" in args[3]:
                     return MagicMock(returncode=1, stdout="", stderr="")
                 calls["inspect"] += 1
@@ -500,3 +508,107 @@ class TestContainerExists:
         cfg.docker_image = ""
         self._patch_inspect(monkeypatch, running=True, image="ninfer:latest")
         assert pm.container_exists(cfg, container_name=self.NAME) is False
+
+
+class TestManagedNInferLaunch:
+    """Task 4（specs/packs-platform-adaptation §4）：受管启动强制审核范围。
+
+    受管 managed=ResolvedRuntime 与普通启动走同一 launcher，但 docker run
+    策略被收紧：loopback 发布、设备白名单、包域可写缓存、身份钉住；
+    外来身份一律 runtime_identity_mismatch 拒绝，绝不收养/重建（不 stop
+    外来容器）。legacy（managed=None）路径零变化。
+    """
+
+    NAME = "iff-ninfer-pilot"
+
+    def _managed(self, tmp_path, *, marker=None, pack_dir=None):
+        from inferfabric.packs.managed_runtime import ResolvedRuntime
+        return ResolvedRuntime(
+            pack_id="llm.pilot-ninfer-27b", pack_version="1.0.0",
+            template_name="ninfer-nvfp4-linux-v1",
+            artifact_identities=("a" * 64,), role="owned",
+            model_name="pilot", marker=marker if marker is not None
+            else {"gpu_devices": "0"},
+            pack_dir=pack_dir if pack_dir is not None
+            else str(tmp_path / "packs_root" / "llm.pilot-ninfer-27b" / "1.0.0"))
+
+    def _make_managed_cfg(self, tmp_path):
+        cfg = _make_cfg()
+        # 权重位于包产物目录内（受管约束：包域内只读挂载）
+        cfg.weight_path = str(tmp_path / "packs_root" / "llm.pilot-ninfer-27b"
+                              / "1.0.0" / "models" / "model")
+        return cfg
+
+    _patch = TestStartDetached._patch_detached   # 复用 detached 全套替身
+
+    def test_managed_ninfer_flags_enforce_reviewed_scope(self, monkeypatch, tmp_path):
+        """受管启动：loopback 发布 / 设备白名单 / 无 host 命名空间与特权 /
+        权重只读 / 包域可写缓存 —— 临时与正常启动同一策略（launcher 层
+        唯一路径，无旁路）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        managed = self._managed(tmp_path)
+        calls = self._patch(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME, managed=managed)
+        assert result["status"] == "healthy", result
+        cmd = calls["run"][0]
+        # host 侧仅 loopback 可达（宿主外无法访问监听口）
+        assert "-p" in cmd and \
+            cmd[cmd.index("-p") + 1] == f"127.0.0.1:{cfg.port}:8080"
+        # 无 host IPC / 网络 / PID / 特权（不自动扩大网络范围）
+        for forbidden in ("--privileged", "--network", "--ipc", "--pid"):
+            assert forbidden not in cmd, f"受管启动不得使用 {forbidden}"
+        # 设备白名单（不是 --gpus all）
+        assert "--gpus" in cmd and \
+            cmd[cmd.index("--gpus") + 1] == "device=0"
+        # 权重只读（宿主权重不可被容器写）
+        assert cmd[cmd.index("-v") + 1].endswith(":/workspace:ro")
+        # 包域可写缓存：容器可写路径钉在包目录内，不落在权重/宿主任意处
+        mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+        assert any(m.endswith(":/workspace/cache") and
+                   m.startswith(managed.pack_dir) for m in mounts), mounts
+        # 身份钉住：健康判定前有一次 .Config.Image 身份核对
+        assert calls["inspect"] >= 7, "受管启动必须在健康等待前核对容器镜像身份"
+
+    def test_managed_ninfer_rejects_healthy_wrong_container(
+            self, monkeypatch, tmp_path):
+        """HTTP 健康但镜像 ≠ 钉住身份 → runtime_identity_mismatch；
+        绝不收养、绝不 stop 重建（外来容器零接触）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        adopt = TestStartNInferAdopt()
+        calls = adopt._patch(monkeypatch, inspect_running=True, inspect_age=3600,
+                             inspect_image="ninfer:foreign", health="✅")
+        result = pm.start_ninfer(cfg, container_name=self.NAME,
+                                 managed=self._managed(tmp_path))
+        assert result["status"] == "error"
+        assert result["reason_code"] == "runtime_identity_mismatch"
+        assert calls["stop"] == 0, "外来容器绝不能被 stop"
+        assert calls["run"] == []
+
+    def test_managed_ninfer_invalid_device_spec_rejected(self, monkeypatch, tmp_path):
+        """marker.gpu_devices 非纯数字/逗号清单 → 拒绝启动，不透传不可信
+        docker 选项（manifest/YAML 不暴露任何 docker 形态参数）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch)
+        result = pm.start_ninfer(
+            cfg, container_name=self.NAME,
+            managed=self._managed(tmp_path, marker={"gpu_devices": "--privileged"}))
+        assert result["status"] == "error"
+        assert "gpu_devices" in result["message"]
+        assert calls["run"] == []
+
+    def test_legacy_ninfer_launch_unchanged(self, monkeypatch, tmp_path):
+        """managed=None：legacy 发布 0.0.0.0（-p port:8080）+ --gpus all，
+        无包域缓存挂载 —— 现网行为零变化。"""
+        pm = _make_pm(tmp_path)
+        cfg = _make_cfg()
+        calls = self._patch(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name="iff-ninfer-qwen38")
+        assert result["status"] == "healthy"
+        cmd = calls["run"][0]
+        assert cmd[cmd.index("-p") + 1] == f"{cfg.port}:8080"
+        assert cmd[cmd.index("--gpus") + 1] == "all"
+        mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+        assert all(not m.endswith(":/workspace/cache") for m in mounts)
