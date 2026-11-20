@@ -248,6 +248,7 @@
       if (err) {
         if (err.code === 'select_file') {
           _choices = err.choices || [];
+          _busy = false;          // 变体 picker 分支：序列未失败，复位防双击锁
           renderStep();
           return;
         }
@@ -328,8 +329,13 @@
 
   /* ── 事件（委托，无 inline onclick） ── */
   document.addEventListener('click', function (ev) {
-    if (!ev.target || !ev.target.closest ||
-        !ev.target.closest('#tab-deploy-wizard')) return;
+    if (!ev.target || !ev.target.closest) return;
+    /* 入口按钮在模型池卡头部（向导卡外）——先于卡片作用域检查 */
+    if (ev.target.closest('[data-action="wiz-open"]')) {
+      window.Wizard.open();
+      return;
+    }
+    if (!ev.target.closest('#tab-deploy-wizard')) return;
     var t = ev.target.closest('[data-action]');
     if (!t) return;
     var act = t.getAttribute('data-action');

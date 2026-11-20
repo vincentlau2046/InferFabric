@@ -29,6 +29,8 @@ class TestAssembly:
         mp = (_DASH / "fragments" / "model-pools.html").read_text(
             encoding="utf-8")
         assert "FRAGMENT:wizard" in mp
+        assert 'data-action="wiz-open"' in mp, "模型池卡须有向导入口按钮"
+        assert 'data-action="wiz-open"' in _JS, "wizard.js 须处理入口点击"
 
     def test_fragment_is_wizard_card(self):
         assert 'id="tab-deploy-wizard"' in _FRAG
@@ -47,6 +49,8 @@ class TestSourceContract:
         # 多量化变体：消费结构化 400（code select_file + choices），不解析文案
         assert "select_file" in _JS
         assert "choices" in _JS
+        # 验收实测缺陷回归：picker 分支不复位 _busy 会永久卡死一键序列
+        assert "_busy = false" in _JS
 
     def test_no_inline_onclick(self):
         for name in ("js/wizard.js", "fragments/wizard.html",
