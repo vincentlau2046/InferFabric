@@ -61,17 +61,20 @@ class NInferAdapter(EngineAdapter):
             issues.append(f"Weight file not found: {weight}")
         return issues
 
-    def start(self, model: ModelConfig) -> dict:
+    def start(self, model: ModelConfig, managed=None) -> dict:
         """Start NInfer via ProcessManager delegation (D1).
 
         container_name threaded from ModelConfig.container_name (single source).
+        managed=ResolvedRuntime（Task 4 受管试点）：贯通到 PM.start_ninfer
+        强制审核范围 launcher；None = legacy 启动，行为不变。
         """
         if self._proc is None:
             raise RuntimeError("ProcessManager not set")
         cfg = model.ninfer
         if not cfg:
             return {"status": "error", "message": "No ninfer config"}
-        return self._proc.start_ninfer(cfg, model.container_name)
+        return self._proc.start_ninfer(cfg, model.container_name,
+                                       managed=managed)
 
     def stop(self, model: ModelConfig) -> dict:
         """Stop NInfer via ProcessManager delegation (migrated off base helper, D1)."""

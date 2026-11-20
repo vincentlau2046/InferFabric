@@ -52,6 +52,7 @@ class ResolvedRuntime:
     role: str                 # "owned" | "external"（借用的既有产物）
     model_name: str
     marker: dict
+    pack_dir: str = ""        # 包正式目录（受管 launcher 的包域挂载/缓存依据）
 
 
 def _model_port(model) -> int | None:
@@ -106,7 +107,8 @@ class ManagedRuntime:
             template_name=manifest.runtime_template,
             artifact_identities=identities,
             role=str(marker.get("role", "owned")),
-            model_name=model.name, marker=dict(marker))
+            model_name=model.name, marker=dict(marker),
+            pack_dir=str(self._pack_root / pack_id / manifest.pack_version))
 
     def _load_manifest(self, pack_id: str, version: str):
         path = self._pack_root / pack_id / version / "manifest.yaml"

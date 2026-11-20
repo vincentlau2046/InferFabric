@@ -190,7 +190,24 @@ class NInferProcessManager(BaseProcessManager):
             return False
         return None
 
-    def start_ninfer(self, cfg, container_name: str) -> dict:
+    def _container_image(self, container_name: str) -> str | None:
+        """单字段镜像身份核对（Task 4 受管启动）：`.Config.Image`。
+
+        None = docker 不可用 / 容器不存在 / 输出不可解析（按身份无法
+        证明处理，调用方拒绝受管启动）。
+        """
+        try:
+            r = subprocess.run(
+                ["docker", "inspect", "-f", "{{.Config.Image}}", container_name],
+                timeout=10, capture_output=True, text=True, check=False)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return None
+        if r.returncode != 0:
+            return None
+        img = (r.stdout or "").strip()
+        return img or None
+
+    def start_ninfer(self, cfg, container_name: str, *, managed=None) -> dict:
         """Start NInfer via Docker container — PR-20 ② 三态收养 + PR-22A detached。
 
         Migrated from engine_adapter/ninfer.py:63-124. container_name is now
@@ -200,6 +217,14 @@ class NInferProcessManager(BaseProcessManager):
         否则回落原 pre-start cleanup 路径（docker stop stale + 2s settle）。
         返回值兼容：收养返回 status="healthy" + adopted=True（消费方
         model_lifecycle 只认 healthy/started/ok，不感知收养）。
+
+        Task 4（specs/packs-platform-adaptation §4）：managed=ResolvedRuntime
+        时同一 launcher 强制审核范围 —— loopback 发布（宿主外不可达）、
+        `--gpus device=<marker.gpu_devices>`（白名单，非 all；非法 spec 拒绝，
+        绝不透传不可信 docker 选项）、权重只读、包域可写缓存挂载、健康等待前
+        核对 `.Config.Image` 身份；在场容器镜像 ≠ 钉住身份 →
+        runtime_identity_mismatch 拒绝，绝不收养、绝不 stop 重建（外来容器
+        零接触）。managed=None 时行为与历史完全一致。
 
         PR-22A：`docker run -d`（detached）— attached 客户端是 proxy 子进程
         （同 systemd cgroup），停机 SIGTERM 经 sig-proxy 转发进容器，引擎随
@@ -211,8 +236,30 @@ class NInferProcessManager(BaseProcessManager):
         if not cfg:
             return {"status": "error", "message": "No ninfer config"}
 
+        # ── 受管策略（Task 4）：设备白名单先于一切 docker 动作 ─────────
+        devices = None
+        if managed is not None:
+            devices = str((managed.marker or {}).get("gpu_devices", "0")).strip()
+            import re as _re
+            if not _re.fullmatch(r"[0-9]+(,[0-9]+)*", devices):
+                return {"status": "error",
+                        "reason_code": "runtime_unavailable",
+                        "message": (f"managed pack {managed.pack_id}: invalid "
+                                    f"gpu_devices {devices!r} in managed marker — "
+                                    "only numeric ids allowed")}
+
         info = self._container_info(container_name)
         if info and info["running"]:
+            if managed is not None and info.get("image") and cfg.docker_image \
+                    and info["image"] != cfg.docker_image:
+                # 外来身份：绝不收养、绝不 stop 重建（spec §4 —— 受管试点
+                # 对非本包容器零接触；legacy 路径仍走 _try_adopt 重建语义）
+                return {"status": "error",
+                        "reason_code": "runtime_identity_mismatch",
+                        "message": (f"managed pack {managed.pack_id}: container "
+                                    f"{container_name} image {info['image']} != "
+                                    f"pinned {cfg.docker_image} — foreign "
+                                    "instance left untouched")}
             adopted = self._try_adopt(cfg, container_name, info)
             if adopted is not None:
                 return adopted
@@ -235,14 +282,19 @@ class NInferProcessManager(BaseProcessManager):
         weight_path = Path(cfg.weight_path).expanduser()
         weight_dir = str(weight_path.parent)
 
+        # Task 4 受管策略：loopback 发布 / 设备白名单；legacy 原样
+        gpus_arg = f"device={devices}" if managed is not None else "all"
+        publish_arg = (f"127.0.0.1:{cfg.port}:8080" if managed is not None
+                       else f"{cfg.port}:8080")
+
         cmd = [
-            "docker", "run", "-d", "--gpus", "all", "--rm",
+            "docker", "run", "-d", "--gpus", gpus_arg, "--rm",
             # 管理标签（issue #3 L3b）：网关所启容器一律可辨
             "--label", MANAGED_LABEL,
             "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
             # 权重只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
             "-v", f"{weight_dir}:/workspace:ro",
-            "-p", f"{cfg.port}:8080",
+            "-p", publish_arg,
             "--name", container_name,
             "-e", "NVIDIA_DISABLE_REQUIRE=1",
             cfg.docker_image,
@@ -263,6 +315,16 @@ class NInferProcessManager(BaseProcessManager):
             cmd.append("--lm-head-draft")
         if getattr(cfg, "vision", False):
             cmd.append("--vision")
+        # Task 4 受管：包域可写缓存（容器唯一可写宿主路径，钉在包目录内；
+        # 不落在权重目录/宿主任意处）。host 侧先建目录，避免 docker 以 root 建。
+        if managed is not None and getattr(managed, "pack_dir", ""):
+            cache_dir = Path(managed.pack_dir) / "cache"
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return {"status": "error",
+                        "message": f"managed pack cache dir unavailable: {e}"}
+            cmd.extend(["-v", f"{cache_dir}:/workspace/cache"])
         # media 显存是可压缩空间: 压 media-cache/live 可把剩余显存让给 KV auto 编排
         mem = getattr(cfg, "media_cache_mib", 1024)
         if mem >= 0:
@@ -313,6 +375,19 @@ class NInferProcessManager(BaseProcessManager):
             self._set_ninfer_container(None)
             return {"status": "error",
                     "message": f"NInfer exited immediately: {err[-500:]}"}
+
+        # Task 4 受管：健康等待前核对实际启动身份（竞态防护 —— 名字被外来
+        # 容器抢占 / --rm 换容器时，HTTP 200 不代表是本包引擎）
+        if managed is not None:
+            img = self._container_image(container_name)
+            if img != cfg.docker_image:
+                self._set_ninfer_pid(None)
+                self._set_ninfer_container(None)
+                return {"status": "error",
+                        "reason_code": "runtime_identity_mismatch",
+                        "message": (f"managed pack {managed.pack_id}: launched "
+                                    f"container identity {img!r} != pinned "
+                                    f"{cfg.docker_image!r}")}
 
         timeout = cfg.startup_timeout or 120
         healthy = wait_http(f"http://localhost:{cfg.port}/v1/models", timeout=timeout)

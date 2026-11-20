@@ -327,3 +327,46 @@ def test_unverified_private_pilot_is_not_catalog_installable(tmp_path):
     # 复核失败不发布任何受控 YAML（除测试输入 pilot.yaml 外无新增）
     after = sorted(p.name for p in (tmp_path / "models.d").glob("*.yaml"))
     assert before == after == ["pilot.yaml"]
+
+
+# ── 7. 受管启动链路：ResolvedRuntime 贯通到 launcher ─────────────
+
+def test_managed_start_threads_resolved_runtime_to_launcher(tmp_path):
+    """调度边界解析出的 ResolvedRuntime 必须贯通到 PM.start_ninfer(managed=…)
+    （Task 4）；legacy 路径不得带 managed。"""
+    store, _ = _install_pack(tmp_path)
+    _model_yaml(tmp_path, "pilot", marker=_marker())
+    model = _load_one(tmp_path, "pilot")
+    rt = _runtime(tmp_path, store)
+    inst = rt.resolve(model)
+
+    from inferfabric.engine_adapter.ninfer import NInferAdapter
+    proc = MagicMock()
+    adapter = NInferAdapter(process_manager=proc)
+    r = adapter.start(model, managed=inst)
+    assert r["status"] == "healthy" or proc.start_ninfer.called
+    proc.start_ninfer.assert_called_once_with(model.ninfer,
+                                              model.container_name,
+                                              managed=inst)
+
+    # legacy：无 managed → 不带 managed kwarg
+    proc2 = MagicMock()
+    adapter2 = NInferAdapter(process_manager=proc2)
+    adapter2.start(model)
+    assert proc2.start_ninfer.call_args.kwargs.get("managed", None) is None
+
+    # _start_model 全链路：set_managed_runtime 注入后，真 adapter 把
+    # ResolvedRuntime 传给 proc.start_ninfer
+    from inferfabric.model_lifecycle import ModelLifecycle
+    from inferfabric.packs.managed_runtime import set_managed_runtime
+    set_managed_runtime(rt)
+    try:
+        lc = ModelLifecycle(state=MagicMock(), proc=proc, health=MagicMock(),
+                            lock=MagicMock(), gpu_state=MagicMock(),
+                            models={model.name: model},
+                            models_dir=str(tmp_path / "models.d"))
+        lc._start_model(model)
+        kwargs = proc.start_ninfer.call_args.kwargs
+        assert kwargs.get("managed") == inst
+    finally:
+        set_managed_runtime(None)
