@@ -40,6 +40,7 @@ from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.anomaly_collector import AnomalyEvent
 from inferfabric.proxy import pack_handlers
 from inferfabric.proxy import deploy_wizard as dw
+from inferfabric.proxy import deploy_download as dd
 
 # Admin token for control-plane routes (/switch, /stop, /deploy, /pull, etc.)
 # If set, requests must include X-Admin-Token header matching this value.
@@ -378,6 +379,8 @@ _GET_ROUTES = {
     "/admin/deploy/options":    _admin(lambda h, pm: h._send_json(dw.deploy_options())),
     # 部署向导：ModelScope 搜索代理（Task 3，只读、不回显凭据、no-store）
     "/admin/deploy/search":     _admin(dw.handle_deploy_search),
+    # 部署向导：ModelScope GGUF 下载器状态轮询（Task 3b，GET 只读）
+    "/admin/deploy/download/status": _admin(dd.handle_deploy_download_status),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     "/admin/model-pools":       _admin(lambda h, pm: mp_admin.handle_get_model_pools(h, pm)),
     "/admin/model-pools/status": _admin(lambda h, pm: mp_admin.handle_get_model_pools_status(h, pm)),
@@ -390,6 +393,8 @@ _GET_ROUTES = {
 }
 
 _POST_ROUTES = {
+    # 部署向导：ModelScope GGUF 下载器启动（Task 3b，用户裁决 B）
+    "/admin/deploy/download":        _admin(dd.handle_deploy_download),
     "/admin/keys/login":        _admin(lambda h, pm: key_admin.handle(h, pm, "login")),
     "/admin/keys/logout":       _admin(lambda h, pm: key_admin.handle(h, pm, "logout")),
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "create")),
