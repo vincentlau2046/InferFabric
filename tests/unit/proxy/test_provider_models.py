@@ -239,9 +239,12 @@ class TestProviderModelsGET:
         assert p["enabled_models"] == ["glm-5"]
         # 手填空 spec → manual=True；带元数据 spec → manual=False。
         # supports_vision/supports_tools 恒输出（三态：未声明 = None，
-        # 7.8.0 cross-review I-1）— 前端 chips 直接读，不用猜键是否存在
+        # 7.8.0 cross-review I-1）— 前端 chips 直接读，不用猜键是否存在；
+        # 属性四键同样恒输出 None 三态（#18 评审 B1 — 属性浮窗回填源）
         assert p["model_specs"] == [{"id": "my-custom-glm", "manual": True,
-                                     "supports_vision": None, "supports_tools": None}]
+                                     "supports_vision": None, "supports_tools": None,
+                                     "context_window": None, "max_output_tokens": None,
+                                     "price_input": None, "price_output": None}]
         assert set(p["candidates"]) == {"glm-5", "deepseek-v4-flash"}
         assert p["routable_count"] == 2
         # 顶层 models 列表 = 可路由集（短名去重）
