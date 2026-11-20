@@ -227,3 +227,40 @@ def test_catalog_preview_never_executes(tmp_path):
     assert entry["decision"]["reason_code"] == "resource_insufficient"
     assert entry["display_name"] == "NInfer 27B"
     assert entry["manifest"]["pack_id"] == "llm.qwen3-27b-nvfp4"
+
+
+# ── 终审 F7：GPU 规格下限（SM 12.x）──────────────────────────────
+
+def test_platform_sm_floor_rejects_lower_compute_capability():
+    """NInfer 旗舰模板登记 SM 12.x 下限：SM 8.9/9.0 宿主不得 compatible
+    （spec §3「NInfer 旗舰另要求已验证的 SM 12.x / GPU 规格」）。"""
+    tpl = _ninfer_template(min_compute_capability=(12, 0))
+    d = evaluate_pack(parse_manifest(_manifest_yaml()), _facts(cc=(9, 0)),
+                      tpl, _runtime(), _resources(), operation="install")
+    assert d.platform == "incompatible"
+    assert d.reason_code == "platform_mismatch"
+    assert d.allowed is False
+
+
+def test_platform_sm_floor_missing_cc_is_unknown_not_compatible():
+    """NVIDIA 但 compute_capability 探测缺失 → unknown（platform_unverified），
+    绝不因事实不足而放行。"""
+    tpl = _ninfer_template(min_compute_capability=(12, 0))
+    d = evaluate_pack(parse_manifest(_manifest_yaml()), _facts(cc=None),
+                      tpl, _runtime(), _resources(), operation="install")
+    assert d.platform == "unknown"
+    assert d.reason_code == "platform_unverified"
+    assert d.allowed is False
+
+
+def test_platform_sm_floor_met_and_absent_floor_unchanged():
+    """SM 达标 → platform compatible；模板未登记下限时行为完全不变。"""
+    tpl = _ninfer_template(min_compute_capability=(12, 0))
+    d = evaluate_pack(parse_manifest(_manifest_yaml()), _facts(cc=(12, 0)),
+                      tpl, _runtime(), _resources(), operation="install")
+    assert d.platform == "compatible"
+    # 无下限登记的模板：compute_capability 不参与判定（旧行为零变化）
+    d2 = evaluate_pack(parse_manifest(_manifest_yaml()), _facts(cc=(9, 0)),
+                       _ninfer_template(), _runtime(), _resources(),
+                       operation="install")
+    assert d2.platform == "compatible"

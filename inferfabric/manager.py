@@ -332,6 +332,30 @@ class ModelManager:
         e = ledger.register(model.name, baseline, ModeOf(model))
         return ledger.admit(model.name, force=force)
 
+    # ── 受管能力包准入（spec §4）──────────────────────────────────
+
+    def _managed_admission(self, model) -> dict | None:
+        """受管包准入闸：runtime 未注入 / 解析 / 复核 / GPU idle 检查。
+
+        返回 None = 通过（或非受管模型）；否则返回错误 dict。
+        GPU 包的权威 idle 检查由 GPU 锁内的再次调用串行化（终审 F4：
+        探测与启动绝不隔着无锁窗口）。
+        """
+        if _managed_marker(model) is None:
+            return None
+        from .packs.managed_runtime import (get_managed_runtime,
+                                            PackRuntimeError)
+        rt = get_managed_runtime()
+        if rt is None:
+            return {"status": "error", "reason_code": "runtime_unavailable",
+                    "message": "managed pack runtime not wired"}
+        try:
+            rt.check_start(model, proc=self._proc)
+        except PackRuntimeError as e:
+            return {"status": "error", "reason_code": e.reason_code,
+                    "message": str(e)}
+        return None
+
     # ── Switch ────────────────────────────────────────────────────
 
     def switch(self, target: str, force: bool = False) -> dict:
@@ -374,22 +398,11 @@ class ModelManager:
         if not model:
             return {"status": "error", "message": f"Unknown model: {target}. Available: {list(self._models.keys())}"}
 
-        # ── 受管能力包准入（spec §4）：解析+复核+idle-only 检查必须
-        # 发生在任何 stop/切换副作用之前；拒绝时 force 不可越过。
-        if _managed_marker(model) is not None:
-            from .packs.managed_runtime import (get_managed_runtime,
-                                                PackRuntimeError)
-            rt = get_managed_runtime()
-            if rt is None:
-                return {"status": "error", "reason_code": "runtime_unavailable",
-                        "message": "managed pack runtime not wired"}
-            try:
-                rt.check_start(model, proc=self._proc)
-            except PackRuntimeError as e:
-                return {"status": "error", "reason_code": e.reason_code,
-                        "message": str(e)}
-
         # Already running? (P0-1: check config drift before skipping)
+        # 终审 F4：闸在 already-running 检查之后 —— 已驻留受管包的再
+        # switch 必须如实返回 already_active，不得被受管闸拦成
+        # resource_busy（gpu_role=none 的受管包无 GPU 副作用；vLLM drift
+        # 分支不适用于受管引擎类型，already-running 检查本身无破坏性副作用）。
         if target in self.active_services:
             if model.is_vllm and model.vllm:
                 # Reload YAML to detect config drift against disk
@@ -406,6 +419,14 @@ class ModelManager:
                     return {"status": "already_active", "model": target}
             else:
                 return {"status": "already_active", "model": target}
+
+        # ── 受管能力包准入（spec §4）：解析+复核+idle-only 检查必须
+        # 发生在任何 stop/切换副作用之前；拒绝时 force 不可越过。
+        # GPU 包的权威检查在 GPU 锁内复核（F4 串行化），此处为副作用前早拒。
+        if _managed_marker(model) is not None:
+            managed_err = self._managed_admission(model)
+            if managed_err is not None:
+                return managed_err
 
         # ── Memory-ledger admission (force = user confirmed "load anyway") ──
         # 评审修复（PR#2 Blocking-2）：闸放在 already-running 检查之后——
@@ -492,7 +513,24 @@ class ModelManager:
         self.state.set_multi({"profile_state": ServiceState.SWITCHING, "switching_target": target})
 
         try:
-            if current_mode == GPUMode.IDLE:
+            # 终审 F4：GPU 包受管启动 —— idle 检查与启动在同一把锁内串行。
+            # 预检只是早拒；探测 → 锁获取之间 GPU 可被他人抢占，锁内复核
+            # 是权威闸（spec §4：validated idle check and launch serialized
+            # by the same host GPU lock）。
+            if _managed_marker(model) is not None \
+                    and getattr(model, "gpu_role", "none") != "none":
+                managed_err = self._managed_admission(model)
+                if managed_err is not None:
+                    result = managed_err
+                elif current_mode == GPUMode.IDLE:
+                    result = self._lifecycle._deploy_model(model, target_mode)
+                elif current_mode == GPUMode.EXCLUSIVE and target_mode == GPUMode.EXCLUSIVE:
+                    result = self._lifecycle._switch_exclusive(model)
+                elif current_mode == GPUMode.SHARED and target_mode == GPUMode.SHARED:
+                    result = self._lifecycle._shared_add_service(model)
+                else:
+                    result = {"status": "error", "message": f"Unexpected state: {current_mode} → {target_mode}"}
+            elif current_mode == GPUMode.IDLE:
                 # Fresh start — just deploy
                 result = self._lifecycle._deploy_model(model, target_mode)
             elif current_mode == GPUMode.EXCLUSIVE and target_mode == GPUMode.EXCLUSIVE:

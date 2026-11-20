@@ -131,11 +131,16 @@ class TestStartDetached:
                         run_stderr="", liveness="true", wait_ok=True,
                         logs_rc=0, logs_stdout="engine boot failed: boom",
                         logs_stderr="", logs_exc=False,
-                        launched_image="ninfer:latest"):
+                        launched_image="ninfer:latest",
+                        inspect_info=None):
         """detached 全套替身。
 
         launched_image：`docker inspect -f {{.Config.Image}}` 应答（Task 4
         受管身份核对替身）；与 cfg.docker_image 不一致时启动后身份核对失败。
+
+        inspect_info：在运行的容器的收养身份探测应答
+        （{"image": str, "label": str}，终审 F1 的 managed-pack label 列）；
+        None = 无在跑容器（rc=1）。
 
         liveness：单值或逐轮序列，每轮 —
           "true"  → 存活探测 rc=0 Running=true
@@ -146,7 +151,7 @@ class TestStartDetached:
         收养身份探测（3 字段格式）恒 rc=1 → 走创建路径。
         """
         rounds = list(liveness) if isinstance(liveness, (list, tuple)) else None
-        calls = {"run": [], "popen": 0, "logs": 0, "inspect": 0}
+        calls = {"run": [], "popen": 0, "logs": 0, "inspect": 0, "stop": 0}
 
         def fake_run(args, **kwargs):
             if args[:2] == ["docker", "run"]:
@@ -159,6 +164,15 @@ class TestStartDetached:
                     return MagicMock(returncode=0, stdout=launched_image,
                                      stderr="")
                 if "\t" in args[3]:
+                    # 收养身份探测（含终审 F1 的第 4 列 managed-pack label）
+                    if inspect_info is not None:
+                        return MagicMock(
+                            returncode=0,
+                            stdout="\t".join([
+                                "true", "2026-11-20T10:00:00Z",
+                                inspect_info.get("image", ""),
+                                inspect_info.get("label", "")]),
+                            stderr="")
                     return MagicMock(returncode=1, stdout="", stderr="")
                 calls["inspect"] += 1
                 v = rounds[calls["inspect"] - 1] if rounds else liveness
@@ -174,6 +188,7 @@ class TestStartDetached:
                 return MagicMock(returncode=logs_rc, stdout=logs_stdout,
                                  stderr=logs_stderr)
             if args[:2] == ["docker", "stop"]:
+                calls["stop"] += 1
                 return MagicMock(returncode=0, stderr=b"")
             return MagicMock(returncode=0, stdout="", stderr=b"")
 
@@ -521,14 +536,15 @@ class TestManagedNInferLaunch:
 
     NAME = "iff-ninfer-pilot"
 
-    def _managed(self, tmp_path, *, marker=None, pack_dir=None):
+    def _managed(self, tmp_path, *, gpu_devices="0", pack_dir=None):
         from inferfabric.packs.managed_runtime import ResolvedRuntime
         return ResolvedRuntime(
             pack_id="llm.pilot-ninfer-27b", pack_version="1.0.0",
             template_name="ninfer-nvfp4-linux-v1",
             artifact_identities=("a" * 64,), role="owned",
-            model_name="pilot", marker=marker if marker is not None
-            else {"gpu_devices": "0"},
+            model_name="pilot",
+            marker={"marker_version": 1, "pack_id": "llm.pilot-ninfer-27b"},
+            gpu_devices=gpu_devices,
             pack_dir=pack_dir if pack_dir is not None
             else str(tmp_path / "packs_root" / "llm.pilot-ninfer-27b" / "1.0.0"))
 
@@ -587,14 +603,14 @@ class TestManagedNInferLaunch:
         assert calls["run"] == []
 
     def test_managed_ninfer_invalid_device_spec_rejected(self, monkeypatch, tmp_path):
-        """marker.gpu_devices 非纯数字/逗号清单 → 拒绝启动，不透传不可信
+        """设备域非纯数字/逗号清单 → 拒绝启动，不透传不可信
         docker 选项（manifest/YAML 不暴露任何 docker 形态参数）。"""
         pm = _make_pm(tmp_path)
         cfg = self._make_managed_cfg(tmp_path)
         calls = self._patch(monkeypatch)
         result = pm.start_ninfer(
             cfg, container_name=self.NAME,
-            managed=self._managed(tmp_path, marker={"gpu_devices": "--privileged"}))
+            managed=self._managed(tmp_path, gpu_devices="--privileged"))
         assert result["status"] == "error"
         assert "gpu_devices" in result["message"]
         assert calls["run"] == []
@@ -612,3 +628,90 @@ class TestManagedNInferLaunch:
         assert cmd[cmd.index("--gpus") + 1] == "all"
         mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
         assert all(not m.endswith(":/workspace/cache") for m in mounts)
+
+
+class TestManagedContainerOwnership:
+    """终审 F1/F6：容器所有权绑定 + 设备域权威。
+
+    镜像相等 ≠ 所有权证明 —— 在场容器必须携带本包的
+    `inferfabric.managed-pack=<pack_id>` label 才可收养/复用；否则
+    runtime_identity_mismatch，零接触（绝不 stop、绝不重建）。设备
+    白名单只认持久化所有权段的 gpu_devices，YAML marker 不可提权。
+    """
+
+    NAME = "iff-ninfer-pilot"
+    _patch = TestStartDetached._patch_detached
+    _managed = TestManagedNInferLaunch._managed
+    _make_managed_cfg = TestManagedNInferLaunch._make_managed_cfg
+
+    def test_same_image_unlabeled_container_zero_contact(
+            self, monkeypatch, tmp_path):
+        """同镜像但无本包 label 的在跑容器 = 外来 → mismatch，绝不收养/
+        stop/重建（镜像相等不构成所有权证明）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch,
+                            inspect_info={"image": cfg.docker_image,
+                                          "label": ""})
+        result = pm.start_ninfer(cfg, container_name=self.NAME,
+                                 managed=self._managed(tmp_path))
+        assert result["status"] == "error"
+        assert result["reason_code"] == "runtime_identity_mismatch"
+        assert calls["stop"] == 0, "外来容器绝不能被 stop"
+        assert calls["run"] == []
+
+    def test_other_pack_label_zero_contact(self, monkeypatch, tmp_path):
+        """label 指向别的包 → mismatch，零接触。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch,
+                            inspect_info={"image": cfg.docker_image,
+                                          "label": "llm.other-pack"})
+        result = pm.start_ninfer(cfg, container_name=self.NAME,
+                                 managed=self._managed(tmp_path))
+        assert result["status"] == "error"
+        assert result["reason_code"] == "runtime_identity_mismatch"
+        assert calls["stop"] == 0
+        assert calls["run"] == []
+
+    def test_own_labeled_healthy_container_adopted(
+            self, monkeypatch, tmp_path):
+        """本包 label + 钉住镜像 + 健康 → 收养复用（不 stop、不重建）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch,
+                            inspect_info={"image": cfg.docker_image,
+                                          "label": "llm.pilot-ninfer-27b"})
+        monkeypatch.setattr(
+            "inferfabric.process_manager.ninfer.check_http_status",
+            lambda *a, **k: "✅")
+        result = pm.start_ninfer(cfg, container_name=self.NAME,
+                                 managed=self._managed(tmp_path))
+        assert result["status"] == "healthy", result
+        assert result.get("adopted") is True
+        assert calls["stop"] == 0
+        assert calls["run"] == []
+
+    def test_managed_run_stamps_pack_label(self, monkeypatch, tmp_path):
+        """受管 docker run 必须打上 `inferfabric.managed-pack=<pack_id>`
+        label（所有权的容器侧凭据）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch)
+        result = pm.start_ninfer(cfg, container_name=self.NAME,
+                                 managed=self._managed(tmp_path))
+        assert result["status"] == "healthy", result
+        cmd = calls["run"][0]
+        assert "inferfabric.managed-pack=llm.pilot-ninfer-27b" in cmd
+
+    def test_missing_device_scope_rejected(self, monkeypatch, tmp_path):
+        """持久化设备域缺失（空）→ 拒绝启动（绝不静默默认 device 0）。"""
+        pm = _make_pm(tmp_path)
+        cfg = self._make_managed_cfg(tmp_path)
+        calls = self._patch(monkeypatch)
+        result = pm.start_ninfer(
+            cfg, container_name=self.NAME,
+            managed=self._managed(tmp_path, gpu_devices=""))
+        assert result["status"] == "error"
+        assert "gpu_devices" in result["message"]
+        assert calls["run"] == []

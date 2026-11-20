@@ -49,10 +49,11 @@ class ResolvedRuntime:
     pack_version: str
     template_name: str
     artifact_identities: tuple[str, ...]
-    role: str                 # "owned" | "external"（借用的既有产物）
+    role: str                 # "owned" | "external"（持久化所有权段裁决）
     model_name: str
     marker: dict
     pack_dir: str = ""        # 包正式目录（受管 launcher 的包域挂载/缓存依据）
+    gpu_devices: str = ""     # 持久化设备域（终审 F6：权威来源，marker 不可提权）
 
 
 def _model_port(model) -> int | None:
@@ -74,7 +75,9 @@ class ManagedRuntime:
         from inferfabric.packs.admission import get_template
         self._registry_lookup = registry_lookup or get_template
         self._probe_gpu_busy = probe_gpu_busy
-        self._models_lookup = models_lookup or {}
+        # 终审 F3：models_lookup=None = 注册表未注入 → 冲突检查无法证明
+        # 无 legacy 端口冲突 → fail-closed 拒绝（空 dict = 显式无 legacy 模型）
+        self._models_lookup = models_lookup
 
     # ── 解析 ────────────────────────────────────────────────────
 
@@ -90,6 +93,20 @@ class ManagedRuntime:
         if rec is None or rec.status != "installed":
             raise PackRuntimeError("ownership_conflict",
                                    f"no installed pack record for {pack_id}")
+        # 终审 F5：所有权以安装事务持久化的 store 记录为权威（spec §4
+        # 「持久化……包所有权；正式启动读回并校验」）。
+        if rec.ownership is None:
+            raise PackRuntimeError(
+                "ownership_conflict",
+                f"pack {pack_id}: ownership not persisted — reinstall "
+                "the pack through the install transaction")
+        rec_role = str(rec.ownership.get("role", ""))
+        marker_role = marker.get("role")
+        if marker_role is not None and str(marker_role) != rec_role:
+            raise PackRuntimeError(
+                "runtime_identity_mismatch",
+                f"pack {pack_id}: marker role {marker_role!r} contradicts "
+                f"persisted ownership {rec_role!r} — YAML tampering?")
         version = marker.get("pack_version") or rec.pack_version
         manifest = self._load_manifest(pack_id, version)
         if manifest is None:
@@ -106,8 +123,9 @@ class ManagedRuntime:
             pack_id=pack_id, pack_version=manifest.pack_version,
             template_name=manifest.runtime_template,
             artifact_identities=identities,
-            role=str(marker.get("role", "owned")),
+            role=rec_role,
             model_name=model.name, marker=dict(marker),
+            gpu_devices=str(rec.ownership.get("gpu_devices") or ""),
             pack_dir=str(self._pack_root / pack_id / manifest.pack_version))
 
     def _load_manifest(self, pack_id: str, version: str):
@@ -120,6 +138,12 @@ class ManagedRuntime:
 
     def _check_collision(self, model, pack_id: str) -> None:
         """端口/名字冲突：只拒绝，绝不收养或停止外来实例。"""
+        if self._models_lookup is None:
+            # 终审 F3：注册表未注入 → 无法证明无 legacy 端口冲突 → fail-closed
+            raise PackRuntimeError(
+                "runtime_unavailable",
+                "model registry unavailable — legacy port conflicts cannot "
+                "be ruled out for managed pack admission")
         my_port = _model_port(model)
         if my_port is None:
             return
@@ -164,12 +188,19 @@ class ManagedRuntime:
         if inst is None:
             return None
         self.verify(inst)
-        if getattr(model, "gpu_role", "none") != "none" \
-                and self._probe_gpu_busy is not None and self._probe_gpu_busy():
-            # GPU 包 idle-only：不挤占现役、不执行 GPU reset（spec §4）
-            raise PackRuntimeError(
-                "resource_busy",
-                "GPU busy — managed GPU pack admission is idle-only")
+        if getattr(model, "gpu_role", "none") != "none":
+            if self._probe_gpu_busy is None:
+                # 终审 F3：busy 探测未注入 → 无法验证 idle-only → fail-closed
+                # （绝不静默跳过中央安全检查）
+                raise PackRuntimeError(
+                    "resource_unknown",
+                    "GPU busy probe not wired — idle-only admission cannot "
+                    "be verified for managed GPU pack")
+            if self._probe_gpu_busy():
+                # GPU 包 idle-only：不挤占现役、不执行 GPU reset（spec §4）
+                raise PackRuntimeError(
+                    "resource_busy",
+                    "GPU busy — managed GPU pack admission is idle-only")
         return inst
 
 

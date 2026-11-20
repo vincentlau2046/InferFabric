@@ -45,6 +45,9 @@ class RuntimeTemplate:
     allow_degraded: bool                  # 模板是否同意降级运行
     resource_profile: str                 # "legacy_default" | 审核资源档名
     expected_artifacts: tuple[str, ...] = ()  # 不可变产物标识（sha256）
+    # GPU 规格下限（spec §3：NInfer 旗舰另要求已验证的 SM 12.x）；
+    # None = 不设下限（compute_capability 不参与判定）
+    min_compute_capability: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -151,6 +154,14 @@ def _platform_dim(manifest: PackManifest, facts: PackHostFacts,
                           if p in template.platforms)
     if key not in effective:
         return "incompatible", "platform_mismatch"
+    # GPU 规格下限（终审 F7）：实测 compute_capability 缺失 → unknown
+    # （事实不足，不是不兼容，也绝不放行）；低于下限 → incompatible。
+    if template.min_compute_capability is not None:
+        cc = facts.compute_capability
+        if cc is None:
+            return "unknown", "platform_unverified"
+        if cc < template.min_compute_capability:
+            return "incompatible", "platform_mismatch"
     return "compatible", None
 
 

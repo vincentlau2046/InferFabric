@@ -16,6 +16,7 @@ from pathlib import Path
 from inferfabric.health import wait_http, check_http_status
 from inferfabric.image_manager import (
     MANAGED_LABEL,
+    PACK_LABEL,
     ensure_image_pulled,
 )
 from inferfabric.process_manager.base import BaseProcessManager
@@ -98,7 +99,8 @@ class NInferProcessManager(BaseProcessManager):
         try:
             r = subprocess.run(
                 ["docker", "inspect", "-f",
-                 "{{.State.Running}}\t{{.State.StartedAt}}\t{{.Config.Image}}",
+                 "{{.State.Running}}\t{{.State.StartedAt}}\t{{.Config.Image}}"
+                 "\t{{index .Config.Labels \"inferfabric.managed-pack\"}}",
                  container_name],
                 timeout=10, capture_output=True, text=True, check=False)
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -113,7 +115,9 @@ class NInferProcessManager(BaseProcessManager):
             return None  # 存在但未运行（--rm 移除竞态窗口）→ 重建路径兜底
         return {"running": True,
                 "started_at": _parse_docker_ts(parts[1]),
-                "image": parts[2] or None}
+                "image": parts[2] or None,
+                # 终审 F1：容器侧所有权凭据（无 label = 外来容器）
+                "pack_label": (parts[3].strip() if len(parts) > 3 else "")}
 
     def _try_adopt(self, cfg, container_name: str, info: dict) -> dict | None:
         """PR-20 ② 三态收养决策。返回收养结果 dict；None = 走重建路径。
@@ -237,29 +241,51 @@ class NInferProcessManager(BaseProcessManager):
             return {"status": "error", "message": "No ninfer config"}
 
         # ── 受管策略（Task 4）：设备白名单先于一切 docker 动作 ─────────
+        # 终审 F6：设备域权威 = 持久化所有权段（resolved.gpu_devices）；
+        # marker 不可提权，缺失一律拒绝（绝不静默默认 device 0）。
         devices = None
         if managed is not None:
-            devices = str((managed.marker or {}).get("gpu_devices", "0")).strip()
+            devices = str(getattr(managed, "gpu_devices", "") or "").strip()
             import re as _re
+            if not devices:
+                return {"status": "error",
+                        "reason_code": "runtime_unavailable",
+                        "message": (f"managed pack {managed.pack_id}: "
+                                    "gpu_devices not recorded in persisted "
+                                    "ownership — reinstall the pack with an "
+                                    "approved device scope")}
             if not _re.fullmatch(r"[0-9]+(,[0-9]+)*", devices):
                 return {"status": "error",
                         "reason_code": "runtime_unavailable",
                         "message": (f"managed pack {managed.pack_id}: invalid "
-                                    f"gpu_devices {devices!r} in managed marker — "
-                                    "only numeric ids allowed")}
+                                    f"gpu_devices {devices!r} in persisted "
+                                    "ownership — only numeric ids allowed")}
 
         info = self._container_info(container_name)
         if info and info["running"]:
-            if managed is not None and info.get("image") and cfg.docker_image \
-                    and info["image"] != cfg.docker_image:
-                # 外来身份：绝不收养、绝不 stop 重建（spec §4 —— 受管试点
-                # 对非本包容器零接触；legacy 路径仍走 _try_adopt 重建语义）
-                return {"status": "error",
-                        "reason_code": "runtime_identity_mismatch",
-                        "message": (f"managed pack {managed.pack_id}: container "
-                                    f"{container_name} image {info['image']} != "
-                                    f"pinned {cfg.docker_image} — foreign "
-                                    "instance left untouched")}
+            if managed is not None:
+                # 终审 F1：镜像相等 ≠ 所有权证明 —— 在场容器必须携带本包
+                # `inferfabric.managed-pack=<pack_id>` label 才算自己的；
+                # 否则一律外来，零接触（绝不收养、绝不 stop 重建）。
+                pack_label = (info.get("pack_label") or "").strip()
+                if pack_label != managed.pack_id:
+                    return {"status": "error",
+                            "reason_code": "runtime_identity_mismatch",
+                            "message": (f"managed pack {managed.pack_id}: "
+                                        f"container {container_name} is not "
+                                        f"stamped for this pack (label="
+                                        f"{pack_label!r}) — foreign instance "
+                                        "left untouched")}
+                if info.get("image") and cfg.docker_image \
+                        and info["image"] != cfg.docker_image:
+                    # 外来身份：绝不收养、绝不 stop 重建（spec §4 —— 受管试点
+                    # 对非本包容器零接触；legacy 路径仍走 _try_adopt 重建语义）
+                    return {"status": "error",
+                            "reason_code": "runtime_identity_mismatch",
+                            "message": (f"managed pack {managed.pack_id}: container "
+                                        f"{container_name} image {info['image']} != "
+                                        f"pinned {cfg.docker_image} — foreign "
+                                        "instance left untouched")}
             adopted = self._try_adopt(cfg, container_name, info)
             if adopted is not None:
                 return adopted
@@ -291,6 +317,9 @@ class NInferProcessManager(BaseProcessManager):
             "docker", "run", "-d", "--gpus", gpus_arg, "--rm",
             # 管理标签（issue #3 L3b）：网关所启容器一律可辨
             "--label", MANAGED_LABEL,
+            # 终审 F1：受管包所有权凭据（容器侧）；legacy 无此 label
+            *(([f"--label", f"{PACK_LABEL}={managed.pack_id}"]
+               if managed is not None else [])),
             "--log-opt", "max-size=50m", "--log-opt", "max-file=3",
             # 权重只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
             "-v", f"{weight_dir}:/workspace:ro",

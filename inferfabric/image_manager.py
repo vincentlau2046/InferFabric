@@ -42,6 +42,11 @@ log = logging.getLogger("inferfabric.image_manager")
 # impossible for pulled images — see module docstring).
 MANAGED_LABEL = "com.inferfabric.managed"
 
+# Per-pack ownership label (终审 F1)：受管包容器侧所有权凭据 ——
+# 在场容器必须携带 `inferfabric.managed-pack=<pack_id>` 才能被该包
+# 收养/复用；镜像相等不构成所有权证明。
+PACK_LABEL = "inferfabric.managed-pack"
+
 LEDGER_FILENAME = "image_ledger.json"
 
 
