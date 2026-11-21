@@ -65,6 +65,13 @@ class ModelManager:
       ❌ shared → exclusive:  must idle first
     """
 
+    def _managed_gpu_busy_probe(self) -> bool:
+        """受管包 idle-only 准入的 GPU busy 探针；探测异常按 busy（fail-closed）。"""
+        try:
+            return bool(self._gpu_state._scan_actual_services())
+        except Exception:
+            return True
+
     def __init__(
         self,
         models_dir: str | Path = str(MODELS_DIR),
@@ -116,6 +123,26 @@ class ModelManager:
             self.state, self._proc, self._health, self._lock, self._models,
             device_telemetry=self._device_telemetry,
         )
+        # ManagedRuntime 生产装配（阶段1接线；spec §4）。显式
+        # set_managed_runtime() 优先（测试/平台覆写）；装配失败保持 None =
+        # 受管包 fail-closed 拒绝，绝不带崩 legacy 启动路径。装配自身无 I/O
+        # （store/manifest 均在解析期才读盘）。
+        try:
+            from .packs.managed_runtime import (get_managed_runtime,
+                                                set_managed_runtime,
+                                                ManagedRuntime)
+            if get_managed_runtime() is None:
+                from .config import IFF_DATA_DIR as _pack_data_dir
+                from .packs.store import PackStore
+                _pack_root = Path(_pack_data_dir) / "packs"
+                set_managed_runtime(ManagedRuntime(
+                    store=PackStore(_pack_root / "state.json"),
+                    pack_root=_pack_root,
+                    probe_gpu_busy=self._managed_gpu_busy_probe,
+                    models_lookup=self._models,
+                ))
+        except Exception as _e:
+            log.warning("managed runtime wiring failed (fail-closed): %s", _e)
         self._lifecycle = ModelLifecycle(
             self.state, self._proc, self._health, self._lock,
             self._gpu_state, self._models, self.models_dir,
