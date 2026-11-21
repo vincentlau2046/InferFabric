@@ -170,6 +170,27 @@ class TestInstallAdmission:
         finally:
             admission.reset_registry()
 
+    def test_darwin_full_probe_maps_degraded_not_verified(self, env):
+        """darwin 探针 FULL ≠ verified（#36 mac端 评审）：FULL 只是
+        capability 探测（sandbox_init 符号），SBPL provider 零实现、
+        运行时实为 NoopProvider 进程组兜底——裁决表第 3 项 verified
+        以 SBPL 落地为前提。落地前 full→degraded：关闭双同意的
+        manifest 必须 422 isolation_degraded_not_allowed（verified
+        直通会错误放行）。"""
+        import yaml as _y
+        from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
+        cat = _y.safe_load(env["cat_path"].read_text())
+        cat["packs"][0]["manifest"]["sandbox"][
+            "degraded_install_allowed"] = False
+        env["cat_path"].write_text(_y.safe_dump(cat, sort_keys=False))
+        probe = lambda: SandboxProbe(SandboxMode.FULL, "capability only")
+        code, payload = _mgr(env, facts=DARWIN_ARM,
+                             sandbox_probe=probe).start_install(
+            env["pack_id"])
+        assert code == 422, payload
+        assert payload["decision"]["reason_code"] == \
+            "isolation_degraded_not_allowed"
+
     def test_isolation_evidence_bogus_probe_mode_fails_closed(self, env):
         """注入探针返回未知 mode.value → fail closed（unverified 拒绝），
         不得 KeyError 炸 500（评审 M6）。"""
