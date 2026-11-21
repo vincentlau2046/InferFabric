@@ -670,3 +670,189 @@ def test_install_persists_ownership_record(tmp_path):
 class _BoomFetch:
     def fetch(self, *a, **k):
         raise AssertionError("builtin pack must not download")
+
+
+# ── 10. Mac 受管 chat 包：healthcheck 贯通与探针分派（#23 Mac）──
+
+_MAC_TEMPLATE = "llama-cpp-macos-arm64-v1"
+_CHAT_PACK_ID = "llm.qwen3-4b-mac"
+
+
+def _register_mac_template():
+    admission.register_template(RuntimeTemplate(
+        name=_MAC_TEMPLATE, platforms=("darwin-arm",),
+        isolation="degraded", allow_degraded=True,
+        resource_profile="legacy_default", expected_artifacts=()))
+
+
+def _chat_manifest_yaml(pack_id=_CHAT_PACK_ID, version="1.0.0"):
+    return f"""
+pack_id: {pack_id}
+pack_version: {version}
+capability: llm
+model: {{id: qwen3-4b, parameter_count_b: 4, quantization: q4_k_m, license: apache-2.0}}
+runtime: {{engine: llama_cpp, runtime_template: {_MAC_TEMPLATE}}}
+resources: {{download_mb: 10, disk_mb: 20, peak_memory_mb: 3200, gpu_role: shared}}
+lifecycle: {{mode: on_demand}}
+network: {{listen: loopback, allowed_upstream: []}}
+artifacts:
+  - {{id: model, kind: model, source: "https://example.com/m.gguf", sha256: "{_A64}"}}
+execution: {{model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}}
+sandbox: {{policy: verified-local-pack-v1, degraded_install_allowed: true}}
+"""
+
+
+def _chat_pack(tmp_path, marker=None):
+    """已装 Mac chat 包：runtime/engine + models/model + manifest
+    （execution.healthcheck = openai_chat_ready_v1）。"""
+    marker = marker or _marker(pack_id=_CHAT_PACK_ID,
+                               runtime_template=_MAC_TEMPLATE)
+    pack_dir = tmp_path / "packs_root" / marker["pack_id"] / marker["pack_version"]
+    (pack_dir / "runtime").mkdir(parents=True, exist_ok=True)
+    (pack_dir / "runtime" / "engine").write_text("binary", encoding="utf-8")
+    (pack_dir / "models").mkdir(parents=True, exist_ok=True)
+    (pack_dir / "models" / "model").write_text("gguf", encoding="utf-8")
+    (pack_dir / "manifest.yaml").write_text(
+        _chat_manifest_yaml(marker["pack_id"], marker["pack_version"]),
+        encoding="utf-8")
+    store = PackStore(tmp_path / "packs" / "state.json")
+    from inferfabric.packs.store import PackRecord
+    store.set(PackRecord(
+        pack_id=marker["pack_id"], pack_version=marker["pack_version"],
+        status="installed", stage="installed", error=None,
+        sandbox_degraded=True, installed_at=0,
+        ownership={"marker_version": 1,
+                   "role": marker.get("role", "owned"),
+                   "gpu_devices": None}))
+    return store, pack_dir
+
+
+def _llama_model_yaml(tmp_path, name, *, marker=None, port=8124,
+                      gpu_layers=99):
+    models_d = tmp_path / "models.d"
+    models_d.mkdir(exist_ok=True)
+    doc = {"name": name, "type": "llama_cpp", "gpu_role": "shared",
+           "model_type": "llm",
+           "llama_cpp": {"model_path": str(tmp_path / "weights.gguf"),
+                         "binary_path": str(tmp_path / "packs_root"
+                                            / _CHAT_PACK_ID / "1.0.0"
+                                            / "runtime" / "engine"),
+                         "served_name": name, "port": port, "threads": 4,
+                         "context_size": 8192, "gpu_layers": gpu_layers}}
+    if marker is not None:
+        doc["managed_by_pack"] = marker
+    path = models_d / f"{name}.yaml"
+    path.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    return path
+
+
+def test_resolve_populates_healthcheck_from_manifest(tmp_path):
+    """resolve() 从 manifest execution.healthcheck 填充 ResolvedRuntime
+    .healthcheck —— launcher 探针分派的数据源。"""
+    _register_mac_template()
+    store, _ = _chat_pack(tmp_path)
+    _llama_model_yaml(tmp_path, "qmac", marker=_marker(
+        pack_id=_CHAT_PACK_ID, runtime_template=_MAC_TEMPLATE))
+    model = _load_one(tmp_path, "qmac")
+    rt = _runtime(tmp_path, store)
+    inst = rt.resolve(model)
+    assert inst.healthcheck == "openai_chat_ready_v1"
+
+
+def _fake_launch_env(monkeypatch, popens):
+    """Popen/time.sleep/wait_http 假化（沿用 bge 试点模式）。"""
+    import inferfabric.process_manager.llama_cpp as llm_mod
+
+    class _FakeProc:
+        pid = 4321
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kw):
+        popens.append(cmd)
+        assert kw.get("start_new_session") is True
+        return _FakeProc()
+
+    monkeypatch.setattr(llm_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(llm_mod, "wait_http", lambda url, timeout=120: True)
+
+
+def test_managed_chat_pack_probes_chat_not_embeddings(tmp_path, monkeypatch):
+    """openai_chat_ready_v1 包：受管健康探测走 chat 端点，不走 embeddings
+    （LLM 包被 embeddings 探针误杀 = Review Focus 2）。"""
+    _register_mac_template()
+    store, pack_dir = _chat_pack(tmp_path)
+    from inferfabric.packs.managed_runtime import ResolvedRuntime
+    marker = _marker(pack_id=_CHAT_PACK_ID, runtime_template=_MAC_TEMPLATE)
+    inst = ResolvedRuntime(
+        pack_id=_CHAT_PACK_ID, pack_version="1.0.0",
+        template_name=_MAC_TEMPLATE, artifact_identities=(_A64,),
+        role="owned", model_name="qmac", marker=dict(marker),
+        pack_dir=str(pack_dir), healthcheck="openai_chat_ready_v1")
+
+    from inferfabric.config import LlamaCppConfig
+    cfg = LlamaCppConfig(model_path=str(pack_dir / "models" / "model"),
+                         binary_path=str(pack_dir / "runtime" / "engine"),
+                         served_name="qmac", port=8124, threads=4,
+                         context_size=8192, gpu_layers=99)
+
+    popens, chat_probes, emb_probes = [], [], []
+    _fake_launch_env(monkeypatch, popens)
+
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+
+    def fake_chat(port, timeout=2):
+        chat_probes.append(port)
+        return True, ""
+
+    def fake_emb(port, timeout=10):
+        emb_probes.append(port)
+        return False, "should not be called"
+
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_chat_ready",
+                        staticmethod(fake_chat))
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_embeddings",
+                        staticmethod(fake_emb))
+
+    from inferfabric.state import StateDB
+    pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+    r = pm.start_llama_cpp(cfg, "llm", managed=inst)
+    assert r["status"] == "healthy", r
+    assert chat_probes == [8124] and emb_probes == [], \
+        "chat 包必须走 chat 探针，绝不走 embeddings 探针"
+
+
+def test_legacy_start_keeps_public_binding_ngl_and_no_probe(
+        tmp_path, monkeypatch):
+    """managed=None 行为逐字节不变：0.0.0.0 绑定、-ngl 透传、无机制探针
+    （Review Focus 5）。"""
+    engine = tmp_path / "engine"
+    engine.write_text("binary", encoding="utf-8")
+    model_f = tmp_path / "m.gguf"
+    model_f.write_text("gguf", encoding="utf-8")
+    from inferfabric.config import LlamaCppConfig
+    cfg = LlamaCppConfig(model_path=str(model_f), binary_path=str(engine),
+                         served_name="legacy", port=8125, threads=4,
+                         context_size=8192, gpu_layers=33)
+
+    popens, chat_probes, emb_probes = [], [], []
+    _fake_launch_env(monkeypatch, popens)
+
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_chat_ready",
+                        staticmethod(lambda port, timeout=2:
+                                     chat_probes.append(port)),
+                        raising=False)   # 哨兵：实现前方法尚不存在
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_embeddings",
+                        staticmethod(lambda port, timeout=10:
+                                     emb_probes.append(port)))
+
+    from inferfabric.state import StateDB
+    pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+    r = pm.start_llama_cpp(cfg, "llm")          # managed 缺省 = None
+    assert r["status"] == "healthy", r
+    cmd = popens[0]
+    assert cmd[cmd.index("--host") + 1] == "0.0.0.0", "legacy 绑定不变"
+    assert cmd[cmd.index("-ngl") + 1] == "33", "legacy -ngl 透传不变"
+    assert chat_probes == [] and emb_probes == [], "legacy 无机制探针"

@@ -45,6 +45,31 @@ class LlamaCppProcessManager(BaseProcessManager):
             return False, "response missing embeddings data"
         return True, ""
 
+    def _probe_chat_ready(self, port: int, timeout: int = 2) -> tuple[bool, str]:
+        """受管 chat 就绪探测（#23 Mac）：真实 /v1/chat/completions 机制探测
+        （max_tokens=1），超越端口健康 —— /health 200 不代表 chat 端点可用。
+
+        Returns: (ok, detail)。响应必须是含 "choices" 的 JSON（OpenAI 形态）。
+        """
+        import json as _json
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/v1/chat/completions"
+        req = urllib.request.Request(
+            url, method="POST",
+            data=_json.dumps({"messages": [{"role": "user", "content": "ping"}],
+                              "max_tokens": 1}).encode("utf-8"),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status != 200:
+                    return False, f"HTTP {resp.status}"
+                body = _json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as e:   # 探测失败即就绪失败，不区分异常类型
+            return False, str(e)
+        if not isinstance(body, dict) or "choices" not in body:
+            return False, "response missing chat choices"
+        return True, ""
+
     @staticmethod
     def _kill_process_group(pid: int) -> None:
         """进程组收割（degraded 隔离的清理手段；start_new_session → pgid=pid）。"""
@@ -180,15 +205,22 @@ class LlamaCppProcessManager(BaseProcessManager):
 
         healthy = wait_http(f"http://localhost:{cfg.port}/health", timeout=120)
         if healthy and managed is not None:
-            # Task 5 受管：/health 之上追加 embedding 机制探测；失败收割
-            # 进程组（degraded 隔离清理），不留半就绪进程
-            ok, detail = self._probe_embeddings(cfg.port)
+            # 受管：/health 之上追加包契约机制探测（#23 Mac）——探针按
+            # manifest execution.healthcheck 分派：openai_chat_ready_v1 →
+            # /v1/chat/completions，其余 → /v1/embeddings。失败收割进程组
+            # （degraded 隔离清理），不留半就绪进程
+            if getattr(managed, "healthcheck", "") == "openai_chat_ready_v1":
+                probe_kind = "chat"
+                ok, detail = self._probe_chat_ready(cfg.port)
+            else:
+                probe_kind = "embeddings"
+                ok, detail = self._probe_embeddings(cfg.port)
             if not ok:
                 self._kill_process_group(proc.pid)
                 pid_file.unlink(missing_ok=True)
-                log.error("managed embeddings probe failed: %s", detail)
+                log.error("managed %s probe failed: %s", probe_kind, detail)
                 return {"status": "error",
-                        "message": f"embeddings probe failed: {detail}"}
+                        "message": f"{probe_kind} probe failed: {detail}"}
         if healthy:
             return {"status": "healthy", "port": cfg.port, "pid": proc.pid}
         else:
