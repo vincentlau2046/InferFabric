@@ -74,11 +74,11 @@ mode:、bge 策略对齐）。重装：下载链完整但 qwen3 需重下 2.5GB�
 | auth 语义与生产一致 | ✅ API key 认证生效（Bearer 校验、401/200 落账） |
 | secrets.env / admin token 复用 | ✅ 快照直用 |
 | request_log / token-stats 读写 | ✅ 请求行落账正常 |
-| plist diff 审阅（仅加 IFF_MODELS_DIR） | ⏳ Task 4 切换前审阅 |
-| 回滚演练（plist .bak → launchd reload → 旧版健康） | ⏳ **待用户授权低峰窗口实演**（需短暂重启 :8999） |
+| plist diff 审阅（仅加 IFF_MODELS_DIR） | ✅ 演练实测 diff：venv/WorkDir/PYTHONPATH 三处指回仓库 + 新增 IFF_MODELS_DIR，无其他差异 |
+| 回滚演练（plist .bak → launchd reload → 旧版健康） | ✅ 2026-11-21 生产实演双半场全绿：切新后受管 /switch 3.4s healthy（包内 engine、loopback、-ngl 99、无 --embeddings、chat 探针过）、/stop 收割干净（#34 生产复验）；回滚后旧 MacFabric 网关 health 200、模型清单一致（回填 YAML 与旧 loader 兼容） |
 
 ## 五、放行状态
 
-四项证据 ✅；一致性清单 8 项中 6 ✅、2 ⏳（plist diff 属切换动作本身；
-回滚演练需授权）。**#33/#34 合入 + 用户裁决回填/重装 + 回滚演练完成
-后，Task 4（:8999 切换）才进入授权门。**
+四项证据 ✅；一致性清单 8 项 8 ✅；回滚演练 ✅（双半场：切换动作与回滚路径均在生产实证）。
+**回填已落生产（备份 `~/.inferfabric/backups/backfill-20261121-165022/` + plist
+`.bak-20261121-165434`）。Task 4（:8999 最终切换）等待用户独立授权门。**
