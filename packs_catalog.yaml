@@ -49,7 +49,7 @@ packs:
       artifacts:
         - {id: model, kind: model, source: "https://modelscope.cn/models/gpustack/bge-m3-GGUF/resolve/master/bge-m3-Q8_0.gguf", sha256: "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167"}  # ModelScope 镜像，CDN LFS oid 互证同物 2026-11-16
         - {id: engine, kind: runtime, source: "https://github.com/ggml-org/llama.cpp/releases/download/b12361/llama-b12361-bin-macos-arm64.tar.gz", sha256: "0317a41e685e4d577fa55050204f7165fc62600f893e0d1a4e2bed91f1963b87"}  # 本机下载实测 2026-11-15
-      execution: {model_config_template: llama_cpp_chat_v1, healthcheck: openai_chat_ready_v1}
+      execution: {model_config_template: llama_cpp_embedding_v1, healthcheck: openai_embeddings_ready_v1}
       sandbox: {policy: verified-local-pack-v1, degraded_install_allowed: true}
 
   - pack_id: tts.kokoro-82m-onnx

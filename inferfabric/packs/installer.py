@@ -249,6 +249,11 @@ class PackInstaller:
         if entry.builtin:
             shutil.rmtree(staging, ignore_errors=True)
             pack_dir.mkdir(parents=True, exist_ok=True)
+            # spec §4「持久化解析后的模板/产物标识」：manifest.yaml 随安装
+            # 事务写入正式包目录 —— ManagedRuntime 读回校验的数据源；随
+            # fail() 的整目录回滚一起清理
+            (pack_dir / "manifest.yaml").write_text(
+                manifest.to_dict_yaml(), encoding="utf-8")
             # builtin 走同一阶段机（spec §7.1）：每阶段独立失败码，回滚
             # 语义与非 builtin 一致，gateway_reload 失败不得标 preparing_runtime
             self._report(manifest.pack_id, "preparing_runtime")
@@ -306,6 +311,11 @@ class PackInstaller:
         pack_dir.mkdir(parents=True, exist_ok=True)
         self._move_into_place(manifest, staging, pack_dir)
         shutil.rmtree(staging, ignore_errors=True)
+        # spec §4「持久化解析后的模板/产物标识」：manifest.yaml 随安装事务
+        # 写入正式包目录（受管启动读回校验的数据源）；位于 pack_dir 内，
+        # 随事务回滚与卸载一起清理
+        (pack_dir / "manifest.yaml").write_text(manifest.to_dict_yaml(),
+                                                encoding="utf-8")
 
         # preparing_runtime
         self._report(manifest.pack_id, "preparing_runtime")

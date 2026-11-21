@@ -179,7 +179,12 @@ class LlamaCppProcessManager(BaseProcessManager):
         if managed is None:
             if cfg.gpu_layers != 0:
                 cmd.extend(["-ngl", str(cfg.gpu_layers)])
-        elif model_type not in ("embedding", "rerank") and cfg.gpu_layers > 0:
+        elif model_type in ("embedding", "rerank"):
+            # Metal engine defaults -ngl to auto (offload) — omission is
+            # NOT CPU force; explicit 0 pins the Task 5 CPU contract even
+            # when the YAML says 99
+            cmd.extend(["-ngl", "0"])
+        elif cfg.gpu_layers > 0:
             cmd.extend(["-ngl", str(cfg.gpu_layers)])
         # Passthrough extra_flags
         if cfg.extra_flags:
