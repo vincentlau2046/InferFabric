@@ -67,7 +67,13 @@ def mgr(tmp_path):
         run_healthcheck=lambda pd, m: None,
         # 评审 PR#16 B2：探针密闭化——内存门禁吃固定值，不依赖宿主机
         # 运行时内存（Mac 空闲内存大全绿、Linux 缓存占用高 3 连挂）。
-        memory_available_mb=lambda: 65536)
+        memory_available_mb=lambda: 65536,
+        # 安装期准入（2026-11-21 接线）：显式 darwin-arm 事实，安装机制类
+        # 测试在任意宿主机上走同一被 admitted 的平台；平台拒绝另有专测。
+        pack_host_facts=lambda: __import__(
+            "inferfabric.platform.pack_probe", fromlist=["PackHostFacts"]
+        ).PackHostFacts(os="darwin", arch="arm64", accelerator="none",
+                        compute_capability=None))
     return pmgr
 
 

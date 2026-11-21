@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from inferfabric.packs.catalog import Catalog, load_catalog
+from inferfabric.platform.pack_probe import probe_pack_host
 from inferfabric.packs.custom import (
     SimpleArtifact, build_custom_manifest, find_reusable_engine,
     validate_custom_body, validate_gguf)
@@ -123,16 +124,34 @@ class HttpArtifactFetcher:
                 f.write(chunk)
 
 
+def _nearest_existing(path: Path) -> Path:
+    """disk_usage 探测目标：pack root 未创建时回溯最近存在的祖先目录。"""
+    p = Path(path)
+    while not p.exists():
+        parent = p.parent
+        if parent == p:
+            return p
+        p = parent
+    return p
+
+
 class PackManager:
     def __init__(self, root, models_d, catalog_path=None, fetcher=None,
                  reload_gateway=None, prepare_runtime=None,
-                 run_healthcheck=None, memory_available_mb=None):
+                 run_healthcheck=None, memory_available_mb=None,
+                 pack_host_facts=None, disk_free_mb=None):
         self.root = Path(root)
         self.models_d = Path(models_d)
         self.catalog = Catalog(load_catalog(catalog_path or BUNDLED_CATALOG))
         self.store = PackStore(self.root / "state.json")
         self.policy = PolicyStore(self.root / "policy.json")
         self._reload_gateway = reload_gateway
+        # 安装期准入探针（2026-11-21 真机首发现接线）：默认真实探测，
+        # 测试密闭化注入。probe_pack_host 保持模块级可打桩。
+        self._pack_host_facts = pack_host_facts
+        self._disk_free_mb = disk_free_mb
+        self._memory_available_mb = memory_available_mb \
+            or system_available_memory_mb
         self._fetcher = fetcher or HttpArtifactFetcher()
         self._in_progress: dict[str, str] = {}   # pack_id -> stage
         self._progress_lock = threading.Lock()
@@ -346,6 +365,47 @@ class PackManager:
             if pack_id in self._in_progress:
                 self._in_progress[pack_id] = stage
 
+    def _install_admission(self, entry) -> tuple[bool, dict]:
+        """安装期三维准入（spec §3：install/start 同规；其他平台可查看、
+        不可执行）。
+
+        - 平台维度（模板求交 + 平台键）非 compatible 一律拒绝——本真机
+          首发现的缺口：此前安装事务完全不做平台判定，darwin-arm 包可在
+          linux 主机走完整下载落盘。
+        - 资源维度只拒绝可实测且无歧义的不足（磁盘余量 / 可用内存 /
+          legacy 参数门槛）；VRAM 遥测缺失（resource_unknown）与隔离
+          unverified 不阻塞安装——安装不启动进程、不占 GPU，等待双端
+          遥测注入方案后再收紧（#23 联合裁决）。
+        """
+        from inferfabric.packs.admission import (evaluate_pack, get_template,
+                                                 ResourceEvidence,
+                                                 RuntimeEvidence)
+        manifest = entry.manifest
+        facts = (self._pack_host_facts() if self._pack_host_facts
+                 else probe_pack_host())
+        disk_free = self._disk_free_mb() if self._disk_free_mb else \
+            shutil.disk_usage(_nearest_existing(self.root)).free \
+            // (1024 * 1024)
+        ram = self._memory_available_mb()
+        d = evaluate_pack(
+            manifest, facts, get_template(manifest.runtime_template),
+            RuntimeEvidence(isolation="unverified"),
+            ResourceEvidence(
+                disk_ok=disk_free >= manifest.disk_mb,
+                ram_ok=ram is None or ram >= manifest.peak_memory_mb,
+                vram_ok=None),
+            operation="install")
+        decision = d.to_dict()
+        # 磁盘/内存直接判定：GPU 包 vram 缺失在 _resource_dim 先命中
+        # resource_unknown，会掩蔽磁盘/内存不足——安装闸只认直接实测。
+        disk_ok = disk_free >= manifest.disk_mb
+        ram_ok = ram is None or ram >= manifest.peak_memory_mb
+        blocked = (d.platform != "compatible"
+                   or not disk_ok or not ram_ok)
+        if not disk_ok or not ram_ok:
+            decision["reason_code"] = "resource_insufficient"
+        return (not blocked), decision
+
     def start_install(self, pack_id: str, gpu_devices: str | None = None) \
             -> tuple[int, dict]:
         import re as _re
@@ -363,6 +423,10 @@ class PackManager:
             if rec is not None:
                 return self._retry_custom(rec)
             return 404, {"error": f"unknown pack_id {pack_id!r}"}
+        admitted, decision = self._install_admission(entry)
+        if not admitted:
+            return 422, {"error": "admission rejected (install)",
+                         "decision": decision}
         rec = self.store.get(pack_id)
         if rec is not None and rec.status == "installed":
             # 终审 F1：失败的重装不得摧毁已装工作包 — 已装包重装一律拒绝
