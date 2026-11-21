@@ -856,3 +856,67 @@ def test_legacy_start_keeps_public_binding_ngl_and_no_probe(
     assert cmd[cmd.index("--host") + 1] == "0.0.0.0", "legacy 绑定不变"
     assert cmd[cmd.index("-ngl") + 1] == "33", "legacy -ngl 透传不变"
     assert chat_probes == [] and emb_probes == [], "legacy 无机制探针"
+
+
+# ── 11. Mac 受管 cmd 规则：加速按审核 YAML + 端点 flag 分派（#23）──
+
+def _managed_probe_ok(monkeypatch):
+    """受管探针全放行（本组只看 cmd 形状）。"""
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_chat_ready",
+                        staticmethod(lambda port, timeout=2: (True, "")))
+    monkeypatch.setattr(LlamaCppProcessManager, "_probe_embeddings",
+                        staticmethod(lambda port, timeout=10: (True, "")))
+
+
+def _start_managed(tmp_path, monkeypatch, *, model_type, gpu_layers,
+                   healthcheck):
+    """起一个受管 llama_cpp 实例，返回 Popen argv。"""
+    _register_mac_template()
+    store, pack_dir = _chat_pack(tmp_path)
+    from inferfabric.packs.managed_runtime import ResolvedRuntime
+    marker = _marker(pack_id=_CHAT_PACK_ID, runtime_template=_MAC_TEMPLATE)
+    inst = ResolvedRuntime(
+        pack_id=_CHAT_PACK_ID, pack_version="1.0.0",
+        template_name=_MAC_TEMPLATE, artifact_identities=(_A64,),
+        role="owned", model_name="qmac", marker=dict(marker),
+        pack_dir=str(pack_dir), healthcheck=healthcheck)
+    from inferfabric.config import LlamaCppConfig
+    cfg = LlamaCppConfig(model_path=str(pack_dir / "models" / "model"),
+                         binary_path=str(pack_dir / "runtime" / "engine"),
+                         served_name="qmac", port=8126, threads=4,
+                         context_size=8192, gpu_layers=gpu_layers)
+    popens = []
+    _fake_launch_env(monkeypatch, popens)
+    _managed_probe_ok(monkeypatch)
+    from inferfabric.state import StateDB
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+    r = pm.start_llama_cpp(cfg, model_type, managed=inst)
+    assert r["status"] == "healthy", r
+    return popens[0]
+
+
+def test_managed_chat_metal_from_approved_yaml(tmp_path, monkeypatch):
+    """chat 包：受管 -ngl 透传审核 YAML 的 gpu_layers（Mac Metal 全卸载）；
+    embedding 包即使 YAML gpu_layers=99 仍强制 CPU（Review Focus 3）；
+    chat cmd 绝不带 --embeddings（llama.cpp 语义 = 限制仅 embedding 用途，
+    Ruling 2026-11-21）。"""
+    cmd = _start_managed(tmp_path, monkeypatch, model_type="llm",
+                         gpu_layers=99, healthcheck="openai_chat_ready_v1")
+    assert cmd[cmd.index("-ngl") + 1] == "99", "受管 chat 透传审核 YAML 加速"
+    assert "--embeddings" not in cmd and "--reranking" not in cmd, \
+        "chat 包带 --embeddings 会禁掉 chat 端点（engine --help 实证语义）"
+
+    cmd2 = _start_managed(tmp_path, monkeypatch, model_type="embedding",
+                          gpu_layers=99, healthcheck="")
+    assert "-ngl" not in cmd2, "受管 embedding 强制 CPU（YAML 99 也不透传）"
+    assert "--embeddings" in cmd2
+
+
+def test_managed_rerank_flags_and_cpu(tmp_path, monkeypatch):
+    """rerank 包：--reranking + 强制 CPU。"""
+    cmd = _start_managed(tmp_path, monkeypatch, model_type="rerank",
+                         gpu_layers=99, healthcheck="")
+    assert "--reranking" in cmd
+    assert "-ngl" not in cmd

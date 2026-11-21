@@ -86,12 +86,15 @@ class LlamaCppProcessManager(BaseProcessManager):
         Each model gets its own process with process group isolation.
         Uses llama-server binary (OpenAI-compatible API).
 
-        Task 5（BGE CPU 试点）：managed=ResolvedRuntime 时 —— 只认包内核准
-        二进制（binary_path 必须在 pack_dir 内，否则 runtime_identity_mismatch）、
-        强制 CPU（gpu_layers 不透传，绝不 -ngl / 绝不 CUDA build）、loopback
-        绑定、/health 后追加 /v1/embeddings 机制探测，失败即收割进程组
-        （start_new_session → pgid=pid）。进程组隔离是 degraded 级别，
-        不声称文件/网络容器化（spec §4）。managed=None 行为不变。
+        Task 5（BGE CPU 试点）+ #23 Mac：managed=ResolvedRuntime 时 —— 只认
+        包内核准二进制（binary_path 必须在 pack_dir 内，否则
+        runtime_identity_mismatch）、loopback 绑定、/health 后按包契约
+        （manifest healthcheck）追加机制探测（chat → /v1/chat/completions，
+        其余 → /v1/embeddings），失败即收割进程组（start_new_session →
+        pgid=pid）。加速按审核 YAML：embedding/rerank 强制 CPU（不透传
+        -ngl），chat 透传 cfg.gpu_layers（Mac Metal）；端点 flag 按
+        model_type 分派。进程组隔离是 degraded 级别，不声称文件/网络
+        容器化（spec §4）。managed=None 行为不变。
         """
         from inferfabric.config import LlamaCppConfig
         model_path = Path(cfg.model_path).expanduser().resolve()
@@ -153,14 +156,30 @@ class LlamaCppProcessManager(BaseProcessManager):
             "-c", str(cfg.context_size),
             "-t", str(cfg.threads),
         ]
-        # Enable endpoint by model type
-        if model_type == 'rerank':
+        # Endpoint by model type. managed=None: legacy behavior unchanged
+        # (non-rerank appends --embeddings as before). Managed (#23 Mac):
+        # dispatch by model_type — chat must NOT get --embeddings
+        # (llama.cpp semantics: restrict to embedding use case), while
+        # embedding/rerank keep their endpoint flags.
+        if managed is not None:
+            if model_type == 'rerank':
+                cmd.append("--reranking")
+            elif model_type == 'embedding':
+                cmd.append("--embeddings")
+        elif model_type == 'rerank':
             cmd.append("--reranking")
         else:
             # embedding (default) and other types get embeddings endpoint
             cmd.append("--embeddings")
-        # 受管（Task 5）：强制 CPU，gpu_layers 不透传（embedding 必然 CPU）
-        if managed is None and cfg.gpu_layers != 0:
+        # Acceleration. managed=None: legacy -ngl passthrough unchanged.
+        # Managed: embedding/rerank stay CPU-forced (Task 5 contract, even
+        # when the YAML says 99 — pre-Task5 generated YAMLs do); chat
+        # trusts the approved YAML's gpu_layers (config_gen: 0 if
+        # embedding else 99 — Mac Metal full offload).
+        if managed is None:
+            if cfg.gpu_layers != 0:
+                cmd.extend(["-ngl", str(cfg.gpu_layers)])
+        elif model_type not in ("embedding", "rerank") and cfg.gpu_layers > 0:
             cmd.extend(["-ngl", str(cfg.gpu_layers)])
         # Passthrough extra_flags
         if cfg.extra_flags:
