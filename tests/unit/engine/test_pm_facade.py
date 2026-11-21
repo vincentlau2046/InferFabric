@@ -17,7 +17,8 @@ class TestFacadeNInferDelegation:
         pm._ninfer.start_ninfer.return_value = {"status": "healthy"}
         cfg = MagicMock()
         result = pm.start_ninfer(cfg, container_name="iff-ninfer-qwen38")
-        pm._ninfer.start_ninfer.assert_called_once_with(cfg, "iff-ninfer-qwen38")
+        pm._ninfer.start_ninfer.assert_called_once_with(
+            cfg, "iff-ninfer-qwen38", managed=None)
 
     def test_stop_ninfer_threads_container_name(self, tmp_path):
         """facade.stop_ninfer(container_name) 透传。"""
@@ -83,6 +84,48 @@ class TestFacadeLlamaCppManagedForwarding:
         adapter = LlamaCppAdapter()
         adapter._proc = pm
         model = SimpleNamespace(llama_cpp=MagicMock(), model_type="embedding")
+        r = adapter.start(model)          # managed 缺省 = None（legacy）
+        assert r == {"status": "healthy"}
+        r2 = adapter.start(model, managed=object())  # 受管路径
+        assert r2 == {"status": "healthy"}
+class TestFacadeNInferManagedForwarding:
+    """PR #27 同类遗漏（真机首发现）：engine_adapter/ninfer.py 总是以
+    managed= kwarg 调 facade.start_ninfer（legacy 传 None），facade 签名缺参
+    = 一切 NInfer adapter 冷启动 TypeError——主 TXT 引擎不可启动。
+    同样补 facade 层透传回归。"""
+
+    def test_start_ninfer_forwards_managed(self, tmp_path):
+        pm = _make_facade(tmp_path)
+        pm._ninfer = MagicMock()
+        pm._ninfer.start_ninfer.return_value = {"status": "healthy"}
+        cfg = MagicMock()
+        managed = object()
+        r = pm.start_ninfer(cfg, "c-name", managed=managed)
+        pm._ninfer.start_ninfer.assert_called_once_with(
+            cfg, "c-name", managed=managed)
+        assert r == {"status": "healthy"}
+
+    def test_start_ninfer_legacy_none_managed(self, tmp_path):
+        """legacy 路径（managed=None）同样必须可达——回归本体是 kwarg 缺参。"""
+        pm = _make_facade(tmp_path)
+        pm._ninfer = MagicMock()
+        pm._ninfer.start_ninfer.return_value = {"status": "healthy"}
+        cfg = MagicMock()
+        r = pm.start_ninfer(cfg, "c-name")
+        pm._ninfer.start_ninfer.assert_called_once_with(
+            cfg, "c-name", managed=None)
+        assert r == {"status": "healthy"}
+
+    def test_ninfer_adapter_start_through_facade_no_typeerror(self, tmp_path):
+        """回归现场：NInferAdapter.start(model) → facade → launcher 不 TypeError。"""
+        from types import SimpleNamespace
+        from inferfabric.engine_adapter.ninfer import NInferAdapter
+        pm = _make_facade(tmp_path)
+        pm._ninfer = MagicMock()
+        pm._ninfer.start_ninfer.return_value = {"status": "healthy"}
+        adapter = NInferAdapter()
+        adapter._proc = pm
+        model = SimpleNamespace(ninfer=MagicMock(), container_name="c-name")
         r = adapter.start(model)          # managed 缺省 = None（legacy）
         assert r == {"status": "healthy"}
         r2 = adapter.start(model, managed=object())  # 受管路径
