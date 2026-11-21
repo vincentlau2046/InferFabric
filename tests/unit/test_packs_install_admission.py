@@ -55,7 +55,7 @@ def env(tmp_path):
             "pack_id": manifest.pack_id}
 
 
-def _mgr(env, *, facts, disk_free_mb=None):
+def _mgr(env, *, facts, disk_free_mb=None, sandbox_probe=None):
     return pack_handlers.PackManager(
         root=env["tmp"] / "packs", models_d=env["tmp"] / "models.d",
         catalog_path=env["cat_path"], fetcher=InstantFetcher(env["files"]),
@@ -64,6 +64,7 @@ def _mgr(env, *, facts, disk_free_mb=None):
         run_healthcheck=lambda pd, m: None,
         memory_available_mb=lambda: 65536,
         pack_host_facts=facts,
+        sandbox_probe=sandbox_probe,
         disk_free_mb=disk_free_mb or (lambda: 1 << 40))
 
 
@@ -103,8 +104,10 @@ class TestInstallAdmission:
         assert payload["decision"]["reason_code"] == "resource_insufficient"
 
     def test_install_matching_platform_proceeds(self, env):
-        """平台匹配 + 资源充足 → 202 正常事务（isolation unverified 不阻塞）。"""
-        mgr = _mgr(env, facts=DARWIN_ARM)
+        """平台匹配 + 资源充足 → 202 正常事务（degraded 放行不阻塞）。"""
+        from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
+        probe = lambda: SandboxProbe(SandboxMode.DEGRADED, "test probe")
+        mgr = _mgr(env, facts=DARWIN_ARM, sandbox_probe=probe)
         code, payload = mgr.start_install(env["pack_id"])
         assert code == 202, payload
         deadline = time.time() + 5
@@ -115,6 +118,67 @@ class TestInstallAdmission:
                 break
             time.sleep(0.05)
         assert rec and rec.status == "installed"
+
+    def test_install_isolation_unavailable_rejected(self, env):
+        """A1 分级收紧（#23 联合裁决）：darwin 探测 unavailable → 422
+        runtime_unavailable，不进下载事务。"""
+        from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
+        probe = lambda: SandboxProbe(SandboxMode.UNAVAILABLE, "test probe")
+        code, payload = _mgr(env, facts=DARWIN_ARM,
+                             sandbox_probe=probe).start_install(
+            env["pack_id"])
+        assert code == 422, payload
+        assert payload["decision"]["reason_code"] == "runtime_unavailable"
+
+    def test_install_linux_isolation_degraded_proceeds(self, env):
+        """Linux 侧隔离证据 = NoopProvider 进程组兜底恒可用 → degraded
+        （不冒充 verified）；模板/manifest 双同意 → 安装照常。"""
+        from inferfabric.packs import admission
+        from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
+        from inferfabric.packs.schema import parse_manifest
+        import yaml as _y
+        admission.register_template(admission.RuntimeTemplate(
+            name="llama-cpp-linux-v1", platforms=("linux-nvidia",),
+            isolation="degraded", allow_degraded=True,
+            resource_profile="legacy_default", expected_artifacts=()))
+        try:
+            cat = _y.safe_load(env["cat_path"].read_text())
+            cat["packs"][0]["manifest"]["runtime"] = {
+                "engine": "llama_cpp", "runtime_template":
+                    "llama-cpp-linux-v1"}
+            env["cat_path"].write_text(_y.safe_dump(cat, sort_keys=False))
+            probe = lambda: SandboxProbe(SandboxMode.DEGRADED, "unused")
+            mgr = _mgr(env, facts=LINUX_NVIDIA, sandbox_probe=probe)
+            code, payload = mgr.start_install(env["pack_id"])
+            assert code == 202, payload
+            deadline = time.time() + 5
+            rec = None
+            while time.time() < deadline:
+                rec = mgr.store.get(env["pack_id"])
+                if rec and rec.status == "installed":
+                    break
+                time.sleep(0.05)
+            assert rec and rec.status == "installed"
+            assert rec.sandbox_degraded is True, "degraded 放行必须显式标记"
+        finally:
+            admission.reset_registry()
+
+    def test_install_degraded_not_allowed_rejected(self, env):
+        """degraded 需模板与 manifest 双同意：manifest 关闭降级 → 422
+        isolation_degraded_not_allowed。"""
+        import yaml as _y
+        cat = _y.safe_load(env["cat_path"].read_text())
+        cat["packs"][0]["manifest"]["sandbox"][
+            "degraded_install_allowed"] = False
+        env["cat_path"].write_text(_y.safe_dump(cat, sort_keys=False))
+        from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
+        probe = lambda: SandboxProbe(SandboxMode.DEGRADED, "test probe")
+        code, payload = _mgr(env, facts=DARWIN_ARM,
+                             sandbox_probe=probe).start_install(
+            env["pack_id"])
+        assert code == 422, payload
+        assert payload["decision"]["reason_code"] == \
+            "isolation_degraded_not_allowed"
 
     def test_default_real_probe_invoked(self, env, monkeypatch):
         """未注入 facts 时走真实 probe_pack_host（密闭化为模块级可打桩）。"""
