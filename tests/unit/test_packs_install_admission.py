@@ -6,9 +6,11 @@
   不落 store、不开下载线程。
 - 资源维度中可实测且无歧义的部分（磁盘余量、可用内存）不足 → 422
   resource_insufficient。
-- 依赖遥测接线的维度（isolation unverified / VRAM unknown）不阻塞安装
-  （Ruling：等双端遥测注入方案，#23 联合裁决）——安装不启动进程、不占
-  GPU，GPU busy 不构成安装拒绝。
+- 隔离维（#23 联合裁决 A1）：unavailable / 未双同意 degraded /
+  unverified → 422；证据按平台分派（darwin=PK0 探针三态，linux=degraded
+  兜底常真）。
+- VRAM 遥测缺失（resource_unknown）不阻塞安装（#23 联合裁决 B1′：
+  VRAM 仅启动闸）——安装不启动进程、不占 GPU，GPU busy 不构成安装拒绝。
 """
 
 import hashlib
@@ -130,12 +132,16 @@ class TestInstallAdmission:
         assert code == 422, payload
         assert payload["decision"]["reason_code"] == "runtime_unavailable"
 
-    def test_install_linux_isolation_degraded_proceeds(self, env):
+    def test_install_linux_isolation_degraded_proceeds(self, env,
+                                                       monkeypatch):
         """Linux 侧隔离证据 = NoopProvider 进程组兜底恒可用 → degraded
-        （不冒充 verified）；模板/manifest 双同意 → 安装照常。"""
+        （不冒充 verified）；模板/manifest 双同意 → 安装照常。
+
+        installer 的 catalog_probe 也一并密闭化（评审 I1）：记录上的
+        sandbox_degraded 标记来自 installer 探针，macOS 真探针会返回
+        FULL 导致本断言在 Mac 机器翻转——注入 DEGRADED 后双端同断言。"""
         from inferfabric.packs import admission
         from inferfabric.packs.sandbox import SandboxMode, SandboxProbe
-        from inferfabric.packs.schema import parse_manifest
         import yaml as _y
         admission.register_template(admission.RuntimeTemplate(
             name="llama-cpp-linux-v1", platforms=("linux-nvidia",),
@@ -147,7 +153,8 @@ class TestInstallAdmission:
                 "engine": "llama_cpp", "runtime_template":
                     "llama-cpp-linux-v1"}
             env["cat_path"].write_text(_y.safe_dump(cat, sort_keys=False))
-            probe = lambda: SandboxProbe(SandboxMode.DEGRADED, "unused")
+            probe = lambda: SandboxProbe(SandboxMode.DEGRADED, "sealed")
+            monkeypatch.setattr(pack_handlers, "probe_sandbox", probe)
             mgr = _mgr(env, facts=LINUX_NVIDIA, sandbox_probe=probe)
             code, payload = mgr.start_install(env["pack_id"])
             assert code == 202, payload
@@ -162,6 +169,17 @@ class TestInstallAdmission:
             assert rec.sandbox_degraded is True, "degraded 放行必须显式标记"
         finally:
             admission.reset_registry()
+
+    def test_isolation_evidence_bogus_probe_mode_fails_closed(self, env):
+        """注入探针返回未知 mode.value → fail closed（unverified 拒绝），
+        不得 KeyError 炸 500（评审 M6）。"""
+        from types import SimpleNamespace
+        probe = lambda: SimpleNamespace(mode=SimpleNamespace(value="warp9"))
+        code, payload = _mgr(env, facts=DARWIN_ARM,
+                             sandbox_probe=probe).start_install(
+            env["pack_id"])
+        assert code == 422, payload
+        assert payload["decision"]["reason_code"] == "isolation_unverified"
 
     def test_install_degraded_not_allowed_rejected(self, env):
         """degraded 需模板与 manifest 双同意：manifest 关闭降级 → 422
