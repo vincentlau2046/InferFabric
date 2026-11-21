@@ -383,7 +383,12 @@ class PackManager:
         if facts.os == "darwin":
             # fail closed：注入探针返回未知 mode → unverified（拒绝），
             # 不得 KeyError（评审 M6）。
-            return {"full": "verified", "degraded": "degraded",
+            # full→degraded（#36 mac端 评审，#23 裁决表第 3 项）：
+            # probe_sandbox 的 FULL 只是 capability 探测（sandbox_init
+            # 符号存在），SBPL provider 零实现、运行时实为 NoopProvider
+            # 进程组兜底——verified 待 SBPL 落地后升级，落地前不冒充
+            # 完整隔离（spec §8.3）。
+            return {"full": "degraded", "degraded": "degraded",
                     "unavailable": "unavailable"}.get(
                 self._sandbox_probe().mode.value, "unverified")
         if facts.os == "linux":
