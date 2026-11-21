@@ -381,9 +381,11 @@ class PackManager:
         - 未知平台：unverified（不可装）。
         """
         if facts.os == "darwin":
+            # fail closed：注入探针返回未知 mode → unverified（拒绝），
+            # 不得 KeyError（评审 M6）。
             return {"full": "verified", "degraded": "degraded",
-                    "unavailable": "unavailable"}[
-                self._sandbox_probe().mode.value]
+                    "unavailable": "unavailable"}.get(
+                self._sandbox_probe().mode.value, "unverified")
         if facts.os == "linux":
             return "degraded"
         return "unverified"
@@ -397,7 +399,8 @@ class PackManager:
           linux 主机走完整下载落盘。
         - 隔离维（#23 联合裁决 A1）：unavailable / 未双同意的 degraded /
           unverified 一律拒绝；degraded 放行由安装事务显式标记
-          sandbox_degraded。
+          sandbox_degraded。本闸覆盖 catalog 包；custom 包导入路径
+          （start_custom_install）暂不经三维准入，其设计缓议。
         - 资源维度只拒绝可实测且无歧义的不足（磁盘余量 / 可用内存 /
           legacy 参数门槛）；VRAM 遥测缺失（resource_unknown）不阻塞
           安装——安装不启动进程、不占 GPU（#23 联合裁决 B1′：VRAM 仅
@@ -426,7 +429,11 @@ class PackManager:
         # resource_unknown，会掩蔽磁盘/内存不足——安装闸只认直接实测。
         disk_ok = disk_free >= manifest.disk_mb
         ram_ok = ram is None or ram >= manifest.peak_memory_mb
-        # 隔离维拒绝码（_isolation_dim 三类失败）；platform/资源维单独判。
+        # 隔离维拒绝码枚举（评审 M3）：与 admission._isolation_dim 的全部
+        # 失败码耦合钉死在此——新增失败码必须同步本枚举，否则静默放行。
+        # （不能只看 d.isolation：degraded-not-allowed 也报
+        # isolation="degraded"。）catalog 包专用闸；custom 包路径
+        # （start_custom_install）暂不经过本闸，其准入设计缓议。
         iso_blocked = d.reason_code in (
             "runtime_unavailable", "isolation_unverified",
             "isolation_degraded_not_allowed")
