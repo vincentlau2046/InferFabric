@@ -390,10 +390,17 @@ def handle_chat(handler, pm, data):
         model_obj = pm.mgr.get_model(service_name)
         if model_obj and model_obj.served_name:
             data["model"] = model_obj.served_name
-        if model_obj and (model_obj.is_ollama or model_obj.is_llama_cpp):
+        # MACFABRIC P0 PATCH (upstreamed, Task 3 real-machine finding
+        # 2026-11-21): is_llama_cpp no longer routes to the Ollama native
+        # channel. llama-server speaks OpenAI /v1/chat/completions natively;
+        # /api/chat is Ollama-only and 404s. On Linux llama_cpp is limited
+        # to embedding/rerank so chat never legitimately hit this path —
+        # the old behavior was a guaranteed 404 there too (strict
+        # improvement on both platforms).
+        if model_obj and model_obj.is_ollama:
             ollama_model_obj = model_obj
 
-    if ollama_model_obj and (ollama_model_obj.is_ollama or ollama_model_obj.is_llama_cpp):
+    if ollama_model_obj and ollama_model_obj.is_ollama:
         handle_ollama_native(handler, pm, data, target_port, ollama_model_obj)
         return
 
