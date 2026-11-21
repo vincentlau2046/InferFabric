@@ -80,5 +80,10 @@ mode:、bge 策略对齐）。重装：下载链完整但 qwen3 需重下 2.5GB�
 ## 五、放行状态
 
 四项证据 ✅；一致性清单 8 项 8 ✅；回滚演练 ✅（双半场：切换动作与回滚路径均在生产实证）。
-**回填已落生产（备份 `~/.inferfabric/backups/backfill-20261121-165022/` + plist
-`.bak-20261121-165434`）。Task 4（:8999 最终切换）等待用户独立授权门。**
+回填已落生产（备份 `~/.inferfabric/backups/backfill-20261121-165022/` + plist
+`.bak-20261121-165434`）。
+
+**Task 4 完成（2026-11-21 17:34:18）：:8999 已切至 InferFabric main@1f74758**
+（新 pid 16663，/health 200 idle、两包模型 + 云目录、packs installed；回滚保留
+`.bak-20261121-165434` + ~/Library/MacFabric/prod 未删）。迁移链收官，遗留：
+#36 darwin 复测（随修复推送）、A1 隔离分级 wiring PR。
