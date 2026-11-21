@@ -55,7 +55,21 @@ class BaseProcessManager:
                     time.sleep(1)
                     break
             except FileNotFoundError:
-                # fuser not available — fall back to pkill
+                # fuser not available (macOS): kill listeners via lsof
+                # (the pkill fallback below only matches vllm, never
+                # llama-server — Task 3 real-machine finding, 2026-11-21)
+                try:
+                    out = subprocess.run(
+                        ["lsof", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                        timeout=5, check=False, capture_output=True)
+                    for line in out.stdout.decode("utf-8", "replace").split():
+                        pid = line.strip()
+                        if pid.isdigit():
+                            subprocess.run(
+                                ["kill", "-SIGTERM", pid],
+                                timeout=5, check=False, capture_output=True)
+                except Exception:
+                    pass
                 subprocess.run(
                     ["pkill", "-" + str(sig), "-f", f"vllm.*:{port}"],
                     timeout=5, check=False, capture_output=True
