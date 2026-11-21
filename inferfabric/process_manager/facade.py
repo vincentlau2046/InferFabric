@@ -215,8 +215,11 @@ class ProcessManager(BaseProcessManager):
 
     # ─── Llama.cpp ──────────────────────────────────────────────
 
-    def start_llama_cpp(self, cfg, model_type: str = "") -> dict:
-        return self._ollama.start_llama_cpp(cfg, model_type)
+    def start_llama_cpp(self, cfg, model_type: str = "",
+                        *, managed=None) -> dict:
+        # managed 透传（Task 5 受管试点 / 安全复审 HIGH 修复）：adapter 总是
+        # 带 managed kwarg 调用（legacy=None），缺参即 TypeError——可用性回归。
+        return self._ollama.start_llama_cpp(cfg, model_type, managed=managed)
 
     def stop_llama_cpp(self, port: Optional[int] = None):
         self._ollama.stop_llama_cpp(port)

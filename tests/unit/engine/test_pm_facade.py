@@ -44,3 +44,46 @@ class TestFacadeNInferDelegation:
         pm.stop_all(active_services=[])
         assert pm.ninfer_pid is None
         assert pm.ninfer_container is None
+
+
+class TestFacadeLlamaCppManagedForwarding:
+    """安全复审 HIGH（availability regression）：engine_adapter/llama_cpp.py
+    总是以 managed= kwarg 调 facade.start_llama_cpp（legacy 传 None），facade
+    签名缺参 = 一切 llama_cpp adapter 冷启动 TypeError。集成试点测试直打
+    LlamaCppProcessManager 绕过了 facade，故此处补 facade 层透传回归。"""
+
+    def test_start_llama_cpp_forwards_managed(self, tmp_path):
+        pm = _make_facade(tmp_path)
+        pm._ollama = MagicMock()
+        pm._ollama.start_llama_cpp.return_value = {"status": "healthy"}
+        cfg = MagicMock()
+        managed = object()
+        r = pm.start_llama_cpp(cfg, "embedding", managed=managed)
+        pm._ollama.start_llama_cpp.assert_called_once_with(
+            cfg, "embedding", managed=managed)
+        assert r == {"status": "healthy"}
+
+    def test_start_llama_cpp_legacy_none_managed(self, tmp_path):
+        """legacy 路径（managed=None）同样必须可达——回归本体是 kwarg 缺参。"""
+        pm = _make_facade(tmp_path)
+        pm._ollama = MagicMock()
+        pm._ollama.start_llama_cpp.return_value = {"status": "healthy"}
+        cfg = MagicMock()
+        r = pm.start_llama_cpp(cfg, "")
+        pm._ollama.start_llama_cpp.assert_called_once_with(cfg, "", managed=None)
+        assert r == {"status": "healthy"}
+
+    def test_adapter_start_through_facade_no_typeerror(self, tmp_path):
+        """回归现场：adapter.start(model) → facade → launcher 全链路不 TypeError。"""
+        from types import SimpleNamespace
+        from inferfabric.engine_adapter.llama_cpp import LlamaCppAdapter
+        pm = _make_facade(tmp_path)
+        pm._ollama = MagicMock()
+        pm._ollama.start_llama_cpp.return_value = {"status": "healthy"}
+        adapter = LlamaCppAdapter()
+        adapter._proc = pm
+        model = SimpleNamespace(llama_cpp=MagicMock(), model_type="embedding")
+        r = adapter.start(model)          # managed 缺省 = None（legacy）
+        assert r == {"status": "healthy"}
+        r2 = adapter.start(model, managed=object())  # 受管路径
+        assert r2 == {"status": "healthy"}
