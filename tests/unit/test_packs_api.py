@@ -186,13 +186,23 @@ def test_route_registration_contains_pack_endpoints():
 
 
 def test_singleton_defaults_from_env(tmp_path, monkeypatch):
+    # 生产迁移前置 PR：config 是唯一事实源 —— env 覆盖在 config import 期
+    # 解析，pack_handlers 直读 config 常量（不再自读 env）
+    import importlib
+    import inferfabric.config as _cfg
     monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("MACFABRIC_MODELS_DIR", str(tmp_path / "models.d"))
-    pmgr = pack_handlers.get_pack_manager(
-        catalog_path=REPO / "packs_catalog.yaml")
-    assert pmgr.root == tmp_path / "state" / "packs"
-    assert pmgr.models_d == tmp_path / "models.d"
-    pack_handlers.reset_pack_manager()
+    importlib.reload(_cfg)
+    try:
+        pmgr = pack_handlers.get_pack_manager(
+            catalog_path=REPO / "packs_catalog.yaml")
+        assert pmgr.root == tmp_path / "state" / "packs"
+        assert pmgr.models_d == tmp_path / "models.d"
+    finally:
+        for var in ("MACFABRIC_STATE_DIR", "MACFABRIC_MODELS_DIR"):
+            monkeypatch.delenv(var, raising=False)
+        importlib.reload(_cfg)
+        pack_handlers.reset_pack_manager()
 
 
 def test_is_model_disabled_delegates_to_uninstaller(mgr):
