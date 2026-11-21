@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import json
+import os
 import yaml
 import hashlib
 import dataclasses
@@ -31,8 +32,19 @@ _PROTECTED_ENV_KEYS = frozenset({"PATH", "HOME", "CONDA_DEFAULT_ENV", "CUDA_VISI
 # ─── Path Constants ──────────────────────────────────────────────
 
 BASE_DIR = Path(__file__).parent.parent
-MODELS_DIR = BASE_DIR / "models.d"
-IFF_DATA_DIR = Path.home() / ".inferfabric"
+# 目录重定向（安装版/调试版分离；与 pack_handlers 同源——config 是唯一
+# 事实源，消灭「packs 认 env、核心不认」的 split-brain）：
+#   IFF_STATE_DIR > MACFABRIC_STATE_DIR（旧名兼容）> ~/.inferfabric
+#   IFF_MODELS_DIR > MACFABRIC_MODELS_DIR（旧名兼容）> BASE_DIR/models.d
+# 缺省（无 env）行为与上游一致：Linux 等既有部署形态零影响。
+IFF_DATA_DIR = Path(
+    os.environ.get("IFF_STATE_DIR")
+    or os.environ.get("MACFABRIC_STATE_DIR")
+    or (Path.home() / ".inferfabric"))
+MODELS_DIR = Path(
+    os.environ.get("IFF_MODELS_DIR")
+    or os.environ.get("MACFABRIC_MODELS_DIR")
+    or (BASE_DIR / "models.d"))
 DEFAULT_STATE_DB = IFF_DATA_DIR / "state.db"
 DEFAULT_REQUEST_LOG_DB = IFF_DATA_DIR / "request_log.db"
 DEFAULT_LOG_DIR = IFF_DATA_DIR / "logs"

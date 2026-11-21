@@ -619,16 +619,11 @@ def get_pack_manager(catalog_path=None) -> PackManager:
     global _manager
     with _manager_lock:
         if _manager is None:
-            import os
+            # 单一事实源：config 常量已按 IFF_*/MACFABRIC_*（旧名）env 解析，
+            # 此处不再自读 env（消灭与核心的 split-brain）
             from inferfabric.config import IFF_DATA_DIR, MODELS_DIR
-            state_dir = Path(os.environ.get(
-                "IFF_STATE_DIR",
-                os.environ.get("MACFABRIC_STATE_DIR", str(IFF_DATA_DIR))))
-            models_dir = Path(os.environ.get(
-                "IFF_MODELS_DIR",
-                os.environ.get("MACFABRIC_MODELS_DIR", str(MODELS_DIR))))
-            _manager = PackManager(root=state_dir / "packs",
-                                   models_d=models_dir,
+            _manager = PackManager(root=IFF_DATA_DIR / "packs",
+                                   models_d=MODELS_DIR,
                                    catalog_path=catalog_path)
         return _manager
 
