@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from inferfabric.packs.catalog import Catalog, load_catalog
+from inferfabric.packs.sandbox import probe_sandbox
 from inferfabric.platform.pack_probe import probe_pack_host
 from inferfabric.packs.custom import (
     SimpleArtifact, build_custom_manifest, find_reusable_engine,
@@ -139,7 +140,8 @@ class PackManager:
     def __init__(self, root, models_d, catalog_path=None, fetcher=None,
                  reload_gateway=None, prepare_runtime=None,
                  run_healthcheck=None, memory_available_mb=None,
-                 pack_host_facts=None, disk_free_mb=None):
+                 pack_host_facts=None, disk_free_mb=None,
+                 sandbox_probe=None):
         self.root = Path(root)
         self.models_d = Path(models_d)
         self.catalog = Catalog(load_catalog(catalog_path or BUNDLED_CATALOG))
@@ -150,6 +152,9 @@ class PackManager:
         # 测试密闭化注入。probe_pack_host 保持模块级可打桩。
         self._pack_host_facts = pack_host_facts
         self._disk_free_mb = disk_free_mb
+        # 隔离维证据探针（#23 联合裁决 A1）：默认真实 probe_sandbox，
+        # 测试密闭化注入。
+        self._sandbox_probe = sandbox_probe or probe_sandbox
         self._memory_available_mb = memory_available_mb \
             or system_available_memory_mb
         self._fetcher = fetcher or HttpArtifactFetcher()
@@ -365,6 +370,24 @@ class PackManager:
             if pack_id in self._in_progress:
                 self._in_progress[pack_id] = stage
 
+    def _isolation_evidence(self, facts) -> str:
+        """隔离维证据（#23 联合裁决 A1 分级收紧）：按平台分派。
+
+        - darwin：PK0 probe_sandbox 三态——full→verified / degraded→
+          degraded / unavailable→unavailable（unavailable 拒绝安装）。
+        - linux：沙箱能力探测是 macOS SBPL 概念；本平台包进程跑
+          NoopProvider（进程组 + 目录约束）兜底，恒可用 → degraded
+          （显式不冒充完整隔离，spec §8.3）。
+        - 未知平台：unverified（不可装）。
+        """
+        if facts.os == "darwin":
+            return {"full": "verified", "degraded": "degraded",
+                    "unavailable": "unavailable"}[
+                self._sandbox_probe().mode.value]
+        if facts.os == "linux":
+            return "degraded"
+        return "unverified"
+
     def _install_admission(self, entry) -> tuple[bool, dict]:
         """安装期三维准入（spec §3：install/start 同规；其他平台可查看、
         不可执行）。
@@ -372,10 +395,13 @@ class PackManager:
         - 平台维度（模板求交 + 平台键）非 compatible 一律拒绝——本真机
           首发现的缺口：此前安装事务完全不做平台判定，darwin-arm 包可在
           linux 主机走完整下载落盘。
+        - 隔离维（#23 联合裁决 A1）：unavailable / 未双同意的 degraded /
+          unverified 一律拒绝；degraded 放行由安装事务显式标记
+          sandbox_degraded。
         - 资源维度只拒绝可实测且无歧义的不足（磁盘余量 / 可用内存 /
-          legacy 参数门槛）；VRAM 遥测缺失（resource_unknown）与隔离
-          unverified 不阻塞安装——安装不启动进程、不占 GPU，等待双端
-          遥测注入方案后再收紧（#23 联合裁决）。
+          legacy 参数门槛）；VRAM 遥测缺失（resource_unknown）不阻塞
+          安装——安装不启动进程、不占 GPU（#23 联合裁决 B1′：VRAM 仅
+          启动闸，Linux 侧无安装闸）。
         """
         from inferfabric.packs.admission import (evaluate_pack, get_template,
                                                  ResourceEvidence,
@@ -389,7 +415,7 @@ class PackManager:
         ram = self._memory_available_mb()
         d = evaluate_pack(
             manifest, facts, get_template(manifest.runtime_template),
-            RuntimeEvidence(isolation="unverified"),
+            RuntimeEvidence(isolation=self._isolation_evidence(facts)),
             ResourceEvidence(
                 disk_ok=disk_free >= manifest.disk_mb,
                 ram_ok=ram is None or ram >= manifest.peak_memory_mb,
@@ -400,7 +426,11 @@ class PackManager:
         # resource_unknown，会掩蔽磁盘/内存不足——安装闸只认直接实测。
         disk_ok = disk_free >= manifest.disk_mb
         ram_ok = ram is None or ram >= manifest.peak_memory_mb
-        blocked = (d.platform != "compatible"
+        # 隔离维拒绝码（_isolation_dim 三类失败）；platform/资源维单独判。
+        iso_blocked = d.reason_code in (
+            "runtime_unavailable", "isolation_unverified",
+            "isolation_degraded_not_allowed")
+        blocked = (d.platform != "compatible" or iso_blocked
                    or not disk_ok or not ram_ok)
         if not disk_ok or not ram_ok:
             decision["reason_code"] = "resource_insufficient"

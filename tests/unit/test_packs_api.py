@@ -70,10 +70,18 @@ def mgr(tmp_path):
         memory_available_mb=lambda: 65536,
         # 安装期准入（2026-11-21 接线）：显式 darwin-arm 事实，安装机制类
         # 测试在任意宿主机上走同一被 admitted 的平台；平台拒绝另有专测。
+        # 隔离维（#23 联合裁决 A1）：darwin 路径密闭化为 degraded 探针，
+        # 不依赖宿主机沙箱能力；unavailable 拒绝另有专测。
         pack_host_facts=lambda: __import__(
             "inferfabric.platform.pack_probe", fromlist=["PackHostFacts"]
         ).PackHostFacts(os="darwin", arch="arm64", accelerator="none",
-                        compute_capability=None))
+                        compute_capability=None),
+        sandbox_probe=lambda: __import__(
+            "inferfabric.packs.sandbox", fromlist=["SandboxProbe"]
+        ).SandboxProbe(
+            __import__("inferfabric.packs.sandbox",
+                       fromlist=["SandboxMode"]).SandboxMode.DEGRADED,
+            "test fixture"))
     return pmgr
 
 
