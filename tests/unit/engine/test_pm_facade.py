@@ -130,3 +130,64 @@ class TestFacadeNInferManagedForwarding:
         assert r == {"status": "healthy"}
         r2 = adapter.start(model, managed=object())  # 受管路径
         assert r2 == {"status": "healthy"}
+
+
+class TestFacadeLlamaCppManagedChatProbeDispatch:
+    """Mac chat 包（#23）：探针分派在 facade 全链路生效 —— 真实 sub-pm
+    （非 mock）走 facade.start_llama_cpp → launcher，openai_chat_ready_v1
+    包必须被 chat 探针放行、绝不被 embeddings 探针误杀（Linux 教训：
+    只测 launcher 层会漏链路回归）。"""
+
+    def test_chat_probe_dispatch_through_facade(self, tmp_path, monkeypatch):
+        import inferfabric.process_manager.llama_cpp as llm_mod
+        pm = _make_facade(tmp_path)
+
+        pack_dir = tmp_path / "packs_root" / "llm.qwen3-4b-mac" / "1.0.0"
+        (pack_dir / "runtime").mkdir(parents=True)
+        (pack_dir / "runtime" / "engine").write_text("binary")
+        (pack_dir / "models").mkdir(parents=True)
+        (pack_dir / "models" / "model").write_text("gguf")
+        from inferfabric.packs.managed_runtime import ResolvedRuntime
+        inst = ResolvedRuntime(
+            pack_id="llm.qwen3-4b-mac", pack_version="1.0.0",
+            template_name="llama-cpp-macos-arm64-v1",
+            artifact_identities=(), role="owned", model_name="qmac",
+            marker={"marker_version": 1, "pack_id": "llm.qwen3-4b-mac",
+                    "pack_version": "1.0.0",
+                    "runtime_template": "llama-cpp-macos-arm64-v1",
+                    "artifact_identities": [], "role": "owned"},
+            pack_dir=str(pack_dir), healthcheck="openai_chat_ready_v1")
+        from inferfabric.config import LlamaCppConfig
+        cfg = LlamaCppConfig(model_path=str(pack_dir / "models" / "model"),
+                             binary_path=str(pack_dir / "runtime" / "engine"),
+                             served_name="qmac", port=8130, threads=4,
+                             context_size=8192, gpu_layers=99)
+
+        popens, chat_probes, emb_probes = [], [], []
+
+        class _FakeProc:
+            pid = 4321
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(llm_mod.subprocess, "Popen",
+                            lambda cmd, **kw:
+                            (popens.append(cmd), _FakeProc())[1])
+        monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+        monkeypatch.setattr(llm_mod, "wait_http",
+                            lambda url, timeout=120: True)
+        monkeypatch.setattr(llm_mod.LlamaCppProcessManager,
+                            "_probe_chat_ready",
+                            staticmethod(
+                                lambda port, timeout=2:
+                                (chat_probes.append(port), (True, ""))[1]))
+        monkeypatch.setattr(llm_mod.LlamaCppProcessManager,
+                            "_probe_embeddings",
+                            staticmethod(
+                                lambda port, timeout=10:
+                                (emb_probes.append(port),
+                                 (False, "must not be called"))[1]))
+
+        r = pm.start_llama_cpp(cfg, "llm", managed=inst)
+        assert r["status"] == "healthy", r
+        assert chat_probes == [8130] and emb_probes == []

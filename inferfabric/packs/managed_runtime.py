@@ -54,6 +54,7 @@ class ResolvedRuntime:
     marker: dict
     pack_dir: str = ""        # 包正式目录（受管 launcher 的包域挂载/缓存依据）
     gpu_devices: str = ""     # 持久化设备域（终审 F6：权威来源，marker 不可提权）
+    healthcheck: str = ""     # manifest execution.healthcheck（launcher 探针分派）
 
 
 def _model_port(model) -> int | None:
@@ -126,7 +127,8 @@ class ManagedRuntime:
             role=rec_role,
             model_name=model.name, marker=dict(marker),
             gpu_devices=str(rec.ownership.get("gpu_devices") or ""),
-            pack_dir=str(self._pack_root / pack_id / manifest.pack_version))
+            pack_dir=str(self._pack_root / pack_id / manifest.pack_version),
+            healthcheck=str(getattr(manifest, "healthcheck", "") or ""))
 
     def _load_manifest(self, pack_id: str, version: str):
         path = self._pack_root / pack_id / version / "manifest.yaml"
