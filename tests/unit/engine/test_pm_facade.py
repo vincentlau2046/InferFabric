@@ -191,3 +191,8 @@ class TestFacadeLlamaCppManagedChatProbeDispatch:
         r = pm.start_llama_cpp(cfg, "llm", managed=inst)
         assert r["status"] == "healthy", r
         assert chat_probes == [8130] and emb_probes == []
+        # argv 面：包内二进制 + loopback + chat 不带 --embeddings
+        cmd = popens[0]
+        assert cmd[0] == str(pack_dir / "runtime" / "engine")
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
+        assert "--embeddings" not in cmd

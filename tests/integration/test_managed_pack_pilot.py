@@ -478,7 +478,8 @@ def test_bge_cpu_uses_approved_binary_and_explicit_degraded_mode(
     assert cmd[0] == str(pack_dir / "runtime" / "engine"), \
         "必须用包内核准二进制（approved runtime path）"
     assert cmd[cmd.index("--host") + 1] == "127.0.0.1", "受管绑定 loopback"
-    assert "-ngl" not in cmd, "受管 embedding 强制 CPU（gpu_layers 不透传）"
+    assert cmd[cmd.index("-ngl") + 1] == "0", \
+        "受管 embedding 显式 -ngl 0（Metal 引擎缺省 auto offload，缺省≠CPU）"
     assert "--embeddings" in cmd
     # 就绪探测超越 /health：真实 /v1/embeddings 机制探测
     assert len(probes) == 1 and probes[0].full_url.endswith("/v1/embeddings")
@@ -542,7 +543,7 @@ lifecycle: {{mode: on_demand}}
 network: {{listen: loopback, allowed_upstream: []}}
 artifacts:
   - {{id: model, kind: model, source: "https://example.com/bge.gguf", sha256: "{_A64}"}}
-execution: {{model_config_template: llama_cpp_embedding_v1, healthcheck: openai_chat_ready_v1}}
+execution: {{model_config_template: llama_cpp_embedding_v1, healthcheck: openai_embeddings_ready_v1}}
 sandbox: {{policy: verified-local-pack-v1, degraded_install_allowed: true}}
 """)
     from inferfabric.packs.uninstaller import PackUninstaller
@@ -737,8 +738,9 @@ def _llama_model_yaml(tmp_path, name, *, marker=None, port=8124,
                          "binary_path": str(tmp_path / "packs_root"
                                             / _CHAT_PACK_ID / "1.0.0"
                                             / "runtime" / "engine"),
-                         "served_name": name, "port": port, "threads": 4,
-                         "context_size": 8192, "gpu_layers": gpu_layers}}
+                         "served_name": name, "port": port, "threads": 8,
+                         "context_size": 8192, "gpu_layers": gpu_layers,
+                         "extra_flags": "--alias qwen3-4b --jinja"}}
     if marker is not None:
         doc["managed_by_pack"] = marker
     path = models_d / f"{name}.yaml"
@@ -797,8 +799,11 @@ def test_managed_chat_pack_probes_chat_not_embeddings(tmp_path, monkeypatch):
                          served_name="qmac", port=8124, threads=4,
                          context_size=8192, gpu_layers=99)
 
-    popens, chat_probes, emb_probes = [], [], []
+    popens, chat_probes, emb_probes, killpgs = [], [], [], []
     _fake_launch_env(monkeypatch, popens)
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.os.killpg",
+        lambda pgid, sig: killpgs.append(pgid))   # 假 PID 绝不发真信号
 
     from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
 
@@ -821,6 +826,7 @@ def test_managed_chat_pack_probes_chat_not_embeddings(tmp_path, monkeypatch):
     assert r["status"] == "healthy", r
     assert chat_probes == [8124] and emb_probes == [], \
         "chat 包必须走 chat 探针，绝不走 embeddings 探针"
+    assert killpgs == []
 
 
 def test_legacy_start_keeps_public_binding_ngl_and_no_probe(
@@ -855,6 +861,7 @@ def test_legacy_start_keeps_public_binding_ngl_and_no_probe(
     cmd = popens[0]
     assert cmd[cmd.index("--host") + 1] == "0.0.0.0", "legacy 绑定不变"
     assert cmd[cmd.index("-ngl") + 1] == "33", "legacy -ngl 透传不变"
+    assert "--embeddings" in cmd, "legacy 非 rerank 恒追加 --embeddings（不变）"
     assert chat_probes == [] and emb_probes == [], "legacy 无机制探针"
 
 
@@ -886,14 +893,18 @@ def _start_managed(tmp_path, monkeypatch, *, model_type, gpu_layers,
                          binary_path=str(pack_dir / "runtime" / "engine"),
                          served_name="qmac", port=8126, threads=4,
                          context_size=8192, gpu_layers=gpu_layers)
-    popens = []
+    popens, killpgs = [], []
     _fake_launch_env(monkeypatch, popens)
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.os.killpg",
+        lambda pgid, sig: killpgs.append(pgid))   # 假 PID 绝不发真信号
     _managed_probe_ok(monkeypatch)
     from inferfabric.state import StateDB
     from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
     pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
     r = pm.start_llama_cpp(cfg, model_type, managed=inst)
     assert r["status"] == "healthy", r
+    assert killpgs == []
     return popens[0]
 
 
@@ -910,7 +921,8 @@ def test_managed_chat_metal_from_approved_yaml(tmp_path, monkeypatch):
 
     cmd2 = _start_managed(tmp_path, monkeypatch, model_type="embedding",
                           gpu_layers=99, healthcheck="")
-    assert "-ngl" not in cmd2, "受管 embedding 强制 CPU（YAML 99 也不透传）"
+    assert cmd2[cmd2.index("-ngl") + 1] == "0", \
+        "受管 embedding 强制 CPU：显式 -ngl 0（YAML 99 也不透传）"
     assert "--embeddings" in cmd2
 
 
@@ -919,4 +931,159 @@ def test_managed_rerank_flags_and_cpu(tmp_path, monkeypatch):
     cmd = _start_managed(tmp_path, monkeypatch, model_type="rerank",
                          gpu_layers=99, healthcheck="")
     assert "--reranking" in cmd
-    assert "-ngl" not in cmd
+    assert cmd[cmd.index("-ngl") + 1] == "0", "rerank 同样显式 CPU"
+
+
+# ── 12. 评审修复轮（2026-11-21）：manifest 持久化 + 启动策略读回校验 ──
+
+def test_install_persists_manifest_yaml_for_managed_resolve(tmp_path):
+    """安装事务必须把 manifest.yaml 持久化进正式包目录（spec §4「持久化
+    解析后的模板/产物标识」）——否则 ManagedRuntime._load_manifest 读不到，
+    一切已装包在受管 gate fail-closed（评审 2026-11-21 发现）。"""
+    from inferfabric.proxy.pack_handlers import PackManager
+
+    def _cat(pack_id):
+        cat = tmp_path / f"catalog-{pack_id}.yaml"
+        cat.write_text(yaml.safe_dump({"packs": [{
+            "pack_id": pack_id, "display_name": "Persist", "summary": "s",
+            "tags": ["llm"], "risk_level": "verified", "builtin": True,
+            "manifest": yaml.safe_load(_rollback_manifest(pack_id))}]}),
+            encoding="utf-8")
+        return cat
+
+    pm = PackManager(tmp_path / "pk-persist", tmp_path / "models.d",
+                     catalog_path=_cat("llm.persist-a"), fetcher=_BoomFetch(),
+                     reload_gateway=lambda: None,
+                     prepare_runtime=lambda *a, **k: None,
+                     run_healthcheck=lambda *a, **k: None,
+                     memory_available_mb=lambda: 100_000)
+    pm._run_install(pm.catalog.find("llm.persist-a"))
+    mpath = (tmp_path / "pk-persist" / "llm.persist-a" / "1.0.0"
+             / "manifest.yaml")
+    assert mpath.exists(), "manifest.yaml 必须随安装事务持久化到包目录"
+    from inferfabric.packs.schema import parse_manifest
+    m = parse_manifest(yaml.safe_load(mpath.read_text(encoding="utf-8")))
+    assert m.pack_id == "llm.persist-a" and m.runtime_template == \
+        "llama-cpp-macos-arm64-v1"
+
+
+def test_resolve_rejects_yaml_launch_policy_drift(tmp_path):
+    """受管启动策略读回校验（spec §4）：models.d YAML 的 gpu_role /
+    gpu_layers / extra_flags 必须与安装事务审核生成的配置一致（config_gen
+    从持久化 manifest 重导出），手改漂移 = YAML 篡改 → 拒绝（评审
+    2026-11-21：gpu_role=none + gpu_layers=99 可绕过 GPU busy 检查仍
+    请求 Metal offload）。"""
+    _register_mac_template()
+    store, _ = _chat_pack(tmp_path)
+    marker = _marker(pack_id=_CHAT_PACK_ID, runtime_template=_MAC_TEMPLATE)
+    _llama_model_yaml(tmp_path, "qmac", marker=marker)
+    model = _load_one(tmp_path, "qmac")
+    rt = _runtime(tmp_path, store)
+    inst = rt.resolve(model)                    # 核准策略 → 通过
+    assert inst.healthcheck == "openai_chat_ready_v1"
+
+    import yaml as _y
+    ypath = tmp_path / "models.d" / "qmac.yaml"
+
+    def _rewrite(d):
+        ypath.write_text(_y.safe_dump(d), encoding="utf-8")
+        return _load_one(tmp_path, "qmac")
+
+    doc = _y.safe_load(ypath.read_text(encoding="utf-8"))
+
+    # gpu_layers 手改（99 → 90）
+    d = _y.safe_load(ypath.read_text(encoding="utf-8"))
+    d["llama_cpp"]["gpu_layers"] = 90
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(_rewrite(d))
+    assert ei.value.reason_code == "runtime_identity_mismatch"
+
+    # gpu_role 手改（shared → none：绕过 busy 检查仍请求 offload）
+    d = _y.safe_load(ypath.read_text(encoding="utf-8"))
+    d["llama_cpp"]["gpu_layers"] = 99
+    d["gpu_role"] = "none"
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(_rewrite(d))
+    assert ei.value.reason_code == "runtime_identity_mismatch"
+
+    # extra_flags 手改（夹带 offload/端点 flag）
+    d = _y.safe_load(ypath.read_text(encoding="utf-8"))
+    d["gpu_role"] = "shared"
+    d["llama_cpp"]["extra_flags"] = "--alias qwen3-4b --jinja -ngl 99"
+    with pytest.raises(PackRuntimeError) as ei:
+        rt.resolve(_rewrite(d))
+    assert ei.value.reason_code == "runtime_identity_mismatch"
+
+
+def test_catalog_healthcheck_matches_capability():
+    """目录数据契约（评审 2026-11-21）：embedding/rerank 包不得声明
+    openai_chat_ready_v1（bge-m3 误配 → 受管 chat 探针误杀正常 embedding
+    服务）；llm 包必须声明 openai_chat_ready_v1；llama_cpp 包的
+    model_config_template 必须与能力匹配。"""
+    cat = yaml.safe_load((Path(__file__).resolve().parents[2]
+                          / "packs_catalog.yaml").read_text(encoding="utf-8"))
+    for p in cat["packs"]:
+        m = p["manifest"]
+        cap, hc, tpl = m["capability"], m["execution"]["healthcheck"], \
+            m["execution"]["model_config_template"]
+        if cap in ("embedding", "rerank"):
+            assert hc != "openai_chat_ready_v1", \
+                f"{p['pack_id']}: embedding 能力不得声明 chat-ready"
+            if m["runtime"]["engine"] == "llama_cpp":
+                assert tpl == "llama_cpp_embedding_v1", p["pack_id"]
+        if cap == "llm" and m["runtime"]["engine"] == "llama_cpp":
+            assert hc == "openai_chat_ready_v1", p["pack_id"]
+            assert tpl == "llama_cpp_chat_v1", p["pack_id"]
+
+
+def test_probe_chat_ready_http_contract(tmp_path, monkeypatch):
+    """_probe_chat_ready 真实 HTTP 契约：POST /v1/chat/completions、
+    max_tokens=1、200 + choices 才放行；非 200 / 缺 choices / 异常 →
+    (False, detail)（评审：分派测试不得只 mock 探针）。"""
+    import json as _j
+    import urllib.request as _urlreq
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    from inferfabric.state import StateDB
+
+    reqs = []
+
+    class _Resp:
+        def __init__(self, status, body):
+            self.status, self._b = status, body
+        def read(self):
+            return _j.dumps(self._b).encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        reqs.append((req, timeout))
+        return _Resp(200, {"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr(_urlreq, "urlopen", fake_urlopen)
+    pm = LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+    ok, detail = pm._probe_chat_ready(8127)
+    assert ok and detail == ""
+    req, timeout = reqs[0]
+    assert req.full_url == "http://127.0.0.1:8127/v1/chat/completions"
+    assert req.get_method() == "POST"
+    body = _j.loads(req.data.decode())
+    assert body["max_tokens"] == 1 and body["messages"][0]["role"] == "user"
+    assert timeout == 2
+
+    monkeypatch.setattr(_urlreq, "urlopen",
+                        lambda req, timeout=None: _Resp(500, {}))
+    ok, detail = pm._probe_chat_ready(8127)
+    assert not ok and "500" in detail
+
+    monkeypatch.setattr(_urlreq, "urlopen",
+                        lambda req, timeout=None: _Resp(200, {"nope": 1}))
+    ok, detail = pm._probe_chat_ready(8127)
+    assert not ok and "choices" in detail
+
+    def _boom(req, timeout=None):
+        raise OSError("conn refused")
+    monkeypatch.setattr(_urlreq, "urlopen", _boom)
+    ok, detail = pm._probe_chat_ready(8127)
+    assert not ok and "conn refused" in detail

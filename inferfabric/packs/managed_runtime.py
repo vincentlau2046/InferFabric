@@ -118,6 +118,7 @@ class ManagedRuntime:
             raise PackRuntimeError(
                 "runtime_identity_mismatch",
                 f"runtime template {manifest.runtime_template!r} not registered")
+        self._verify_launch_policy(model, manifest, pack_id, version)
         self._check_collision(model, pack_id)
         identities = tuple(sorted(a.sha256 for a in manifest.artifacts))
         return ResolvedRuntime(
@@ -137,6 +138,37 @@ class ManagedRuntime:
                 return parse_manifest(yaml.safe_load(f))
         except (OSError, yaml.YAMLError, ValueError):
             return None
+
+    def _verify_launch_policy(self, model, manifest, pack_id: str,
+                              version: str) -> None:
+        """受管启动策略读回校验（spec §4「正式启动读回并校验」）。
+
+        models.d YAML 的加速/端点面（gpu_role / gpu_layers / extra_flags）
+        必须与安装事务审核生成的配置一致 —— config_gen 从持久化 manifest
+        重导出核准值比对，任何漂移（如 gpu_role=none + gpu_layers=99 绕过
+        GPU busy 检查仍请求 offload、extra_flags 夹带 -ngl/--embeddings）
+        = YAML 篡改信号，拒绝启动。
+        """
+        if manifest.engine != "llama_cpp":
+            return                      # 其他引擎的核准面随其适配器落地
+        from inferfabric.packs.config_gen import build_model_config
+        lc = getattr(model, "llama_cpp", None)
+        if lc is None:
+            raise PackRuntimeError(
+                "runtime_identity_mismatch",
+                f"pack {pack_id}: managed llama_cpp model without "
+                "llama_cpp config section")
+        pack_dir = self._pack_root / pack_id / version
+        approved = build_model_config(manifest, pack_dir, port=lc.port)
+        ap = approved.llama_cpp
+        if (int(lc.gpu_layers) != int(ap.gpu_layers)
+                or (lc.extra_flags or "") != ap.extra_flags
+                or getattr(model, "gpu_role", "") != manifest.gpu_role):
+            raise PackRuntimeError(
+                "runtime_identity_mismatch",
+                f"pack {pack_id}: models.d launch policy drifted from the "
+                "approved pack config (gpu_role/gpu_layers/extra_flags) — "
+                "YAML tampering? reinstall the pack")
 
     def _check_collision(self, model, pack_id: str) -> None:
         """端口/名字冲突：只拒绝，绝不收养或停止外来实例。"""
