@@ -189,3 +189,102 @@ class TestSwitchToIdleStopsViaUnifiedEntry:
         names = [n for n, _ in stopped]
         assert "Qwen38-27B-TXT" in names and "ovis-ocr2" in names, "所有 GPU-bound 服务都应经 _stop_model_process"
         assert result["status"] == "switched"
+
+
+# ── Mac 受管 llama_cpp 停止回归（Task 3 真机首发现，2026-11-21）────
+
+def _make_pm(tmp_path):
+    from inferfabric.process_manager.llama_cpp import LlamaCppProcessManager
+    from inferfabric.state import StateDB
+    return LlamaCppProcessManager(StateDB(tmp_path / "s.db"), tmp_path)
+
+
+def test_stop_llama_cpp_kills_process_group_from_pid_file(tmp_path,
+                                                          monkeypatch):
+    """/stop 必须用启动时记录的进程组 pid 文件收割（macOS 无 fuser、
+    pkill 回退模式只匹配 vllm → 旧停止路径在 Mac 恒空转）。"""
+    import os as _os
+    import signal as _signal
+    pm = _make_pm(tmp_path)
+    pid_file = pm._log_dir / "llama_cpp_58411.pid"
+    pid_file.write_text("4321")
+
+    killpgs = []
+
+    def fake_killpg(pgid, sig):
+        killpgs.append((pgid, sig))
+        if sig == 0:
+            raise ProcessLookupError   # 第一轮 TERM 后进程即消失
+
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.os.killpg",
+                        fake_killpg)
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.time.sleep",
+                        lambda s: None)
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.LlamaCppProcessManager"
+        "._pkill_by_port", staticmethod(lambda port: None))
+
+    pm.stop_llama_cpp(port=58411)
+
+    assert (_signal.SIGTERM, ) == tuple(
+        s for p, s in killpgs if p == 4321 and s != 0)[:1] or \
+        (4321, _signal.SIGTERM) in killpgs
+    assert not pid_file.exists(), "收割后 pid 文件必须清除"
+
+
+def test_stop_llama_cpp_esculates_to_sigkill_when_stubborn(tmp_path,
+                                                           monkeypatch):
+    """TERM 宽限后进程仍在 → SIGKILL 升级（不留半死进程占 GPU/端口）。"""
+    import os as _os
+    import signal as _signal
+    pm = _make_pm(tmp_path)
+    (pm._log_dir / "llama_cpp_58411.pid").write_text("4321")
+
+    killpgs = []
+
+    def fake_killpg(pgid, sig):
+        killpgs.append((pgid, sig))   # sig=0 永远存活（stubborn）
+
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.os.killpg",
+                        fake_killpg)
+    monkeypatch.setattr("inferfabric.process_manager.llama_cpp.time.sleep",
+                        lambda s: None)
+    monkeypatch.setattr(
+        "inferfabric.process_manager.llama_cpp.LlamaCppProcessManager"
+        "._pkill_by_port", staticmethod(lambda port: None))
+
+    pm.stop_llama_cpp(port=58411)
+
+    assert (4321, _signal.SIGKILL) in killpgs, "顽固进程必须升级 SIGKILL"
+
+
+def test_pkill_by_port_falls_back_to_lsof_when_fuser_missing(tmp_path,
+                                                             monkeypatch):
+    """fuser（macOS 缺失）→ lsof 找监听 pid 击杀（旧回退 pkill -f
+    'vllm.*:port' 匹配不到 llama-server）。"""
+    import subprocess as _sub
+    pm = _make_pm(tmp_path)
+
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if argv[0] == "fuser":
+            raise FileNotFoundError("fuser")
+        if argv[0] == "lsof":
+            class _R:
+                returncode = 0
+                stdout = b"4321\n"
+            return _R()
+        class _R2:
+            returncode = 0
+        return _R2()
+
+    monkeypatch.setattr("inferfabric.process_manager.base.subprocess.run",
+                        fake_run)
+
+    from inferfabric.process_manager.base import BaseProcessManager
+    pm._pkill_by_port(58411)
+
+    assert any(a[0] == "lsof" for a in calls), "fuser 缺失必须回退 lsof"
+    assert any(a[0] == "kill" for a in calls), "lsof 找到的 pid 必须被击杀"

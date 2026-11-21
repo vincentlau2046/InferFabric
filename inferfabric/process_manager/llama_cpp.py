@@ -252,8 +252,39 @@ class LlamaCppProcessManager(BaseProcessManager):
             return {"status": "timeout", "message": "llama.cpp didn't become healthy within 2 minutes"}
 
     def stop_llama_cpp(self, port: Optional[int] = None):
-        """Stop llama.cpp via port-based cleanup."""
+        """Stop llama.cpp: process-group kill from the pid file recorded at
+        start (pgid = pid, start_new_session), then port-based cleanup as
+        the safety net.
+
+        The pid file is the primary mechanism — macOS has no fuser and the
+        old pkill fallback pattern only matched vllm, so the previous stop
+        path was a silent no-op there (Task 3 real-machine finding,
+        2026-11-21)."""
         if port:
+            pid_file = self._log_dir / f"llama_cpp_{port}.pid"
+            try:
+                pgid = int(pid_file.read_text().strip())
+            except (OSError, ValueError):
+                pgid = None
+            if pgid is not None and pgid > 1:
+                import signal
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except OSError:
+                    pass
+                # Grace period, then escalate for stubborn processes
+                for _ in range(25):          # 25 × 0.2s ≈ 5s
+                    try:
+                        os.killpg(pgid, 0)   # liveness probe
+                    except OSError:
+                        break                # gone
+                    time.sleep(0.2)
+                else:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except OSError:
+                        pass
+            pid_file.unlink(missing_ok=True)
             self._pkill_by_port(port)
         # Clean up PID file
         for pf in self._log_dir.glob("llama_cpp_*.pid"):
