@@ -87,8 +87,8 @@ class FakePM:
 def pack_manager(tmp_path, monkeypatch):
     """隔离的 PackManager 单例（不触真实 ~/.inferfabric）。"""
     from inferfabric.proxy import pack_handlers
-    monkeypatch.setenv("MACFABRIC_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("MACFABRIC_MODELS_DIR", str(tmp_path / "models.d"))
+    # PR #24 评审 nit ①：pack_handlers 不再读 env（config 单一事实源），
+    # 显式传参构造的 PackManager 与 env 无关 —— 两行 setenv 是死设置
     reset_pack_manager()
     mgr = PackManager(root=tmp_path / "packs",
                       models_d=tmp_path / "models.d",
