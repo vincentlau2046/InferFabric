@@ -177,8 +177,12 @@ class ProcessManager(BaseProcessManager):
     def stop_sglang(self, port: Optional[int] = None, container_name: Optional[str] = None) -> dict:
         return self._sglang.stop_sglang(port=port, container_name=container_name)
 
-    def start_ninfer(self, cfg, container_name: str) -> dict:
-        return self._ninfer.start_ninfer(cfg, container_name)
+    def start_ninfer(self, cfg, container_name: str,
+                     *, managed=None) -> dict:
+        # managed 透传（Task 4 受管试点 / PR #27 同类修复）：adapter 总是
+        # 带 managed kwarg 调用（legacy=None），缺参即 TypeError——主 TXT
+        # 引擎冷启动不可用的可用性回归。
+        return self._ninfer.start_ninfer(cfg, container_name, managed=managed)
 
     def stop_ninfer(self, container_name: str) -> dict:
         return self._ninfer.stop_ninfer(container_name)
