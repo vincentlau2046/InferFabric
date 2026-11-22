@@ -37,6 +37,23 @@ from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
 from inferfabric.monitor_report import MonitorReportCache
+from inferfabric.jobs import JobRegistry
+
+# 控制面长任务注册表（mac prod 上游化，批 4 TOP3b）：长任务任务化共用
+# 底座（discover/switch 任务化的 infra + REST；生产者接入为后续项）
+_JOB_REGISTRY = JobRegistry()
+
+
+def _job_route(h, pm):
+    """GET /admin/jobs/{job_id} — 单任务状态查询（动态段）。"""
+    from urllib.parse import urlparse
+    path = urlparse(h.path).path
+    job_id = path.rsplit("/", 1)[-1]
+    job = _JOB_REGISTRY.get(job_id)
+    if job is None:
+        h._send_json({"error": "unknown job"}, 404)
+    else:
+        h._send_json(job)
 from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.anomaly_collector import AnomalyEvent
 from inferfabric.proxy import pack_handlers
@@ -663,6 +680,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _GET_ROUTES:
+                # 控制面长任务动态段（mac prod 上游化）：GET /admin/jobs/{job_id}
+                if path.startswith("/admin/jobs/"):
+                    _admin(_job_route)(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _GET_ROUTES[path](self, pm)
@@ -677,6 +698,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _POST_ROUTES:
+                # 控制面长任务取消（mac prod 上游化）：POST /admin/jobs/{id}/cancel
+                if path.startswith("/admin/jobs/") and path.endswith("/cancel"):
+                    _admin(lambda h, pm2: h._handle_job_cancel(pm2))(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _POST_ROUTES[path](self, pm)
@@ -1192,6 +1217,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "no upstream available"}, 503)
 
     # ─── vLLM Metrics ────────────────────────────────────────────
+
+    def _handle_job_cancel(self, pm):
+        """POST /admin/jobs/{job_id}/cancel — 协作式取消（mac prod 上游化）。"""
+        from urllib.parse import urlparse
+        path = urlparse(self.path).path
+        job_id = path[len("/admin/jobs/"):-len("/cancel")]
+        if not job_id:
+            self._send_json({"error": "job_id required"}, 400)
+            return
+        payload, code = _JOB_REGISTRY.request_cancel(job_id)
+        self._send_json(payload, code)
 
     def _handle_monitor_report(self, pm):
         """GET /api/monitor-report?window=1h|24h|7d|30d&scope=all|local|cloud

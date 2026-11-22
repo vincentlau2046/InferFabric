@@ -54,12 +54,21 @@ def test_insert_entry_with_ttft_ms_preserved(db):
 
 
 def test_insert_entry_metadata_dict_serialized(db):
-    """metadata dict → JSON 文本落列（schema v002 本有该列，prod 契约）。"""
+    """metadata dict → 落列 JSON 文本、读回 dict（写入/回读契约，prod 契约）。"""
     db.insert_request_log([_minimal_entry(
         "r4", metadata={"pool_summary": {"pool": "p1"}})])
     rows = db.query_request_log(since=0, limit=10)
     row = next(r for r in rows if r.get("req_id") == "r4")
-    assert row.get("metadata") == '{"pool_summary": {"pool": "p1"}}'
+    # query_request_log 回读侧把 JSON 文本解析为 dict（损坏保持原值不抛）
+    assert row.get("metadata") == {"pool_summary": {"pool": "p1"}}
+
+
+def test_insert_entry_metadata_missing_defaults_empty(db):
+    """无 metadata 键 → 列缺省 '{}'，读回空 dict。"""
+    db.insert_request_log([_minimal_entry("r6")])
+    rows = db.query_request_log(since=0, limit=10)
+    row = next(r for r in rows if r.get("req_id") == "r6")
+    assert row.get("metadata") == {}
 
 
 def test_insert_entry_route_none_falls_back_local(db):
