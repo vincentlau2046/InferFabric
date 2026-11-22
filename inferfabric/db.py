@@ -338,31 +338,63 @@ class IFFDB:
     def insert_request_log(self, entries: list[dict]):
         if not entries:
             return
-        # 旧调用方（v6.5 前构造的 entry dict / 测试 fixture）可能缺
-        # tokens_in_cached / agent / ua 键 → 缺省，保持后向兼容。
+        # 旧调用方（v6.5 前构造的 entry dict / 测试 fixture）可能缺键 →
+        # 全列缺省归一（mac prod 上游化，2026-11-22）：缺 ttft_ms 曾撞
+        # sqlite3.ProgrammingError（INSERT 绑定 :ttft_ms 而条目无该键）。
+        # route 防御性兜底：显式 None 曾撞 NOT NULL 约束被 INSERT OR
+        # IGNORE 静默丢弃（失败日志丢失根因之一）— 兜底 'local'。
+        # metadata：缺省 '{}'；dict 序列化为 JSON 文本（schema v002 本有
+        # 该列，此前 INSERT 从不写入 → 池归属 pool_summary 丢失）。
+        import json as _json
         entries = [dict(e, tokens_in_cached=e.get("tokens_in_cached", 0),
                         agent=e.get("agent", ""), ua=e.get("ua", ""),
-                        x_app=e.get("x_app", "")) for e in entries]
+                        x_app=e.get("x_app", ""),
+                        key_name=e.get("key_name", ""),
+                        ttft_ms=e.get("ttft_ms"),
+                        tokens_in=e.get("tokens_in", 0),
+                        tokens_out=e.get("tokens_out", 0),
+                        duration_ms=e.get("duration_ms", 0.0),
+                        cloud_provider=e.get("cloud_provider"),
+                        error=e.get("error"), ts=e.get("ts", ""),
+                        route=e.get("route") or "local",
+                        metadata=_json.dumps(e.get("metadata") or {},
+                                             ensure_ascii=False)
+                        if not isinstance(e.get("metadata"), str)
+                        else e["metadata"]) for e in entries]
         with self._write_lock:
             with self.connect(REQUEST_LOG_DB) as conn:
                 conn.executemany(
                     "INSERT OR IGNORE INTO request_log "
                     "(req_id, key_name, model, status, ttft_ms, tokens_in, "
                     " tokens_in_cached, tokens_out, agent, ua, x_app, "
-                    " duration_ms, route, cloud_provider, error, timestamp, ts) "
+                    " duration_ms, route, cloud_provider, error, timestamp, ts, "
+                    " metadata) "
                     "VALUES (:req_id, :key_name, :model, :status, :ttft_ms, :tokens_in, "
                     ":tokens_in_cached, :tokens_out, :agent, :ua, :x_app, "
                     ":duration_ms, :route, :cloud_provider, :error, "
-                    ":timestamp, :ts)",
+                    ":timestamp, :ts, :metadata)",
                     entries,
                 )
                 conn.commit()
 
     def query_request_log(self, since: float, until: float | None = None,
-                          model: str | None = None, limit: int = 10000) -> list[dict]:
+                          model: str | None = None, limit: int = 10000,
+                          before_ts: float | None = None,
+                          before_id: int | None = None) -> list[dict]:
+        """键集查询 [since, until) 的请求日志行（timestamp,id 降序）。
+
+        mac prod 上游化（2026-11-22）：
+        - 下界含 since（[since, until) 契约，prod 终审 I1）；既有调用方
+          语义影响仅为边界行（时间戳恰等于 since）从排除改为纳入。
+        - before_ts+before_id：monitor 报告的 (timestamp, id) 真键集分页
+          游标 —— 返回 timestamp < 游标，或 timestamp 相等而 id 更小的行
+          （id 单调唯一 → 页间无重叠，海量同秒行不漏不计重）。
+        - metadata JSON 文本 → dict 回读（写入侧见 insert_request_log）；
+          损坏/非 JSON 保持原值由消费方按 unknown 处理，不抛异常。
+        """
         with self.connect(REQUEST_LOG_DB) as conn:
             cols = [d[0] for d in conn.execute("SELECT * FROM request_log LIMIT 0").description]
-            sql = "SELECT * FROM request_log WHERE timestamp > ?"
+            sql = "SELECT * FROM request_log WHERE timestamp >= ?"
             params: list[Any] = [since]
             if until is not None:
                 sql += " AND timestamp < ?"
@@ -370,10 +402,24 @@ class IFFDB:
             if model is not None:
                 sql += " AND model = ?"
                 params.append(model)
-            sql += " ORDER BY timestamp DESC LIMIT ?"
+            if before_ts is not None and before_id is not None:
+                sql += " AND (timestamp < ? OR (timestamp = ? AND id < ?))"
+                params.extend([before_ts, before_ts, before_id])
+            sql += " ORDER BY timestamp DESC, id DESC LIMIT ?"
             params.append(limit)
             rows = conn.execute(sql, params).fetchall()
-            return [dict(zip(cols, r)) for r in rows]
+            import json as _json
+            out = []
+            for r in rows:
+                d = dict(zip(cols, r))
+                m = d.get("metadata")
+                if isinstance(m, str):
+                    try:
+                        d["metadata"] = _json.loads(m) if m else {}
+                    except Exception:
+                        pass
+                out.append(d)
+            return out
 
     def reclassify_request_log(self, classify_fn, known_ids: set | None = None) -> int:
         """对无真实 def 的行（unknown + observed 残留如 smoke-tmp）用 classify_fn

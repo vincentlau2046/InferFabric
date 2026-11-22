@@ -36,6 +36,24 @@ from inferfabric.state import GPUMode
 from inferfabric.agent_registry import request_protocol
 from inferfabric.agent_stats import AGENT_GRAN, aggregate_agent_stats
 from inferfabric.metrics_aggregator import cost_of_row
+from inferfabric.monitor_report import MonitorReportCache
+from inferfabric.jobs import JobRegistry
+
+# 控制面长任务注册表（mac prod 上游化，批 4 TOP3b）：长任务任务化共用
+# 底座（discover/switch 任务化的 infra + REST；生产者接入为后续项）
+_JOB_REGISTRY = JobRegistry()
+
+
+def _job_route(h, pm):
+    """GET /admin/jobs/{job_id} — 单任务状态查询（动态段）。"""
+    from urllib.parse import urlparse
+    path = urlparse(h.path).path
+    job_id = path.rsplit("/", 1)[-1]
+    job = _JOB_REGISTRY.get(job_id)
+    if job is None:
+        h._send_json({"error": "unknown job"}, 404)
+    else:
+        h._send_json(job)
 from inferfabric.proxy.request_logger import RequestLog
 from inferfabric.anomaly_collector import AnomalyEvent
 from inferfabric.proxy import pack_handlers
@@ -249,6 +267,31 @@ class _ExpensiveCache:
         return compute()
 
 
+def parse_monitor_params(query: str) -> tuple[str, str]:
+    """GET /api/monitor-report 查询串 → (window, scope)（mac prod 上游化）。
+
+    缺省 (24h, all)（旧 API 无参行为保留）；非法 window/scope 抛
+    ValueError（路由层转 400），不静默回退默认值掩盖调用方错误。
+    """
+    from urllib.parse import parse_qs
+    from inferfabric.monitor_report import DEFAULT_WINDOW, VALID_SCOPES, VALID_WINDOWS
+    qs = parse_qs(query or "")
+    window = (qs.get("window", [DEFAULT_WINDOW])[0] or DEFAULT_WINDOW).strip()
+    scope = (qs.get("scope", ["all"])[0] or "all").strip()
+    if window not in VALID_WINDOWS:
+        raise ValueError(
+            f"unknown window {window!r} (expected one of {sorted(VALID_WINDOWS)})")
+    if scope not in VALID_SCOPES:
+        raise ValueError(
+            f"unknown scope {scope!r} (expected one of {sorted(VALID_SCOPES)})")
+    return window, scope
+
+
+# 报告短 TTL 单飞缓存（进程级，mac prod 上游化）：TTL 内数字/表/图同源；
+# 大扫描只发生在报告端点，绝不接入 3s 全局轮询路径
+_MONITOR_REPORT_CACHE = MonitorReportCache()
+
+
 def _metrics_axis(pm) -> list[tuple[str, str]]:
     """v6.0: 指标图 x 轴（配置驱动）— (model_name, source) 列表。
 
@@ -344,6 +387,7 @@ _GET_ROUTES = {
     "/system":                  lambda h, pm: h._send_json(
         h._system_info(pm.telemetry.get_device_snapshot())),
     "/api/metrics":             lambda h, pm: h._handle_api_metrics(pm),
+    "/api/monitor-report":      lambda h, pm: h._handle_monitor_report(pm),
     "/api/latency":           lambda h, pm: h._handle_api_latency(pm),
     "/api/power":             lambda h, pm: h._handle_api_power(pm),
     "/api/device_metrics":    lambda h, pm: h._handle_api_device_metrics(pm),
@@ -636,6 +680,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _GET_ROUTES:
+                # 控制面长任务动态段（mac prod 上游化）：GET /admin/jobs/{job_id}
+                if path.startswith("/admin/jobs/"):
+                    _admin(_job_route)(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _GET_ROUTES[path](self, pm)
@@ -650,6 +698,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             from urllib.parse import urlparse
             path = urlparse(self.path).path
             if path not in _POST_ROUTES:
+                # 控制面长任务取消（mac prod 上游化）：POST /admin/jobs/{id}/cancel
+                if path.startswith("/admin/jobs/") and path.endswith("/cancel"):
+                    _admin(lambda h, pm2: h._handle_job_cancel(pm2))(self, pm)
+                    return
                 self._send_json({"error": "not found"}, 404)
                 return
             _POST_ROUTES[path](self, pm)
@@ -1165,6 +1217,39 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "no upstream available"}, 503)
 
     # ─── vLLM Metrics ────────────────────────────────────────────
+
+    def _handle_job_cancel(self, pm):
+        """POST /admin/jobs/{job_id}/cancel — 协作式取消（mac prod 上游化）。"""
+        from urllib.parse import urlparse
+        path = urlparse(self.path).path
+        job_id = path[len("/admin/jobs/"):-len("/cancel")]
+        if not job_id:
+            self._send_json({"error": "job_id required"}, 400)
+            return
+        payload, code = _JOB_REGISTRY.request_cancel(job_id)
+        self._send_json(payload, code)
+
+    def _handle_monitor_report(self, pm):
+        """GET /api/monitor-report?window=1h|24h|7d|30d&scope=all|local|cloud
+        （mac prod 上游化，2026-11-22）
+
+        同快照报告：键分页全量扫描，短 TTL 单飞缓存；统计口径在
+        monitor_report.py，此处只做参数解析与错误映射（不在 handler
+        堆 SQL）。"""
+        from urllib.parse import urlparse
+        try:
+            window, scope = parse_monitor_params(urlparse(self.path).query)
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+            return
+        try:
+            report = _MONITOR_REPORT_CACHE.get_or_build(
+                pm.telemetry, window=window, until=time.time(), scope=scope,
+                prices=getattr(pm.metrics, "price_config", None))
+            self._send_json(report, 200)
+        except Exception as e:
+            log.error("/api/monitor-report failed: %s", e)
+            self._send_json({"error": "monitor report unavailable"}, 500)
 
     def _handle_api_metrics(self, pm):
         """返回聚合指标 (G-2 MetricsAggregator)"""
