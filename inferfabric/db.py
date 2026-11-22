@@ -338,22 +338,41 @@ class IFFDB:
     def insert_request_log(self, entries: list[dict]):
         if not entries:
             return
-        # 旧调用方（v6.5 前构造的 entry dict / 测试 fixture）可能缺
-        # tokens_in_cached / agent / ua 键 → 缺省，保持后向兼容。
+        # 旧调用方（v6.5 前构造的 entry dict / 测试 fixture）可能缺键 →
+        # 全列缺省归一（mac prod 上游化，2026-11-22）：缺 ttft_ms 曾撞
+        # sqlite3.ProgrammingError（INSERT 绑定 :ttft_ms 而条目无该键）。
+        # route 防御性兜底：显式 None 曾撞 NOT NULL 约束被 INSERT OR
+        # IGNORE 静默丢弃（失败日志丢失根因之一）— 兜底 'local'。
+        # metadata：缺省 '{}'；dict 序列化为 JSON 文本（schema v002 本有
+        # 该列，此前 INSERT 从不写入 → 池归属 pool_summary 丢失）。
+        import json as _json
         entries = [dict(e, tokens_in_cached=e.get("tokens_in_cached", 0),
                         agent=e.get("agent", ""), ua=e.get("ua", ""),
-                        x_app=e.get("x_app", "")) for e in entries]
+                        x_app=e.get("x_app", ""),
+                        key_name=e.get("key_name", ""),
+                        ttft_ms=e.get("ttft_ms"),
+                        tokens_in=e.get("tokens_in", 0),
+                        tokens_out=e.get("tokens_out", 0),
+                        duration_ms=e.get("duration_ms", 0.0),
+                        cloud_provider=e.get("cloud_provider"),
+                        error=e.get("error"), ts=e.get("ts", ""),
+                        route=e.get("route") or "local",
+                        metadata=_json.dumps(e.get("metadata") or {},
+                                             ensure_ascii=False)
+                        if not isinstance(e.get("metadata"), str)
+                        else e["metadata"]) for e in entries]
         with self._write_lock:
             with self.connect(REQUEST_LOG_DB) as conn:
                 conn.executemany(
                     "INSERT OR IGNORE INTO request_log "
                     "(req_id, key_name, model, status, ttft_ms, tokens_in, "
                     " tokens_in_cached, tokens_out, agent, ua, x_app, "
-                    " duration_ms, route, cloud_provider, error, timestamp, ts) "
+                    " duration_ms, route, cloud_provider, error, timestamp, ts, "
+                    " metadata) "
                     "VALUES (:req_id, :key_name, :model, :status, :ttft_ms, :tokens_in, "
                     ":tokens_in_cached, :tokens_out, :agent, :ua, :x_app, "
                     ":duration_ms, :route, :cloud_provider, :error, "
-                    ":timestamp, :ts)",
+                    ":timestamp, :ts, :metadata)",
                     entries,
                 )
                 conn.commit()
