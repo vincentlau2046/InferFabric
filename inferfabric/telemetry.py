@@ -51,9 +51,13 @@ class _IFFDBRequestLogAdapter:
         self._db.insert_request_log(entries)
 
     def query_request_log(self, since: float, until: float | None = None,
-                          model: str | None = None, limit: int = 100000) -> list[dict]:
+                          model: str | None = None, limit: int = 100000,
+                          before_ts: float | None = None,
+                          before_id: int | None = None) -> list[dict]:
         return self._db.query_request_log(since=since, until=until,
-                                          model=model, limit=limit)
+                                          model=model, limit=limit,
+                                          before_ts=before_ts,
+                                          before_id=before_id)
 
     def prune_request_log(self, before: float) -> int:
         return self._db.prune_request_log(before)
@@ -197,10 +201,17 @@ class TelemetryHub:
             percentiles=percentiles, source_of=source_of)
 
     def query_request_log(self, since: float, until: float | None = None,
-                           model: str | None = None, limit: int = 10000) -> list[dict]:
-        """Query request logs via the unified adapter. Thread-safe."""
+                           model: str | None = None, limit: int = 10000,
+                           before_ts: float | None = None,
+                           before_id: int | None = None) -> list[dict]:
+        """Query request logs via the unified adapter. Thread-safe.
+
+        before_ts/before_id：键集分页游标直通（monitor_report 全量扫描
+        契约；缺参曾致端点 500，2026-11-22 真机首发现）。"""
         return self._legacy_db.query_request_log(since=since, until=until,
-                                                  model=model, limit=limit)
+                                                  model=model, limit=limit,
+                                                  before_ts=before_ts,
+                                                  before_id=before_id)
 
     def reclassify_request_log(self, classify_fn, known_ids=None) -> int:
         """重新分类无 def 的历史行（认领后触发）。代理到 IFFDB。"""
