@@ -5,7 +5,7 @@
 | 需求与裁决 | ✅ 2026-11-24 | 四项裁决见 [spec.md](spec.md) §0；两项既有裁决被推翻（向导挂点、key 一次性展示），实施时在对应文档记录 |
 | UX 落地性审视 | ✅ 2026-11-24 | document-ux-review 技能动线推演：82/100，1 高 2 中 3 低；ISSUE-01/02/03/04/05 已修入 spec（轮换动作、失败可读性、入口层级、密码恢复指引、吊销文案）；HTML 报告在会话产物目录 |
 | PR1 · IA（向导迁移+导航重组） | ✅ 已实施（#43） | 异常并入状态组已含；fresh-context 评审 2 important + 4 nit 全部修入同分支 |
-| PR2 · 组级回退开关 | ⬜ 未开始 | strategy 复用；默认 priority_failover 升级零行为变化 |
+| PR2 · 组级回退开关 | ✅ 已实施（本 PR） | strategy 严格枚举（未知值拒载）；selector first_only 截断（排序后 [:1]，决策 reason 不动）；新错误码 `fallback_disabled`（双协议 503 可区分）；`POST /admin/model-pools/strategy` CAS 字段级翻转（registry `_flip_pool_field` 共享路径，toggle 重构复用）；UI 回退开关 + tooltip + 降级横幅 first_only 文案；15 例 RED→GREEN，全量 2758 passed（3 例 connect_clients[codex] 为 #44 既有 macOS 失败） |
 | PR3 · 设置页+密码 UI | ⬜ 未开始 | 修改需验旧密码；≥12 字节沿用 |
 | PR4 · key 重看+吊销硬删 | ⬜ 未开始 | 依赖 PR3；存量旧 key 不可重看；一次性清理现存 revoked 行 |
 | 验收 | ⬜ | 每 PR 全量 unit+integration + fresh-context cross-review；WS3 需真机验证 reveal 全链路（设密码→建 key→重看→轮换→吊销→列表无痕→同名可重建）；动线级用例（ISSUE-06）：①新装模型全程走能力包页向导 ②关回退→P1 故障→失败原因可读 ③key 全生命周期 |

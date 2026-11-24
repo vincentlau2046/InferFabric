@@ -332,3 +332,35 @@ def test_attempts_equal_candidate_count_untouched():
     parsed, issues = load_pools_dict(raw, current_revision=1, strict=True)
     assert parsed is not None and issues == []
     assert parsed.pools["p"].max_attempts == 3
+
+
+class TestStrategyParse:
+    """WS2（2026-11-24）：组级回退策略 — 枚举严格校验，未知值/类型错即拒载。"""
+
+    def test_strategy_default_is_priority_failover(self):
+        raw = _raw_file(pools={"fast": _raw_pool()})
+        raw["pools"]["fast"].pop("strategy", None)
+        cfg, issues = load_pools_dict(raw, current_revision=0)
+        assert issues == []
+        assert cfg.pools["fast"].strategy == "priority_failover"
+
+    def test_first_only_accepted(self):
+        cfg, issues = load_pools_dict(
+            _raw_file(pools={"fast": _raw_pool(strategy="first_only")}),
+            current_revision=0)
+        assert issues == []
+        assert cfg.pools["fast"].strategy == "first_only"
+
+    def test_unknown_strategy_rejected(self):
+        cfg, issues = load_pools_dict(
+            _raw_file(pools={"fast": _raw_pool(strategy="random_walk")}),
+            current_revision=0)
+        assert cfg is None
+        assert any("strategy" in i for i in issues)
+
+    def test_non_string_strategy_rejected(self):
+        cfg, issues = load_pools_dict(
+            _raw_file(pools={"fast": _raw_pool(strategy=True)}),
+            current_revision=0)
+        assert cfg is None
+        assert any("strategy" in i for i in issues)

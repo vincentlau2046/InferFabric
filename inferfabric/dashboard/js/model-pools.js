@@ -21,6 +21,7 @@
  * 暴露：
  *   - window.tabRenderers['tab-model-pools'] = renderModelPools
  *   - window.renderModelPools / window.doMpToggle(pool, enable)
+ *   - window.doMpStrategyToggle(pool, fallbackOn)（WS2 回退路由开关）
  */
 (function () {
   'use strict';
@@ -40,6 +41,7 @@
   var EVENTS_URL = '/admin/model-pools/events';
   var CATALOG_URL = '/admin/model-pools/catalog';
   var TOGGLE_URL = '/admin/model-pools/toggle';
+  var STRATEGY_URL = '/admin/model-pools/strategy';
   var VALIDATE_URL = '/admin/model-pools/validate';
   var DRYRUN_URL = '/admin/model-pools/dry-run';
   var UPDATE_URL = '/admin/model-pools';
@@ -650,6 +652,9 @@
   /* ── 池卡片 ── */
   function poolCard(name, def, st, rt) {
     var checked = def.enabled ? ' checked' : '';
+    // WS2（2026-11-24）：组级回退路由开关 — checked=回退开（默认行为）；
+    // 视图缺 strategy 字段按 priority_failover 处理（旧后端兼容）
+    var fallbackOn = def.strategy !== 'first_only';
     var html = '<div class="if-card mp-pool" id="mp-card-' + esc(name)
       + '" data-mp-card="' + esc(name) + '">'
       // C3：池顶活体光带（三态由 beamClass 纯函数定，applyDynamic 同源更新）
@@ -675,11 +680,19 @@
       + '">接入片段</button>'
       + '<label class="mp-toggle"><input type="checkbox" data-mp-pool="' + esc(name)
       + '"' + checked + '><span>启用</span></label>'
+      + '<label class="mp-toggle" title="回退路由：关闭后仅使用第一优先级候选，'
+      + '其故障时该组不可用"><input type="checkbox" data-mp-strategy="' + esc(name)
+      + '"' + (fallbackOn ? ' checked' : '') + '><span>回退</span></label>'
       + '</span>'
       + '</div>';
     // C4：首候选降级而服务仍由回退候选提供 → 引导条（关闭后同态不重现）
     if (isDegraded(def, st, rt) && !_degradeDismissed[name]) {
-      html += '<div class="mp-degrade"><span>首选已降级 — 当前服务经回退候选提供</span>'
+      // WS2/ISSUE-02：first_only 下回退不再服务 — 文案必须如实，不得
+      // 让用户以为请求正由回退候选承接
+      var degMsg = def.strategy === 'first_only'
+        ? '首选已降级 — 回退路由已关闭，该组将不可用'
+        : '首选已降级 — 当前服务经回退候选提供';
+      html += '<div class="mp-degrade"><span>' + degMsg + '</span>'
         + '<button type="button" class="mp-edit-btn" data-mp-degrade-view="'
         + esc(name) + '">查看回退链</button>'
         + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
@@ -1229,6 +1242,52 @@
     }
   }
 
+  /* ── WS2（2026-11-24）：组级回退路由开关 — 同 doMpToggle 的 CAS/横幅
+   * 语义；开关态由重渲染纠偏（无乐观灯 — 回退不影响灯态判定） ── */
+  async function doMpStrategyToggle(pool, fallbackOn) {
+    if (_revision == null) {
+      UI.toast('配置尚未加载完成，请稍后重试', 'error');
+      return;
+    }
+    var strategy = fallbackOn ? 'priority_failover' : 'first_only';
+    try {
+      var res = await fetch(STRATEGY_URL, {
+        method: 'POST',
+        headers: UI.adminHeaders(),
+        body: JSON.stringify({
+          pool: pool,
+          strategy: strategy,
+          expected_revision: _revision,
+        }),
+      });
+      var d = null;
+      try { d = await res.json(); } catch (e) { /* 非 JSON 响应体 */ }
+      if (res.ok) {
+        clearActionError();
+        _revision = d && typeof d.revision === 'number' ? d.revision : _revision;
+        UI.toast('fabric-' + pool + ' 回退路由已' + (fallbackOn ? '开启' : '关闭'), 'ok');
+        await renderModelPools();
+        return;
+      }
+      if (res.status === 409) {
+        // revision 冲突：配置已被其他修改更新 — 常驻横幅（重试原操作）+ 重新拉取
+        await setActionError('配置已被其他修改更新（冲突）',
+          '已刷新，基于最新配置重试',
+          {label: '重试', run: function () { return doMpStrategyToggle(pool, fallbackOn); }});
+        UI.toast('配置已被其他修改更新（冲突），已刷新，请重试', 'error');
+        return;
+      }
+      var msg = (d && d.error) || ('回退开关失败 · HTTP ' + res.status);
+      UI.toast(msg, 'error');
+      await setActionError(msg, null,
+        {label: '重试', run: function () { return doMpStrategyToggle(pool, fallbackOn); }});
+    } catch (e) {
+      UI.toast('回退开关请求异常：' + (e && e.message), 'error');
+      await setActionError('回退开关请求异常：' + (e && e.message), null,
+        {label: '重试', run: function () { return doMpStrategyToggle(pool, fallbackOn); }});
+    }
+  }
+
   /* ── A2 行内 diff 编辑（UI/UX P2 Task 1）：两步换模，不离开列表 ── */
 
   // 目录惰性预热（Task 1 裁决）：并发共享一个在途 promise；
@@ -1768,6 +1827,9 @@
     if (!t || !t.getAttribute) return;
     var pool = t.getAttribute('data-mp-pool');
     if (pool) { doMpToggle(pool, !!t.checked); return; }
+    // WS2：回退路由开关（data-mp-strategy）→ doMpStrategyToggle
+    var strat = t.getAttribute('data-mp-strategy');
+    if (strat) { doMpStrategyToggle(strat, !!t.checked); return; }
     // T5：未配置卡下拉 → 建池会话（空值=占位项，忽略）
     var cfgPool = t.getAttribute('data-mp-config-pool');
     if (cfgPool && t.value) { doMpConfigSelect(cfgPool, t.value); return; }
@@ -1988,6 +2050,7 @@
   window.mpTreeHtml = treeHtml;
   window.mpCardsHtml = cardsHtml;
   window.doMpToggle = doMpToggle;
+  window.doMpStrategyToggle = doMpStrategyToggle;
   window.doMpBannerAction = doMpBannerAction;
   window.doMpBannerDismiss = doMpBannerDismiss;
   window.doMpInlineSelect = doMpInlineSelect;

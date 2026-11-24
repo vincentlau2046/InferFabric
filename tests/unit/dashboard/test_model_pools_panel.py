@@ -316,6 +316,12 @@ def _routes(toggle_status=200, toggle_body=None):
             "body": toggle_body or {"status": "updated", "revision": 4,
                                     "pool": "fast", "enabled": False},
         },
+        # WS2：回退路由开关默认成功路由（409 用例单独覆写）
+        "/admin/model-pools/strategy": {
+            "status": 200,
+            "body": {"status": "updated", "revision": 4,
+                     "pool": "fast", "strategy": "priority_failover"},
+        },
     }
 
 
@@ -359,7 +365,9 @@ class TestRender:
         routes = _routes()
         routes["/admin/model-pools"] = {"status": 200, "body": pools}
         out = run_panel(routes)
-        assert "checked" not in out["html"]
+        # 启用开关未选中（回退开关选中态独立，不在此断言范围 — WS2）
+        seg = out["html"].split('data-mp-pool="fast"')[1][:60]
+        assert "checked" not in seg
 
 
 class TestToggle:
@@ -397,6 +405,67 @@ class TestToggle:
                          toggle_body={"error": "boom"})
         out = run_panel(routes, toggle={"pool": "fast", "enable": False})
         assert any(t["kind"] == "error" for t in out["toasts"])
+
+
+class TestStrategyToggle:
+    """WS2（2026-11-24）：组级回退路由开关 UI — data-mp-strategy 复选框。
+
+    checked = 回退开（priority_failover，默认）；unchecked = first_only。
+    tooltip 必须明示后果（ISSUE-02）：关闭后仅使用第一优先级候选。
+    """
+
+    def test_strategy_switch_renders_with_tooltip(self, run_panel):
+        out = run_panel(_routes())
+        assert 'data-mp-strategy="fast"' in out["html"]
+        assert "回退" in out["html"]
+        assert "仅使用第一优先级候选" in out["html"]
+        # 默认（视图无 strategy 字段 / priority_failover）→ 回退开 → 选中
+        seg = out["html"].split('data-mp-strategy="fast"')[1][:60]
+        assert "checked" in seg
+
+    def test_strategy_switch_unchecked_when_first_only(self, run_panel):
+        pools = json.loads(json.dumps(_POOLS_BODY))
+        pools["pools"]["fast"]["strategy"] = "first_only"
+        routes = _routes()
+        routes["/admin/model-pools"] = {"status": 200, "body": pools}
+        out = run_panel(routes)
+        assert 'data-mp-strategy="fast"' in out["html"]
+        seg = out["html"].split('data-mp-strategy="fast"')[1][:60]
+        assert "checked" not in seg
+
+    def test_strategy_off_sends_first_only_and_refreshes(self, run_panel):
+        out = run_panel(_routes(), actions=[
+            {"fn": "doMpStrategyToggle", "args": ["fast", False]}])
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools/strategy"]
+        assert len(posts) == 1
+        assert posts[0]["method"] == "POST"
+        assert posts[0]["body"] == {"pool": "fast", "strategy": "first_only",
+                                    "expected_revision": 3}
+        assert any(t["kind"] == "ok" for t in out["toasts"])
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools" and c["method"] == "GET"]
+        assert len(gets) == 2                       # 初次渲染 + 开关后刷新
+
+    def test_strategy_on_sends_priority_failover(self, run_panel):
+        out = run_panel(_routes(), actions=[
+            {"fn": "doMpStrategyToggle", "args": ["fast", True]}])
+        posts = [c for c in out["calls"]
+                 if c["url"] == "/admin/model-pools/strategy"]
+        assert posts[0]["body"]["strategy"] == "priority_failover"
+
+    def test_strategy_conflict_409_prompts_refresh(self, run_panel):
+        routes = _routes()
+        routes["/admin/model-pools/strategy"] = {
+            "status": 409,
+            "body": {"error": "revision conflict", "status": "revision_conflict",
+                     "current_revision": 9}}
+        out = run_panel(routes, actions=[
+            {"fn": "doMpStrategyToggle", "args": ["fast", False]}])
+        assert any("冲突" in t["message"] for t in out["toasts"]), out["toasts"]
+        gets = [c for c in out["calls"]
+                if c["url"] == "/admin/model-pools" and c["method"] == "GET"]
+        assert len(gets) == 2
 
 
 # ── Phase 1 Task 5+：运营视图（健康灯 / 候选链运行态 / 三态空态）──

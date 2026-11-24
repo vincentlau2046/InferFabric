@@ -46,6 +46,9 @@ _ERROR_CONTRACT = {
     "no_compatible_target": (400, False),
     "pool_disabled": (503, True),
     "no_ready_target": (503, True),
+    # WS2（2026-11-24）：组级回退路由关闭且首选不可用 — 与 no_ready_target
+    # 同为 503+Retry-After，但错误码可区分（排障/客户端提示语不同）
+    "fallback_disabled": (503, True),
     "pool_unavailable": (503, True),
 }
 
@@ -369,6 +372,7 @@ _ANTHROPIC_CONTRACT = {
     "no_compatible_target": (400, "invalid_request_error", False),
     "pool_disabled": (503, "overloaded_error", True),
     "no_ready_target": (503, "overloaded_error", True),
+    "fallback_disabled": (503, "overloaded_error", True),   # WS2：同上
     "pool_unavailable": (503, "overloaded_error", True),
 }
 

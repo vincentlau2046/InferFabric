@@ -143,6 +143,12 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
     static_reasons = {r.candidate.id: _static_reason(r, pool, req, runtime)
                       for r in ordered}
 
+    # WS2（2026-11-24）：first_only — 组级回退路由关闭。截断在确定性排序
+    # 之后（vision 软偏好仍生效），只影响尝试链：后续候选不产生决策行、
+    # 不进 ordered；决策 reason 语义不动（冷却环等展示按 reason 键控）。
+    if pool.strategy == "first_only":
+        ordered = ordered[:1]
+
     # 跨位置回退默认关闭（评审 #6 / 终审 #2）：home 位置以首个「静态兼容」
     # 候选为准，在就绪/冷却过滤之前生效 — 本地主用未就绪或冷却时，
     # 请求明确失败（no_ready_target），绝不静默落到云端备用
@@ -192,7 +198,11 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
         if not decisions:
             error = "no_compatible_target"
         elif had_protocol_compatible:
-            error = "no_ready_target"
+            # WS2/ISSUE-02：first_only 下唯一候选未就绪必须与「回退开启但
+            # 无就绪」可区分 — 客户端与排障界面据此明示「回退路由已关闭，
+            # P1 不可用」，而非笼统 503 no_ready_target
+            error = ("fallback_disabled" if pool.strategy == "first_only"
+                     else "no_ready_target")
         else:
             error = "no_compatible_target"
 

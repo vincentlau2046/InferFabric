@@ -236,6 +236,48 @@ def handle_post_model_pools_toggle(handler, pm):
                         "pool": pool_name, "enabled": enabled})
 
 
+def handle_post_model_pools_strategy(handler, pm):
+    """单池回退策略开关（WS2，2026-11-24）— 服务端字段级原子修改。
+
+    body: {pool, strategy: priority_failover|first_only, expected_revision}。
+    与 toggle 同一 CAS 字段级路径；无效策略经整份重解析报 400
+    invalid_config（内存与磁盘都不落半份配置）。
+    """
+    data = handler._read_body()
+    if data is None:
+        return
+    pool_name = data.get("pool")
+    strategy = data.get("strategy")
+    expected = data.get("expected_revision")
+    if (not isinstance(pool_name, str) or not pool_name
+            or not isinstance(strategy, str) or not strategy
+            or not isinstance(expected, int)):
+        handler._send_json(
+            {"error": "pool (str), strategy (str), expected_revision (int) required",
+             "status": "bad_request"}, 400)
+        return
+    try:
+        snap = pm.pool_registry.flip_pool_strategy(
+            pool_name, strategy, expected_revision=expected)
+    except KeyError:
+        handler._send_json(
+            {"error": f"Unknown pool: {pool_name}", "status": "unknown_pool"}, 404)
+        return
+    except RevisionConflict:
+        handler._send_json(
+            {"error": "revision conflict — reload and retry",
+             "status": "revision_conflict",
+             "current_revision": pm.pool_registry.snapshot().revision}, 409)
+        return
+    except ValueError as e:
+        handler._send_json(
+            {"error": str(e), "status": "invalid_config",
+             "issues": str(e).split("; ")}, 400)
+        return
+    handler._send_json({"status": "updated", "revision": snap.revision,
+                        "pool": pool_name, "strategy": strategy})
+
+
 def handle_get_model_pools_catalog(handler, pm):
     """GET /admin/model-pools/catalog — 池候选目录（v7.1.2，只读）。
 
