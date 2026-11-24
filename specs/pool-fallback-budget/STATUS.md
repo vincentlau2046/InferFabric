@@ -7,7 +7,7 @@
 | 后端实现 | ✅ | ① `pool_forward.run_attempts`：`attempts` 计数器 → `tried: set[str]` 首试槽位记账，预算检查改为 `cand not in tried and len(tried) >= max_attempts`（位置保持在 claim_probe 前）；同目标重试不计槽位（retried 集仍限每候选全程 1 次）；签名不变，dispatch 零改动。② `config._parse_pool`：strict（CAS 写入）拒绝 `max_attempts < len(candidates)`（可操作文案）；磁盘存量载入 warning 容忍（与 MAX_ATTEMPTS_RANGE 先例同构）；`flip_pool_enabled` docstring 同步（整份配置校验可拒绝 enabled 翻转） |
 | TDD | ✅ | Task 1：6 例新钉（4 红 2 回归钉）全 GREEN，99 passed（pool_forward + final_fixes + transport_contract）；Task 2：3 例新钉（1 红 2 边界钉）全 GREEN，42 passed（config + registry） |
 | 版本 | ✅ 7.11.3 | patch（自主升级）；README 版本历史行 |
-| 全量回归 | ⏳ | Task 4 门禁（unit + integration + import 冒烟） |
+| 全量回归 | ✅ 2026-11-24 | unit + integration 2737 passed ×2（连续两次全量）。首跑 8 失败已归因闭合：6 例=strict CAS 正确拒绝夹具旧形态（夹具更新为 max_attempts=3 合法形态，测试意图不变）；1 例=新语义行为钉（max_attempts=1 + 503 同目标重试现会执行，预置两次 503）；1 例=瞬态（packs 探针 mock urlopen 窗口疑遭跨测试遗留线程干扰，隔离通过/修复后全量两次通过，未复现） |
 | 合并/部署 | ⏳ | Task 4：净 diff 核对 → 用户确认 ff-merge → 生产部署另批授权（先调生产 YAML max_attempts ≥ 候选数，后加载新代码；顺序颠倒的已接受后果 = 窗口期内 dashboard CAS 写入 400 fail-closed） |
 | 明确不做 | ✅ | 慢失败烧 deadline 的传输层优化；404 隔离/401 冷却/incompatible 等既有动作表条目；直连路径（PR-14 冻结） |
 
