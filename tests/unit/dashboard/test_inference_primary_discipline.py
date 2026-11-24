@@ -180,10 +180,13 @@ def test_nav_grouped_ia_and_aria_current():
     import re
     caps = [s.strip() for s in re.findall(
         r'<span class="nav-cap"[^>]*>([^<]+)</span>', html)]
-    assert caps == ["状态", "推理与池", "网关策略", "可观测", "接入"]
+    # IA v3.1（2026-11-24 用户修订，specs/console-ux-batch WS4）：监控为最常用入口
+    # 并入状态组、异常随迁，可观测组取消（4 组 9 项）
+    assert caps == ["状态", "推理与池", "网关策略", "接入"]
     assert html.count('class="if-nav-item') == 9  # deploy 并入能力包页后 10→9
-    # 组顺序：推理在模型池前
+    # 组顺序：推理在模型池前；监控/异常紧跟总览（状态组内）
     assert html.find("tab-inference") < html.find("tab-model-pools")
+    assert 0 < html.find("tab-overview") < html.find("tab-monitor") < html.find("tab-anomaly")
     # deploy 不再是独立 nav tab（并入能力包页 deploySection）
     assert 'data-tab="tab-deploy"' not in html
     # fallback switchTab 维护 aria-current

@@ -25,11 +25,17 @@ class TestAssembly:
         assert 'id="tab-deploy-wizard"' in html, "向导卡必须被组装进页面"
         assert "FRAGMENT:wizard" not in html, "占位符必须被替换（不得静默残留）"
 
-    def test_mounted_inside_model_pools(self):
+    def test_mounted_inside_packs(self):
+        # 2026-11-24 迁移（specs/console-ux-batch WS1）：向导挂能力包 tab；
+        # 模型池页不再有向导入口/占位符
         mp = (_DASH / "fragments" / "model-pools.html").read_text(
             encoding="utf-8")
-        assert "FRAGMENT:wizard" in mp
-        assert 'data-action="wiz-open"' in mp, "模型池卡须有向导入口按钮"
+        pk = (_DASH / "fragments" / "packs.html").read_text(
+            encoding="utf-8")
+        assert "FRAGMENT:wizard" in pk
+        assert 'data-action="wiz-open"' in pk, "能力包卡须有向导入口按钮"
+        assert "FRAGMENT:wizard" not in mp, "模型池页不得残留向导占位符"
+        assert 'data-action="wiz-open"' not in mp, "模型池页不得再有向导入口"
         assert 'data-action="wiz-open"' in _JS, "wizard.js 须处理入口点击"
 
     def test_fragment_is_wizard_card(self):
@@ -54,7 +60,7 @@ class TestSourceContract:
 
     def test_no_inline_onclick(self):
         for name in ("js/wizard.js", "fragments/wizard.html",
-                     "fragments/model-pools.html"):
+                     "fragments/model-pools.html", "fragments/packs.html"):
             text = (_DASH / name).read_text(encoding="utf-8")
             assert "onclick=" not in text, name
 

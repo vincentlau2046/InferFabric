@@ -4,6 +4,7 @@
     <div class="if-card-hdr">
       <span class="if-card-title">能力包</span>
       <span class="if-card-sub">下载 · 装机 · 卸载 · 进度（阶段指示，不显示下载字节数）</span>
+      <button type="button" class="btn btn-pri btn-sm" data-action="wiz-open">部署向导</button>
     </div>
     <div class="if-card-body">
       <!-- 装机状态（packs.js 注入；tab 激活时 2s 轮询 /admin/packs/status） -->
@@ -75,8 +76,10 @@
     </div>
   </div>
 
-  <!-- ══ 扩展 · 部署（2026-11-20 用户裁决：部署并入能力包扩展段；统一底座条件下
-       后续允许扩展未知模型链接/品类——扩展机制另行 spec）══ -->
+  <!-- ══ 扩展 · 部署（2026-11-20 并入能力包扩展段；2026-11-24 起部署向导为主装载
+       入口，legacy 表单收进折叠——入口层级见 specs/console-ux-batch/spec.md WS1）══ -->
+  <details class="pack-ext-details">
+    <summary><span class="inf-group-title">扩展 · 部署（旧版表单）</span><span class="badge">旧版</span></summary>
   <section id="deploySection">
     <div class="inf-group-hdr pack-ext-hdr">
       <span class="inf-group-title">扩展 · 部署</span>
@@ -153,6 +156,10 @@
       </div>
     </div>
   </section>
+  </details>
+
+  <!-- 五步部署向导（wizard.js；占位符由 __init__.py 组装时替换） -->
+  <!-- FRAGMENT:wizard -->
 
   <div id="pkModal"></div>
 </div>
