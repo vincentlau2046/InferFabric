@@ -214,6 +214,7 @@ class TestPoolMessagesDispatch:
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["anthropic"]})
         cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),

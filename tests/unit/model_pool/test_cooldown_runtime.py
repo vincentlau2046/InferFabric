@@ -183,7 +183,9 @@ class TestRunAttemptsRecording:
     def test_failed_attempt_recorded_in_last_attempts(self):
         clock = _FakeClock(start=100.0)
         store = CooldownStore()
-        rec = _Recorder([AttemptResult(status=503)])
+        # 7.11.3 新语义：max_attempts 只计首试槽位，503 的同目标重试仍执行
+        # （旧版被预算截断不发生）→ 预置两次 503 供重试消费
+        rec = _Recorder([AttemptResult(status=503), AttemptResult(status=503)])
         out = run_attempts(_rpool(max_attempts=1), [_rcand("a")], rec,
                            cooldowns=store, monotonic=clock, sleep=clock.sleep)
         assert not out.ok

@@ -493,6 +493,7 @@ class TestPoolChatDispatch:
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
         cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -518,6 +519,7 @@ class TestPoolChatDispatch:
         cfg["pools"]["flash"]["candidates"].insert(0,
             {"id": "vlloc", "priority": 0, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
+        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -541,6 +543,7 @@ class TestPoolChatDispatch:
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
         cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
+        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         # 全部本地候选未激活 → no_ready_target
         pm = FakePM(registry, active=set(),
