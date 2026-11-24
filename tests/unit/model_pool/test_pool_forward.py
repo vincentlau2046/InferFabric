@@ -4,7 +4,9 @@
 - 固定错误动作表：连接失败→下一候选；429→预算内等待重试原目标，超预算切候选；
   5xx 未提交→重试原目标 1 次再切；401/403→端点冷却+切候选；
   400/404/422 等确定性 4xx→终止不回退；已提交任何字节→永不重试/切换（§6.4）
-- 统一预算：max_attempts 计所有真实上游调用，deadline 覆盖等待（§6.3）
+- 统一预算：max_attempts 计不同候选的首试（fallback 槽位）；同目标重试
+  （429 等待/5xx 一次）不计入预算，由 retried 集限每候选至多 1 次，
+  deadline 仍为全局硬上限（§6.3）
 - suppress_client_errors=True 的传输边界不发客户端错误、不内层重试；
   默认 False 时 forwarder 现行为逐字节不变（既有 forwarder 测试证明）
 """
@@ -110,6 +112,81 @@ class TestRunAttempts:
         out = run_attempts(_pool(), [_cand("c1"), _cand("c2")], t)
         assert out.ok is True
         assert t.calls == ["c1", "c1", "c2"]      # 原目标最多重试 1 次
+
+    def test_5xx_retry_does_not_consume_fallback_budget(self):
+        # 事故回归钉：max_attempts=2 + 3 候选，主选 530×2（含重试）后
+        # 候选 2/3 必须被尝试（旧行为：calls==["c1","c1"] 即终止）
+        t = Recorder([AttemptResult(status=530), AttemptResult(status=530), _ok()])
+        out = run_attempts(_pool(max_attempts=2), [_cand("c1"), _cand("c2")], t)
+        assert out.ok is True
+        assert t.calls == ["c1", "c1", "c2"]
+
+    def test_retry_allowed_after_budget_exhausted(self):
+        # 单候选 max_attempts=1：429 等待重试仍被允许（重试不计槽位）。
+        # 有意的行为变更：旧代码首试后即 break，重试不发生（calls==["c1"]）；
+        # 新代码执行一次重试（对齐动作表文档「预算内尊重 Retry-After」本意）
+        sleeps = []
+        t = Recorder([AttemptResult(status=429, retry_after=1.0),
+                      AttemptResult(status=429, retry_after=1.0)])
+        out = run_attempts(_pool(max_attempts=1, deadline_ms=5000),
+                           [_cand("c1")], t,
+                           monotonic=lambda: 0.0, sleep=sleeps.append)
+        assert out.ok is False
+        assert out.error_code == "pool_unavailable"
+        assert t.calls == ["c1", "c1"]            # 重试发生；再 429 后按既有规则 pop
+        assert sleeps == [1.0]
+
+    def test_fallback_slots_still_bound_new_candidates(self):
+        # 槽位语义本身不变：max_attempts=2 只允许 2 个不同候选首试
+        # （c2 conn-fail 立即 pop，不重试）
+        t = Recorder([AttemptResult(status=530), AttemptResult(status=530),
+                      AttemptResult(status=None, error="conn")])
+        out = run_attempts(_pool(max_attempts=2),
+                           [_cand("c1"), _cand("c2"), _cand("c3")], t)
+        assert out.error_code == "pool_unavailable"
+        assert t.calls == ["c1", "c1", "c2"]         # c3 未被首试
+
+    def test_429_retry_transport_exception_pops_and_switches(self):
+        # 重试途中传输异常 → 按连接失败切换下一候选，不死循环
+        calls = []
+        def transport(cand, remaining=None):
+            calls.append(cand.candidate.id)
+            if len(calls) == 1:
+                return AttemptResult(status=429, retry_after=1.0)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return _ok()
+        sleeps = []
+        out = run_attempts(_pool(deadline_ms=5000),
+                           [_cand("c1"), _cand("c2")], transport,
+                           monotonic=lambda: 0.0, sleep=sleeps.append)
+        assert out.ok is True
+        assert calls == ["c1", "c1", "c2"]
+        assert sleeps == [1.0]
+
+    def test_budget_break_precedes_probe_claim(self):
+        # 预算 break 先于 claim_probe：耗尽后不得对未尝试候选领探测权。
+        # 时钟取冷却过期之后（until=60 < t=100）：c2 处于「到期待探测」态，
+        # claim_probe 会授予并记 probe_start —— 若 break 缺失（回归）断言即红；
+        # 旧代码 break 同样在 claim 前 → 本测试为回归钉（先绿，非红先）
+        cd = CooldownStore()
+        cd.add("fp-c2", now=0.0)                  # until=60（TTL 60s）
+        t = Recorder([AttemptResult(status=None, error="conn")])
+        out = run_attempts(_pool(max_attempts=1),
+                           [_cand("c1"), _cand("c2")], t, cooldowns=cd,
+                           monotonic=lambda: 100.0)
+        assert out.error_code == "pool_unavailable"
+        assert t.calls == ["c1"]
+        assert not any(e["fingerprint"] == "fp-c2" and e["type"] == "probe_start"
+                       for e in cd.events())
+
+    def test_retry_still_recorded_in_outcome_attempts(self):
+        # 观测面不回归：重试记录仍在 outcome.attempts，ordinal 连续
+        t = Recorder([AttemptResult(status=530), AttemptResult(status=530), _ok()])
+        out = run_attempts(_pool(max_attempts=2), [_cand("c1"), _cand("c2")], t)
+        assert [r.ordinal for r in out.attempts] == [1, 2, 3]
+        assert [r.candidate_id for r in out.attempts] == ["c1", "c1", "c2"]
+        assert sum(1 for r in out.attempts if r.admitted) == 3
 
     def test_committed_failure_never_switches(self):
         # 响应已提交（流中断）→ 终止，第二候选零调用（§6.4）

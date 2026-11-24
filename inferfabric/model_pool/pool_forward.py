@@ -10,12 +10,15 @@ spec §6.2 固定错误动作表（不可配置化放开「不回退」类别）
   400/404/422/内容安全等    → 终止，不回退（确定性错误，换候选也无解）
   已提交任何字节            → 永不重试/切换（§6.4，由传输层 committed 信号保证）
 
-spec §6.3 统一预算：max_attempts 计所有真实上游调用（含同目标重试），
-deadline 覆盖等待。本模块不 import handler 内部状态、不发客户端响应 —
-传输以回调注入，客户端写只发生在传输回调内部。
+spec §6.3 统一预算：max_attempts 计不同候选的首试（fallback 槽位）；
+同目标重试（429 等待 / 5xx 一次）不计入预算，由 retried 集限每候选
+全程至多 1 次，deadline 仍为全局硬上限（等待+传输均计入）。总上游
+调用上界 = 2×max_attempts，受 deadline 截断。本模块不 import handler
+内部状态、不发客户端响应 — 传输以回调注入，客户端写只发生在传输
+回调内部。
 
-注：同目标重试（429 等待 / 5xx 一次）与切换共用同一预算；一次 429 等待重试
-即消耗 1 attempt，管理员需按池深度调大 max_attempts。
+注：max_attempts < 候选数 的配置在静态校验层（config._parse_pool）
+于 CAS 写入时拒绝、磁盘存量载入时告警容忍。
 """
 
 import logging
@@ -452,6 +455,10 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                  history=None) -> AttemptOutcome:
     """按候选序（调用方已排序/过滤）在预算内执行传输并按动作表回退。
 
+    预算语义：max_attempts 计「不同候选的首试」（fallback 槽位）；
+    同目标重试（429 等待 / 5xx 一次）不消耗槽位，由 retried 集限每候选
+    全程至多 1 次，deadline 为全局硬上限。
+
     Args:
         pool: PoolConfig（max_attempts / deadline_ms）
         candidates: 有序 eligible ResolvedCandidate 列表
@@ -472,7 +479,7 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
 
     queue = list(candidates)
     retried: set[str] = set()   # 已做同目标重试的候选（5xx 一次 / 429 等待一次）
-    attempts = 0
+    tried: set[str] = set()     # 已消耗 fallback 槽位的候选（首试记账，重试不计）
     records: list[AttemptRecord] = []
     last: AttemptResult = AttemptResult()
     last_cand = None
@@ -485,8 +492,9 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
         last_cand = cand
 
         # 预算/次数已尽先于探测领取（Task 4）：先领后判会把探测权困在
-        # 已耗尽的循环里 — 不领取就不会泄漏
-        if attempts >= max_attempts:
+        # 已耗尽的循环里 — 不领取就不会泄漏。同目标重试（cand 已在 tried）
+        # 不占槽位，跳过本检查（retried 集保证其至多发生 1 次）
+        if cand.candidate.id not in tried and len(tried) >= max_attempts:
             break
 
         # 准入 1/2 — 端点冷却/半开单飞（终审 #18）：仍在冷却或已有并发
@@ -506,14 +514,14 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             # 传输层异常（Task 4）：探测权释放但不回写失败（端点未被证实），
             # 按连接失败动作表切下一候选 — 异常不得把半开探测权困死到重启。
             # 终审 I7：异常 = 可能已发出的真实尝试（连接失败与发送后超时在
-            # 此层不可区分，保守计入）→ admitted=True + 消耗 max_attempts，
-            # attempt_count 不再少报、物理调用数受预算约束。准入失败
+            # 此层不可区分，保守计入）→ admitted=True + 消耗一个 fallback
+            # 槽位（首试记账；重试途中异常不重复占槽，set 幂等）。准入失败
             # （下方 res.admitted=False，发送前边界）仍不计。
             log.warning("pool transport raised for candidate '%s': %s",
                         cand.candidate.id, e)
             if cooldowns is not None:
                 cooldowns.release_probe(cand.endpoint_fingerprint, now=mono())
-            attempts += 1
+            tried.add(cand.candidate.id)
             records.append(AttemptRecord(
                 ordinal=len(records) + 1, candidate_id=cand.candidate.id,
                 error=f"transport error: {e}", admitted=True,
@@ -538,7 +546,7 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
             queue.pop(0)
             continue
 
-        attempts += 1
+        tried.add(cand.candidate.id)   # 首试消耗槽位（重试到达此处时 set 幂等）
         last = res
         tokens_in, tokens_out, usage_known = _usage_observations(res.usage, res.ok)
         records.append(AttemptRecord(
@@ -610,7 +618,7 @@ def run_attempts(pool, candidates, transport, cooldowns=None, *,
                 retried.add(cand.candidate.id)
                 log.info("pool candidate '%s' 429 — waiting %.1fs (Retry-After)",
                          cand.candidate.id, want)
-                do_sleep(want)   # 同目标重试，受 attempts/deadline 约束
+                do_sleep(want)   # 同目标重试（不计槽位），受 retried 集/deadline 约束
         elif _is_non_fallback(res.status):
             # 确定性错误（4xx/501）→ 终止，不回退。先于 5xx 分支判定：
             # 501 属「不回退」类，落入 5xx 重试分支会变成可回退（评审 #12）。
