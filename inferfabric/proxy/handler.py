@@ -2070,13 +2070,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 removed_engine = str(target)
 
         # Pool linkage: purge local candidates referencing the model
-        # (source module deleted → pools auto-sync)
+        # (source module deleted → pools auto-sync). 失败不静默：响应带
+        # pool_purge_error（7.11.3 strict 整份校验可拒绝，操作者需清理陈旧引用）
         purged, pool_rev = 0, None
+        pool_purge_error = None
         try:
             purged, pool_rev = pm.pool_registry.purge_candidates(
                 lambda c: c.get("kind") == "local" and c.get("model_name") == name)
         except Exception as e:
             log.warning("pool purge after uninstall %s failed: %s", name, e)
+            pool_purge_error = str(e)
 
         log.info("Pack uninstalled: %s (stopped=%s, files=%d, engine=%s, pool_purged=%d)",
                  name, bool(stopped), len(removed_files), removed_engine, purged)
@@ -2084,7 +2087,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                          "stopped": bool(stopped),
                          "removed_model_files": removed_files,
                          "removed_engine_dir": removed_engine,
-                         "pool_candidates_purged": purged})
+                         "pool_candidates_purged": purged,
+                         "pool_purge_error": pool_purge_error})
 
     def _handle_pack_download(self, pm):
         """POST /admin/packs/download {name, url, filename, model_type_label?}

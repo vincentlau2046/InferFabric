@@ -1,8 +1,11 @@
 """PackUninstaller — 卸载状态机 — PK2（Task 10）。
 
-状态机（spec §7.2，2026-11-15 裁决）：
-  installed → disabling_route → draining → stopping_process_group
-  → removing_generated_config → purging_pool_candidates
+状态机（spec §7.2，2026-11-15 裁决；purge 前移 2026-11-24 评审裁决）：
+  installed → disabling_route
+  → purging_pool_candidates（校验闸：整份 strict 校验拒绝 → 解除禁用
+    + 400 原样返回，零删除副作用）
+  → draining → stopping_process_group
+  → removing_generated_config
   → deleting_pack_directory → gateway_reload → removed
 
 - 被模型池引用：确认框列候选（preview/409 带列表），确认后自动清除。
@@ -105,6 +108,21 @@ class PackUninstaller:
         for name in model_names:
             self._disable_route_fn(name)
 
+        # purging_pool_candidates —— 校验闸前移到一切删除之前（7.11.3）：
+        # purge 走 registry 整份 strict 校验，存量非法池（如 max_attempts <
+        # 候选数）会 ValueError。此刻仅路由禁用（可逆）——校验拒绝 → 解除
+        # 禁用 + 可操作 400，零删除副作用；校验通过才进入 drain/删除。
+        if self._registry is not None:
+            try:
+                self._registry.purge_candidates(
+                    lambda raw: raw.get("kind") == "local" and
+                    raw.get("model_name") in model_names)
+            except ValueError as e:
+                with self._lock:
+                    self._disabled -= model_names
+                return 400, {"error": f"pool purge rejected: {e}",
+                             "affected_pools": affected}
+
         # draining + stopping_process_group（stop/is_alive 均以模型名为对象 —
         # 生产侧由注入回调映射到受控 ModelConfig；与 disable 同一命名空间）
         alive_fn = self._is_alive_fn
@@ -130,12 +148,6 @@ class PackUninstaller:
 
         # removing_generated_config（按 managed_by_pack 定位受控 YAML）
         self._remove_managed_yamls(pack_id)
-
-        # purging_pool_candidates
-        if self._registry is not None:
-            self._registry.purge_candidates(
-                lambda raw: raw.get("kind") == "local" and
-                raw.get("model_name") in model_names)
 
         # deleting_pack_directory（包自有全部版本；零残留连父目录）
         shutil.rmtree(self.root / pack_id, ignore_errors=True)

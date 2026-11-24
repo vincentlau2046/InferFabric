@@ -128,6 +128,31 @@ def test_uninstall_without_confirm_409_with_pools(env):
     assert (uni.root / PID).exists()
 
 
+def test_purge_validation_rejection_aborts_before_any_deletion(env):
+    # 7.11.3 strict 整份校验可拒绝 purge（存量非法池：max_attempts < 候选数）。
+    # 校验闸必须在一切删除之前：拒绝 → 可操作 400 + 零删除副作用 + 解除路由
+    # 禁用（最终评审 Important-1：半卸载回归 —— 旧序 purge 在 YAML 删除后，
+    # ValueError 直穿调用方留下禁用卡死 + YAML 已删 + 包目录残留）。
+    uni, events, root, models_d, store = env
+
+    def rejecting_purge(predicate):
+        raise ValueError("pool 'legacy': max_attempts (2) is less than "
+                         "candidate count (3) — later candidates unreachable")
+
+    uni._registry.purge_candidates = rejecting_purge
+    code, payload = uni.uninstall(PID, confirmed=True)
+    assert code == 400
+    assert "max_attempts" in payload["error"]
+    assert payload["affected_pools"]           # 拒绝时仍告知受影响池
+    # 零删除副作用：包目录、受控 YAML、状态全部原样
+    assert (root / PID).exists()
+    assert list(models_d.glob("pack-qwen3-4b*"))
+    assert store.get(PID) is not None
+    # 路由禁用已解除（503 窗口关闭），且未发生进程停止
+    assert not uni.is_route_disabled(MODEL_ID)
+    assert ("stop", MODEL_ID) not in events
+
+
 def test_uninstall_without_pools_needs_no_confirm(env, tmp_path=None):
     uni, events, root, models_d, store = env
     empty = type(uni._registry)()
