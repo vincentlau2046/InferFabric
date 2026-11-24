@@ -5,7 +5,7 @@
     GPU 非 idle 时零推荐。
   - 停止卡卡体 = 2 槽摘要（模式/精度），无 端口/uptime 死列；
     运行卡保留 4 槽（端口/uptime/精度/场景）。
-  - 侧栏 nav 5 组标题 + 10 项 + aria-current（base.html / store.js）。
+  - 侧栏 nav 4 组标题 + 9 项 + aria-current（IA v3.1，2026-11-24；base.html / store.js）。
 """
 
 import json

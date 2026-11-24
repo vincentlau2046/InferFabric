@@ -379,10 +379,13 @@
       wiz.mode = t.getAttribute('data-mode');
       if (wiz.mode === 'packs-catalog') {
         // packs 目录装机：跳本向导，deep-link 能力包 tab
-        // （评审 F10：store.set 只改状态不切可见 tab，须 switchTab）
+        // （评审 F10：store.set 只改状态不切可见 tab，须 switchTab；
+        //   2026-11-24 迁移后向导即在能力包页：关闭向导并滚到目录区——评审 F3）
         resetWizard();
         if (store && store.switchTab) { store.switchTab('tab-packs'); }
         else if (store && store.set) { store.set('tab_active', 'tab-packs'); }
+        var cat = document.getElementById('pkCatalog');
+        if (cat) cat.scrollIntoView({ block: 'start' });
         return;
       }
       wiz.step = 4; renderStep();
@@ -439,7 +442,11 @@
       _open = true;
       _runSeq += 1;               // 评审 F4：重开向导，旧序列回调全部失效
       var card = $('tab-deploy-wizard');
-      if (card) card.style.display = '';
+      if (card) {
+        card.style.display = '';
+        // 向导卡在长页底部：打开即滚到卡位（instant 滚动，尊重 prefers-reduced-motion）
+        card.scrollIntoView({ block: 'start' });
+      }
       wiz.step = 1;
       if (capability) wiz.capability = capability;
       renderStep();

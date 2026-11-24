@@ -694,8 +694,11 @@
         return;
       }
       if (act === 'goto-deploy') {
-        // 部署已并入能力包页「扩展 · 部署」段：切过去并滚到该段
+        // 部署已并入能力包页「扩展 · 部署」段（2026-11-24 起收进 details 折叠）：
+        // 切过去、先展开折叠段再滚动（评审 F1：closed details 内容不渲染，直接滚会落空）
         store.switchTab('tab-packs');
+        var det = document.querySelector('.pack-ext-details');
+        if (det) det.open = true;
         var sec = document.getElementById('deploySection');
         if (sec) setTimeout(function () { sec.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60);
         return;
