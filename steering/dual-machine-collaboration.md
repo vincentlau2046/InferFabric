@@ -33,7 +33,8 @@
 
 - 一切进 main 走 PR（docs 也走 PR，成本就是自己点 merge，换来历史干净、对端可见）；
 - 合并即删远端分支；存量 `pick/*` 与已合并分支做一次清理归档；
-- commit message 沿用 conventional commits（feat/fix/docs/chore + scope）。
+- commit message 沿用 conventional commits（feat/fix/docs/chore + scope）；
+- **版本迭代（2026-11-24 用户裁定）**：patch 位（`0.0.x` 的 x）由任一端 Claude 自主升级，**每轮修改迭代一个 patch**（合并前自升 + README 版本历史表加行）；minor / major 须经用户裁决。版本位置：`inferfabric/__init__.py` + README 版本历史表。
 
 ## 4. 评审与验证
 
