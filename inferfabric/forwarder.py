@@ -162,6 +162,32 @@ def read_body(handler):
 # ── Stream forwarding ──
 
 
+def _relax_post_commit_timeout(resp, idle_timeout, sock=None) -> None:
+    """committed 流读取与池剩余预算解耦（2026-11-24 流截断根因）。
+
+    urlopen/HTTPConnection 的 timeout 是 socket 级**任意两次 recv 的最大
+    静默间隔**：池路径把它设成「deadline 剩余预算」后，上游 headers 秒回
+    （committed=True，§6.4 不可重放）+ 大请求 prefill/长推理期流静默 > 剩余
+    → resp.read() TimeoutError → committed 流截断（客户端 Connection lost
+    mid-response；request_log 90 条 upstream_http_200+tokens_in=0 实证）。
+
+    headers 已到（即将转发客户端）后把 socket 超时重置为独立 idle timeout
+    （云端 = provider timeout，本地 = 既有 300s）；committed 前的
+    connect/headers 阶段仍由剩余预算保护（排队堆积防线，语义不变）。
+    CPython 内部结构拿不到时静默保留原超时（退回旧行为，不阻断转发）。
+    """
+    target = sock
+    if target is None:
+        try:
+            target = resp.fp.raw._sock    # urllib HTTPResponse: fp → SocketIO._sock
+        except Exception:
+            return
+    try:
+        target.settimeout(float(idle_timeout))
+    except Exception:
+        pass
+
+
 def pipe_stream_response(handler, resp, sse_buf=None):
     """Pipe SSE stream response to client (CCR-style streaming).
 
@@ -387,6 +413,10 @@ def forward_to_cloud(handler, data, provider_cfg, cloud_model, protocol="openai"
                 # v6.1: TTFT = 首个内容 token（回调记 handler._ttft_ms），
                 # 不再用 HTTP header 到达时刻（header 早于 prefill 完成，语义错误）
                 committed = True   # headers 即将发出 — 此后失败不可重放（§6.4）
+                if timeout is not None:
+                    # committed 后流读取解耦剩余预算（2026-11-24 截断根因）；
+                    # timeout=None（非池路径）保持 PR-14 原行为
+                    _relax_post_commit_timeout(resp, provider_cfg.timeout)
                 sse_buf = SSELineBuffer(first_token_ttft_cb(handler))
                 pipe_stream_response(handler, resp, sse_buf)
                 return CloudResult(
@@ -598,6 +628,10 @@ def forward_anthropic_local(handler, pm, data, auth_header, model_obj, original_
                 # v6.1: 首 token 回调 — TTFT 记首个 content_block_delta 时刻
                 # （message_start 是 metadata 前言，不算 token）
                 committed_status = resp.status   # headers 即将发出（§6.4）
+                if timeout is not None:
+                    # committed 后流读取解耦剩余预算（2026-11-24 截断根因，
+                    # idle = 既有非池路径 300s）；None 保持 PR-14 原行为
+                    _relax_post_commit_timeout(resp, 300, sock=conn.sock)
                 sse_buf = SSELineBuffer(first_token_ttft_cb(handler))
                 pipe_stream_response(handler, resp, sse_buf)
                 handler._usage = dict(sse_buf.usage)
