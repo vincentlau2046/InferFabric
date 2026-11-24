@@ -26,7 +26,7 @@ _POOLS_BODY = {
     "pools": {
         "fast": {
             "enabled": True,
-            "strategy": "priority",
+            "strategy": "priority_failover",
             "allowed_locations": ["local", "cloud"],
             "accept_declared": True,
             "allow_cross_location": False,
@@ -468,6 +468,55 @@ class TestStrategyToggle:
         assert len(gets) == 2
 
 
+class TestReviewFixes:
+    """#45 fresh-context 评审修复钉（3 important + nit 补钉）。"""
+
+    def test_new_pool_skeleton_uses_valid_strategy_source_pin(self):
+        # R1：骨架旧值 'priority' 会被 7.12.1 严格枚举拒载 — 控制台建池
+        # 死路 + 存量 YAML 升级后整份拒载（后端已加 legacy 别名归一化，
+        # 但写入侧必须产出现行合法值）
+        src = PANEL_JS.read_text(encoding="utf-8")
+        assert "strategy: 'priority_failover'" in src
+        assert "strategy: 'priority'," not in src
+
+    def test_strategy_change_forces_rebuild(self, run_panel):
+        # R2：strategy 出 structSig — 跨端翻转必须触发整块重建
+        #（开关态 applyDynamic 不更新，缺签名项会让复选框永久陈旧）
+        pools2 = json.loads(json.dumps(_POOLS_BODY))
+        pools2["pools"]["fast"]["strategy"] = "first_only"
+        routes = _ops_routes()
+        routes["/admin/model-pools"] = {"status": 200, "bodies": [
+            _POOLS_BODY, pools2]}
+        out = run_panel(routes, poll_ticks=1,
+                        store_state={"tab_active": "tab-model-pools"})
+        assert out["writeCounts"].get("mpPools") == 2
+        seg = out["htmlFinal"].split('data-mp-strategy="fast"')[1][:60]
+        assert "checked" not in seg
+
+    def test_first_only_suppresses_degrade_banner(self, run_panel):
+        # R3：first_only 下「服务经回退候选提供」态不存在（chosen 恒为
+        # 首选本身或空）— 降级横幅不得在半开窗口误报
+        pools = json.loads(json.dumps(_POOLS_BODY))
+        pools["pools"]["fast"]["strategy"] = "first_only"
+        out = run_panel(_ops_routes(pools_body=pools))
+        assert "首选已降级" not in out["htmlFinal"]
+
+    def test_fallback_disabled_down_banner(self, run_panel):
+        # R3 / spec ISSUE-02：first_only 且首选不可用 → 状态面必须有
+        #「回退路由已关闭」解释（API 错误码 fallback_disabled 的渲染面）
+        status = json.loads(json.dumps(_STATUS_BODY))
+        status["pools"]["fast"]["protocols"]["openai"]["error"] = "fallback_disabled"
+        status["pools"]["fast"]["protocols"]["openai"]["chosen"] = None
+        out = run_panel(_ops_routes(status_body=status))
+        assert "回退路由已关闭" in out["htmlFinal"]
+        assert 'data-mp-degrade-dismiss="fast"' in out["htmlFinal"]
+
+    def test_no_fallback_disabled_banner_when_error_absent(self, run_panel):
+        # 默认夹具（无 fallback_disabled 错误）不出横幅 — 防误报
+        out = run_panel(_ops_routes())
+        assert "回退路由已关闭" not in out["htmlFinal"]
+
+
 # ── Phase 1 Task 5+：运营视图（健康灯 / 候选链运行态 / 三态空态）──
 
 _RUNTIME_BODY = {
@@ -665,7 +714,7 @@ _EDITOR_RAW = {
     "pools": {
         "fast": {
             "enabled": True,
-            "strategy": "priority",
+            "strategy": "priority_failover",
             "allowed_locations": ["local", "cloud"],
             "accept_declared": True,
             "allow_cross_location": False,
@@ -2477,7 +2526,7 @@ class TestPersistentCards:
         val = next(c for c in out["calls"]
                    if c["url"] == "/admin/model-pools/validate")
         sk = val["body"]["pools"]["flash"]
-        assert sk["strategy"] == "priority" and sk["max_attempts"] == 2
+        assert sk["strategy"] == "priority_failover" and sk["max_attempts"] == 2
         assert sk["candidates"][0] == {"id": "flash-1", "kind": "local",
                                        "model_name": "qwen-turbo",
                                        "declared_protocols": ["openai"],
@@ -2496,7 +2545,7 @@ class TestPersistentCards:
             {"id": "m1", "priority": 1, "kind": "local",
              "target": "Qwen38-27B-TXT", "features": [],
              "evidence": {"openai": "declared"}}]}
-        lite_raw = {"enabled": True, "strategy": "priority",
+        lite_raw = {"enabled": True, "strategy": "priority_failover",
                     "allowed_locations": ["local", "cloud"],
                     "accept_declared": True, "allow_cross_location": False,
                     "max_attempts": 2, "deadline_ms": 60000,
@@ -2508,7 +2557,7 @@ class TestPersistentCards:
             {"id": "flash-1", "priority": 1, "kind": "local",
              "target": "qwen-turbo", "features": [],
              "evidence": {"openai": "declared"}}]}
-        flash_raw = {"enabled": True, "strategy": "priority",
+        flash_raw = {"enabled": True, "strategy": "priority_failover",
                      "allowed_locations": ["local", "cloud"],
                      "accept_declared": True, "allow_cross_location": False,
                      "max_attempts": 2, "deadline_ms": 60000,
@@ -2541,7 +2590,7 @@ class TestPersistentCards:
         fc = body["pools"]["flash"]["candidates"][0]
         assert fc["id"] == "flash-1" and fc["model_name"] == "qwen-turbo"
         assert fc["priority"] == 1
-        assert body["pools"]["flash"]["strategy"] == "priority"
+        assert body["pools"]["flash"]["strategy"] == "priority_failover"
         h = out["htmlFinal"]
         assert 'data-mp-pool="flash"' in h, "卡转已配置"
         assert 'data-mp-config-pool="flash"' not in h

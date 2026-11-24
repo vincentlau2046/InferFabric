@@ -263,6 +263,14 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
     # 拒载而非静默容忍：容忍会让「回退已关」悄悄变回「全程回退」，路由
     # 语义反转且无人察觉（与 enabled/protocol 同一严格纪律）
     strategy = raw.get("strategy", "priority_failover")
+    if strategy == "priority":
+        # 存量别名（#45 评审 R1）：7.12.1 前控制台建池骨架写入的旧值；
+        # 旧 runtime 完全忽略 strategy（实际语义即 priority_failover），
+        # 归一化而非拒载——否则存量 model_pools.yaml 升级后整份拒载
+        #（重启后全部 fabric-* 404）。仅此一个精确 token，其余未知值仍拒载。
+        log.warning("pool '%s': legacy strategy 'priority' normalized to "
+                    "'priority_failover'", name)
+        strategy = "priority_failover"
     if strategy not in VALID_STRATEGIES:
         issues.append(
             f"pool '{name}': strategy must be one of {sorted(VALID_STRATEGIES)}, "

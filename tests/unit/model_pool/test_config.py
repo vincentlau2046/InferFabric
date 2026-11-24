@@ -364,3 +364,13 @@ class TestStrategyParse:
             current_revision=0)
         assert cfg is None
         assert any("strategy" in i for i in issues)
+
+    def test_legacy_priority_alias_normalized(self):
+        # #45 评审 R1：7.12.1 前控制台建池骨架写入的旧值 — 归一化到默认
+        # 行为（旧 runtime 本就忽略 strategy），拒载会让存量 YAML 升级后
+        # 整份失效（重启后全部 fabric-* 404）
+        cfg, issues = load_pools_dict(
+            _raw_file(pools={"fast": _raw_pool(strategy="priority")}),
+            current_revision=0)
+        assert issues == []
+        assert cfg.pools["fast"].strategy == "priority_failover"

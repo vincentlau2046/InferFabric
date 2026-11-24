@@ -635,6 +635,10 @@
   /* ── C4 劣化判定（纯函数）：首候选冷却/隔离 && 任一协议仍有 chosen
      （服务由回退候选提供 — 用户应知道首选已降级）── */
   function isDegraded(poolDef, stP, rtP) {
+    // WS2（#45 评审 R3）：first_only 下「服务经回退候选提供」态不存在
+    //（chosen 恒为首选本身或空）— 半开窗口 chosen=首选 时不得误报降级；
+    // first_only 的「首选不可用」面由 fallback_disabled 横幅承载
+    if (poolDef && poolDef.strategy === 'first_only') return false;
     var cands = (poolDef && poolDef.candidates) || [];
     if (!cands.length) return false;
     var rtById = {};
@@ -687,14 +691,22 @@
       + '</div>';
     // C4：首候选降级而服务仍由回退候选提供 → 引导条（关闭后同态不重现）
     if (isDegraded(def, st, rt) && !_degradeDismissed[name]) {
-      // WS2/ISSUE-02：first_only 下回退不再服务 — 文案必须如实，不得
-      // 让用户以为请求正由回退候选承接
-      var degMsg = def.strategy === 'first_only'
-        ? '首选已降级 — 回退路由已关闭，该组将不可用'
-        : '首选已降级 — 当前服务经回退候选提供';
-      html += '<div class="mp-degrade"><span>' + degMsg + '</span>'
+      html += '<div class="mp-degrade"><span>首选已降级 — 当前服务经回退候选提供</span>'
         + '<button type="button" class="mp-edit-btn" data-mp-degrade-view="'
         + esc(name) + '">查看回退链</button>'
+        + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
+        + esc(name) + '" title="关闭">×</button></div>';
+    }
+    // WS2/ISSUE-02（#45 评审 R3）：first_only 且首选不可用 → 状态面明示
+    //「回退路由已关闭」（API 错误码 fallback_disabled 的唯一渲染面 —
+    // 决策块删除后 protocols.error 无其他出口）
+    var stProtocols = (st && st.protocols) || {};
+    var fbClosed = ['openai', 'anthropic'].some(function (p) {
+      return stProtocols[p] && stProtocols[p].error === 'fallback_disabled';
+    });
+    if (fbClosed && !_degradeDismissed[name]) {
+      html += '<div class="mp-degrade"><span>回退路由已关闭 — 首选候选不可用，'
+        + '该组当前不可服务</span>'
         + '<button type="button" class="mp-degrade-x" data-mp-degrade-dismiss="'
         + esc(name) + '" title="关闭">×</button></div>';
     }
@@ -803,6 +815,9 @@
       var rtById = {};
       (rtP.candidates || []).forEach(function (rc) { rtById[rc.id] = rc; });
       return n + ':' + (p.enabled ? 1 : 0)
+        // WS2（#45 评审 R2）：strategy 出签名 — 跨端翻转必须触发整块重建
+        //（开关态 applyDynamic 不更新，缺签名项会让复选框永久陈旧）
+        + ':' + (p.strategy || '')
         + ':' + (p.issues || []).join(';')
         + ':' + (p.candidates || []).map(function (c) {
             var rt = rtById[c.id];
@@ -1735,7 +1750,7 @@
   // 默认池骨架（编辑器新建池 / 向导创建共用）
   function newPoolSkeleton() {
     return {
-      enabled: true, strategy: 'priority',
+      enabled: true, strategy: 'priority_failover',
       allowed_locations: ['local', 'cloud'],
       accept_declared: true, allow_cross_location: false,
       max_attempts: 2, deadline_ms: 60000, candidates: [],

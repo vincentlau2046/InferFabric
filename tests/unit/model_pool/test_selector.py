@@ -398,3 +398,28 @@ class TestFirstOnlyStrategy:
         sel = select(snap, _req("openai"), _rt(cloud={"p/p2-model": object()}))
         assert sel.error is None
         assert sel.chosen.candidate.id == "p2"
+
+    def test_first_only_respects_vision_sort_before_truncation(self):
+        # 截断在 vision 软偏好排序之后：带图请求的链头可以是视觉候选
+        #（非 priority=1）—「首选」= 排序后首位
+        cands = [_cand("t1", 1, kind="local", model_name="qwen-txt"),
+                 _cand("v1", 2, kind="local", model_name="qwen-vl")]
+        snap = _pool_snap(cands, strategy="first_only")
+        sel = select(snap, _req(vision=True),
+                     _rt(*cands, active={"qwen-txt", "qwen-vl"},
+                         local_vision={"qwen-vl"}))
+        assert sel.chosen.candidate.id == "v1"
+        assert [d.candidate_id for d in sel.decisions] == ["v1"]
+        assert sel.error is None
+
+    def test_first_only_head_static_incompatible_never_uses_compatible_p2(self):
+        # 截断语义钉：链头静态不兼容、P2 兼容且就绪 — first_only 仍报
+        # no_compatible_target（P2 被截断，不静默使用）
+        cands = [_cand("a1", 1, protocols=("anthropic",)),
+                 _cand("o2", 2, protocols=("openai",))]
+        snap = _pool_snap(cands, strategy="first_only")
+        sel = select(snap, _req("openai"), _rt(*cands))
+        assert sel.chosen is None
+        assert sel.error == "no_compatible_target"
+        assert [d.candidate_id for d in sel.decisions] == ["a1"]
+        assert {d.candidate_id: d.reason for d in sel.decisions}["a1"] == "no_evidence"

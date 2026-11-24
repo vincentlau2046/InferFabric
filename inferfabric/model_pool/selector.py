@@ -24,6 +24,7 @@ models.d model_type=vl → RuntimeView.local_vision；云 supports_vision
 错误（Selection.error）：
   pool_disabled          池未启用
   no_ready_target        有协议兼容候选但全部未就绪
+  fallback_disabled      回退路由已关闭（first_only）且链首候选未就绪（WS2）
   no_compatible_target   无协议兼容候选
   unknown_pool           池不存在（dispatch 层产生，本函数不返回）
 """
@@ -70,7 +71,8 @@ class Selection:
     # 带图请求 vision-capable 候选排前），供回退循环按序尝试
     ordered: tuple[ResolvedCandidate, ...] = ()
     # 静态兼容（含跨位置过滤后的 home 位置约束）的候选数 — 与当前就绪状态
-    # 无关（7.10.0 起仅观测用，路由决策不再依赖它）
+    # 无关（7.10.0 起仅观测用，路由决策不再依赖它）；first_only 截断后
+    # 至多为 1（只统计进入尝试链的候选）
     compatible_count: int = 0
 
 
@@ -200,7 +202,8 @@ def select(pool_snap: PoolSnapshot, req: RequestRequirements,
         elif had_protocol_compatible:
             # WS2/ISSUE-02：first_only 下唯一候选未就绪必须与「回退开启但
             # 无就绪」可区分 — 客户端与排障界面据此明示「回退路由已关闭，
-            # P1 不可用」，而非笼统 503 no_ready_target
+            # 首选不可用」（注意：vision 排序后「首选」≠ 固定 priority=1），
+            # 而非笼统 503 no_ready_target
             error = ("fallback_disabled" if pool.strategy == "first_only"
                      else "no_ready_target")
         else:
