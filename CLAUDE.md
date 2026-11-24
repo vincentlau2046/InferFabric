@@ -59,6 +59,7 @@ bash scripts/iff-recovery.sh --full # Nuclear: SIGKILL all vLLM + nvidia-smi --g
 - **Quality gates**: full pytest suite passes; `python3 -c "import inferfabric"` smoke; runtime smoke (core API endpoints return 200); cross-review via LLM (AtomCode GLM-5.2).
 - **Technical constraints**: Python 3.10+, vLLM 0.24 (do not upgrade), do not modify the proxy forwarding core path (excluded per PR-14).
 - Per-PR specs live in `specs/` (one spec dir + `STATUS.md` per PR); product language docs in `steering/` (bounded-context.md, product.md, ubiquitous-lang.md) and inside `inferfabric/steering/`.
+- **Dual-machine collaboration**: the repo is developed alternately on two machines (vince-pc: Linux + RTX 5090D, sandbox-first; Mac: darwin-arm, feature-branch + PR) against GitHub origin. Follow the 开工/收工 handover checklist in [steering/dual-machine-collaboration.md](steering/dual-machine-collaboration.md): fetch + align main before starting work; push WIP branches and commit plan/spec/STATUS docs before stopping; everything lands via PR.
 
 ## Architecture Overview
 
