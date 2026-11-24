@@ -275,6 +275,19 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
         return None
     max_attempts, deadline_ms = ma, dm
 
+    # 回退可达性（fabric-max 事故 2026-11-21）：max_attempts < 候选数 =
+    # 后续候选结构性不可达（同目标重试还会进一步挤压首试槽位）。
+    # strict（CAS 写入）拒绝并给可操作文案；磁盘存量载入告警容忍，
+    # 与 MAX_ATTEMPTS_RANGE 超界处理同构。
+    if len(candidates) > max_attempts:
+        msg = (f"pool '{name}': max_attempts ({max_attempts}) is less than "
+               f"candidate count ({len(candidates)}) — later candidates "
+               f"unreachable")
+        if strict:
+            issues.append(msg)
+        else:
+            log.warning("%s — tolerated for legacy config", msg)
+
     return PoolConfig(
         name=name,
         enabled=enabled,

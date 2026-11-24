@@ -281,7 +281,8 @@ class PoolRegistry:
 
         Raises:
             KeyError: 池不存在（含从未成功加载任何配置）。
-            ValueError: 翻转后校验失败（不应发生 — 仅改 enabled）。
+            ValueError: 翻转后整份配置违反静态校验（如存量
+                max_attempts < 候选数 —— 校验作用于整份配置，fail-closed）。
             RevisionConflict: expected_revision 过期。
         """
         import copy

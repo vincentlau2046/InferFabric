@@ -281,3 +281,41 @@ class TestLoadFile:
             cfg, issues = load_pools_dict(raw, current_revision=0)
             assert cfg is None
             assert any("priority" in i for i in issues)
+
+
+def _raw_pool_n_candidates(n, **overrides):
+    raw = _raw_pool(**overrides)
+    raw["candidates"] = [
+        {"id": f"c{i}", "priority": i, "kind": "cloud",
+         "provider": "prov", "model_id": f"m{i}",
+         "declared_protocols": ["openai"]}
+        for i in range(1, n + 1)
+    ]
+    return raw
+
+
+def test_strict_write_rejects_attempts_below_candidate_count():
+    # fabric-max 事故回归钉：max_attempts < 候选数 = 回退结构性不可达的
+    # 配置形态，CAS 写入（strict）必须拒绝并给可操作文案
+    raw = {"schema_version": 1, "pools": {
+        "p": _raw_pool_n_candidates(3, max_attempts=2)}}
+    parsed, issues = load_pools_dict(raw, current_revision=1, strict=True)
+    assert parsed is None
+    assert any("max_attempts (2) is less than candidate count (3)" in i
+               for i in issues)
+
+
+def test_legacy_load_tolerates_attempts_below_candidate_count():
+    # Review Focus #3：生产存量配置升级后必须照常加载
+    raw = {"schema_version": 1, "pools": {
+        "p": _raw_pool_n_candidates(3, max_attempts=2)}}
+    parsed, issues = load_pools_dict(raw, current_revision=1, strict=False)
+    assert parsed is not None
+    assert parsed.pools["p"].max_attempts == 2
+
+
+def test_attempts_equal_candidate_count_is_accepted():
+    raw = {"schema_version": 1, "pools": {
+        "p": _raw_pool_n_candidates(3, max_attempts=3)}}
+    parsed, issues = load_pools_dict(raw, current_revision=1, strict=True)
+    assert parsed is not None
