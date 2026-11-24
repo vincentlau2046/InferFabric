@@ -32,10 +32,10 @@ def get_html() -> str:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
         # 替换 fragment 占位符
         for frag_name in ("overview", "inference", "monitor", "cloud",
-                          "model-pools", "wizard", "anomaly", "packs",
+                          "model-pools", "anomaly", "packs", "wizard",
                           "security", "connect"):
-            # wizard 排在 model-pools 之后：其占位符位于 model-pools.html
-            # 内部（向导卡挂模型池 tab），替换按序生效
+            # wizard 排在 packs 之后：其占位符位于 packs.html 内部
+            # （向导卡挂能力包 tab，2026-11-24 自模型池页迁入），替换按序生效
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"
             try:
                 frag = frag_path.read_text(encoding="utf-8")

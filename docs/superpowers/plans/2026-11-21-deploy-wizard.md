@@ -1,5 +1,9 @@
 # Deploy Wizard (五步收窄一键部署) Implementation Plan
 
+> **⚠️ 2026-11-24 裁决推翻记录**：本计划「向导挂模型池 tab」的挂点已由用户裁决推翻——
+> 向导迁至**能力包 tab**（主装载入口），详见 `specs/console-ux-batch/spec.md` WS1
+> （PR #43 已实施）。本计划的五步交互/一键序列/评审修复契约仍然有效，仅挂点变更。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans
 > (native, inline — user's standing choice for this line of work) to implement
 > this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1946,3 +1946,16 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
   display: flex; align-items: center; gap: var(--sp-1);
   margin-top: var(--sp-2);
 }
+
+/* ═══ 能力包页 · 部署向导迁移（2026-11-24，specs/console-ux-batch WS1 入口层级）═══ */
+.pack-ext-details { margin: 0 0 16px; }
+.pack-ext-details > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+.pack-ext-details > summary::-webkit-details-marker { display: none; }
+.pack-ext-details[open] > summary { margin-bottom: 8px; }

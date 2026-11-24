@@ -1,4 +1,4 @@
-/* InferFabric Console — 五步部署向导（Task 4；挂模型池 tab 内）
+/* InferFabric Console — 五步部署向导（Task 4；挂能力包 tab 内，2026-11-24 自模型池页迁入）
  *
  * 数据源（Task 2/3/3b 后端契约）：
  *   - GET  /admin/deploy/options          — 能力×引擎×平台收窄（Python 侧收窄，不可绕过）
@@ -309,7 +309,7 @@
     stopPoll();
     if (!ok) { renderStep(); UI.toast(msg, 'error'); return; }
     _result = '<p>✅ ' + escHtml(msg) + '</p>' +
-      btn('wiz-done', '去模型池查看', '', false) + ' ' +
+      btn('wiz-done', '完成', '', false) + ' ' +
       btn('wiz-again', '再部署一个', '', false);
     renderStep();
     UI.toast(msg, 'ok');
@@ -354,7 +354,7 @@
   /* ── 事件（委托，无 inline onclick） ── */
   document.addEventListener('click', function (ev) {
     if (!ev.target || !ev.target.closest) return;
-    /* 入口按钮在模型池卡头部（向导卡外）——先于卡片作用域检查 */
+    /* 入口按钮在能力包卡头部（向导卡外）——先于卡片作用域检查 */
     if (ev.target.closest('[data-action="wiz-open"]')) {
       window.Wizard.open();
       return;
@@ -365,8 +365,9 @@
     var act = t.getAttribute('data-action');
     if (act === 'wiz-cancel' || act === 'wiz-done') {
       resetWizard();
-      if (window.tabRenderers && window.tabRenderers['tab-model-pools']) {
-        try { window.tabRenderers['tab-model-pools'](); } catch (e) { /* 渲染失败不阻断 */ }
+      // 向导挂在能力包页：完成后刷新包装机状态（池面板由自身轮询覆盖）
+      if (window.tabRenderers && window.tabRenderers['tab-packs']) {
+        try { window.tabRenderers['tab-packs'](); } catch (e) { /* 渲染失败不阻断 */ }
       }
     } else if (act === 'wiz-again') {
       _result = null; wiz.step = 1; renderStep();
@@ -378,10 +379,13 @@
       wiz.mode = t.getAttribute('data-mode');
       if (wiz.mode === 'packs-catalog') {
         // packs 目录装机：跳本向导，deep-link 能力包 tab
-        // （评审 F10：store.set 只改状态不切可见 tab，须 switchTab）
+        // （评审 F10：store.set 只改状态不切可见 tab，须 switchTab；
+        //   2026-11-24 迁移后向导即在能力包页：关闭向导并滚到目录区——评审 F3）
         resetWizard();
         if (store && store.switchTab) { store.switchTab('tab-packs'); }
         else if (store && store.set) { store.set('tab_active', 'tab-packs'); }
+        var cat = document.getElementById('pkCatalog');
+        if (cat) cat.scrollIntoView({ block: 'start' });
         return;
       }
       wiz.step = 4; renderStep();
@@ -422,10 +426,10 @@
     if (card && card.style.display !== 'none') resetWizard();   // Esc 关闭重置
   });
 
-  /* 切出模型池 tab：停轮询 + 重置在途态（Review Focus 5） */
+  /* 切出能力包 tab：停轮询 + 重置在途态（Review Focus 5；2026-11-24 随迁移改守卫） */
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab !== 'tab-model-pools') {
+      if (tab !== 'tab-packs') {
         stopPoll();
         if (_open) resetWizard();
         _open = false;
@@ -438,7 +442,11 @@
       _open = true;
       _runSeq += 1;               // 评审 F4：重开向导，旧序列回调全部失效
       var card = $('tab-deploy-wizard');
-      if (card) card.style.display = '';
+      if (card) {
+        card.style.display = '';
+        // 向导卡在长页底部：打开即滚到卡位（instant 滚动，尊重 prefers-reduced-motion）
+        card.scrollIntoView({ block: 'start' });
+      }
       wiz.step = 1;
       if (capability) wiz.capability = capability;
       renderStep();
