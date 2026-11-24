@@ -2,8 +2,8 @@
 
 spec §6.2 固定错误动作表（不可配置化放开「不回退」类别）：
   连接失败/DNS/不可达      → 立即切下一候选（受 max_attempts/deadline）
-  429                      → 预算内尊重 Retry-After 等待并重试原目标，
-                             超预算切下一候选
+  429                      → 尊重 Retry-After 等待并重试原目标（同目标
+                             重试不占槽位）；超 deadline 剩余切下一候选
   5xx（未提交）            → 最多重试原目标 1 次，之后切下一候选
   401/403（上游凭证错误）   → 端点冷却（CooldownStore，键=endpoint_fingerprint）
                              + 切下一候选
@@ -12,8 +12,11 @@ spec §6.2 固定错误动作表（不可配置化放开「不回退」类别）
 
 spec §6.3 统一预算：max_attempts 计不同候选的首试（fallback 槽位）；
 同目标重试（429 等待 / 5xx 一次）不计入预算，由 retried 集限每候选
-全程至多 1 次，deadline 仍为全局硬上限（等待+传输均计入）。总上游
-调用上界 = 2×max_attempts，受 deadline 截断。本模块不 import handler
+全程至多 1 次——槽位用尽后的同目标重试仍被允许。每请求循环尝试总数
+≤ 2×max_attempts（candidate attempts 口径；Responses 桥接单次尝试内
+的 native+翻译双物理 POST 不在此计数）。deadline 是尝试循环的预算
+判定（Retry-After 等待与已耗时计入；单次传输超时按准入时剩余时间
+下发，个别尝试可在 deadline 后收尾）。本模块不 import handler
 内部状态、不发客户端响应 — 传输以回调注入，客户端写只发生在传输
 回调内部。
 
