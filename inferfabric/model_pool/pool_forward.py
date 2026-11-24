@@ -20,8 +20,9 @@ spec §6.3 统一预算：max_attempts 计不同候选的首试（fallback 槽�
 内部状态、不发客户端响应 — 传输以回调注入，客户端写只发生在传输
 回调内部。
 
-注：max_attempts < 候选数 的配置在静态校验层（config._parse_pool）
-于 CAS 写入时拒绝、磁盘存量载入时告警容忍。
+注：max_attempts < 候选数 的配置在解析层（config._parse_pool）自动
+扩展有效槽位至全覆盖并告警——部署零配置变更（用户裁决 2026-11-24：
+修复不得绑定配置迁移）。
 """
 
 import logging

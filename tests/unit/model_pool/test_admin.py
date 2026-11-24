@@ -219,7 +219,6 @@ class TestDryRun:
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
         cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
-        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),
@@ -324,7 +323,6 @@ class TestToggleEndpoint:
             {"id": "extra", "priority": 3, "kind": "cloud",
              "provider": "prov", "model_id": "cloud-m2",
              "declared_protocols": ["openai"]})
-        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         import yaml as _yaml
         (tmp_path / "model_pools.yaml").write_text(
             _yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
@@ -537,7 +535,6 @@ class TestRuntimeEndpoint:
             {"id": "vlloc", "priority": 2, "kind": "local",
              "model_name": "qwen-vl", "declared_protocols": ["openai"]})
         cfg["pools"]["flash"]["candidates"][1]["priority"] = 3
-        cfg["pools"]["flash"]["max_attempts"] = 3  # 7.11.3 CAS 校验：≥ 候选数
         registry.update(cfg, expected_revision=registry.snapshot().revision)
         pm = FakePM(registry, active={"qwen-small", "qwen-vl"},
                     local_models={"qwen-small": _local_model(),

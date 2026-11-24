@@ -294,28 +294,41 @@ def _raw_pool_n_candidates(n, **overrides):
     return raw
 
 
-def test_strict_write_rejects_attempts_below_candidate_count():
-    # fabric-max 事故回归钉：max_attempts < 候选数 = 回退结构性不可达的
-    # 配置形态，CAS 写入（strict）必须拒绝并给可操作文案
+def test_attempts_below_candidate_count_auto_extends_on_write():
+    # 用户裁决 2026-11-24：修复不得绑定配置迁移。max_attempts < 候选数
+    # （fabric-max 事故形态）不再拒绝——解析层自动扩展有效槽位到全覆盖
+    # （= 候选数）；生产存量 YAML 零变更即生效，对齐降级为可选整理
     raw = {"schema_version": 1, "pools": {
         "p": _raw_pool_n_candidates(3, max_attempts=2)}}
     parsed, issues = load_pools_dict(raw, current_revision=1, strict=True)
-    assert parsed is None
-    assert any("max_attempts (2) is less than candidate count (3)" in i
-               for i in issues)
+    assert parsed is not None and issues == []
+    assert parsed.pools["p"].max_attempts == 3
 
 
-def test_legacy_load_tolerates_attempts_below_candidate_count():
-    # Review Focus #3：生产存量配置升级后必须照常加载
+def test_legacy_load_auto_extends_identically():
+    # Review Focus #3：磁盘存量载入与 CAS 写入同语义（自动扩展）
     raw = {"schema_version": 1, "pools": {
         "p": _raw_pool_n_candidates(3, max_attempts=2)}}
     parsed, issues = load_pools_dict(raw, current_revision=1, strict=False)
-    assert parsed is not None
-    assert parsed.pools["p"].max_attempts == 2
+    assert parsed is not None and issues == []
+    assert parsed.pools["p"].max_attempts == 3
 
 
-def test_attempts_equal_candidate_count_is_accepted():
+def test_auto_extend_logs_warning_with_effective_value(caplog):
+    # 告警必须带有效值，操作者可在日志/面板看到自愈结果
+    import logging
+    raw = {"schema_version": 1, "pools": {
+        "p": _raw_pool_n_candidates(3, max_attempts=2)}}
+    with caplog.at_level(logging.WARNING,
+                         logger="inferfabric.model_pool.config"):
+        load_pools_dict(raw, current_revision=1, strict=True)
+    assert any("auto-extended" in r.message and "3" in r.message
+               for r in caplog.records)
+
+
+def test_attempts_equal_candidate_count_untouched():
     raw = {"schema_version": 1, "pools": {
         "p": _raw_pool_n_candidates(3, max_attempts=3)}}
     parsed, issues = load_pools_dict(raw, current_revision=1, strict=True)
-    assert parsed is not None
+    assert parsed is not None and issues == []
+    assert parsed.pools["p"].max_attempts == 3

@@ -277,16 +277,16 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
 
     # 回退可达性（fabric-max 事故 2026-11-21）：max_attempts < 候选数 =
     # 后续候选结构性不可达（同目标重试还会进一步挤压首试槽位）。
-    # strict（CAS 写入）拒绝并给可操作文案；磁盘存量载入告警容忍，
-    # 与 MAX_ATTEMPTS_RANGE 超界处理同构。
+    # 用户裁决（2026-11-24）：修复不得绑定配置迁移——解析层自动扩展有效
+    # 槽位到全覆盖（= 候选数）并告警；CAS 写入与磁盘存量同语义，生产
+    # YAML 零变更即生效，对齐 max_attempts 降级为可选日常整理。
     if len(candidates) > max_attempts:
-        msg = (f"pool '{name}': max_attempts ({max_attempts}) is less than "
-               f"candidate count ({len(candidates)}) — later candidates "
-               f"unreachable")
-        if strict:
-            issues.append(msg)
-        else:
-            log.warning("%s — tolerated for legacy config", msg)
+        log.warning(
+            "pool '%s': max_attempts (%d) < candidate count (%d) — "
+            "auto-extended to %d to cover all candidates; align "
+            "max_attempts in the YAML at leisure",
+            name, max_attempts, len(candidates), len(candidates))
+        max_attempts = len(candidates)
 
     return PoolConfig(
         name=name,

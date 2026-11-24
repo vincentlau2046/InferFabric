@@ -407,7 +407,7 @@ Dashboard 推理页模型卡有 **⚙ 场景** 按钮：三阶段模态框（选
 | 400 `parallel_tool_use_not_supported`（v7.10.4） | 例外：判定候选**引擎能力不匹配** → 切下一候选（如云端候选接受该字段），不冷却端点（引擎只拒这一请求形状）；全部候选不兼容 → 干净 503 `pool_unavailable` 信封 |
 | 已提交任何字节 | 永不重试/切换；流中断上报截断遥测 |
 
-统一预算（7.11.3 起）：`max_attempts` 计**不同候选的首试**（回退槽位）；同目标重试（429 等待 / 5xx 一次）不占槽位，由每候选全程 1 次的上限约束——槽位用尽后的同目标重试仍被允许（对齐动作表本意，旧版被预算截断不发生）。每请求的循环尝试总数 ≤ 2×`max_attempts`（Responses 桥接的native+翻译双 POST 属单次尝试内的物理请求，不在此计数）。`deadline_ms` 是尝试循环的预算判定（限流排队、Retry-After 等待与已耗时均计入）；单次传输超时按准入时剩余时间下发，个别尝试可在 deadline 后收尾（既有传输层行为）。准入失败（容量门超时/候选冷却中）**不消耗**槽位。冷却期过半后以**半开单飞探测**恢复（同一端点并发只放一个探测请求）。`max_attempts` < 候选数的配置在 CAS 写入时拒绝、磁盘存量载入时告警容忍。
+统一预算（7.11.3 起）：`max_attempts` 计**不同候选的首试**（回退槽位）；同目标重试（429 等待 / 5xx 一次）不占槽位，由每候选全程 1 次的上限约束——槽位用尽后的同目标重试仍被允许（对齐动作表本意，旧版被预算截断不发生）。每请求的循环尝试总数 ≤ 2×`max_attempts`（Responses 桥接的native+翻译双 POST 属单次尝试内的物理请求，不在此计数）。`deadline_ms` 是尝试循环的预算判定（限流排队、Retry-After 等待与已耗时均计入）；单次传输超时按准入时剩余时间下发，个别尝试可在 deadline 后收尾（既有传输层行为）。准入失败（容量门超时/候选冷却中）**不消耗**槽位。冷却期过半后以**半开单飞探测**恢复（同一端点并发只放一个探测请求）。`max_attempts` < 候选数的配置在解析层**自动扩展**有效槽位至全覆盖并告警——部署零配置变更（用户裁决 2026-11-24），YAML 对齐为可选整理。
 
 ### 配置示例
 
@@ -419,7 +419,7 @@ pools:
     enabled: true
     allowed_locations: [local]  # 跨本地/云回退默认关闭：显式加 cloud 才开
     accept_declared: true       # 显式接受管理员声明证据
-    max_attempts: 2             # 回退槽位数（不同候选首试；同目标重试不占槽位，须 ≥ 候选数）
+    max_attempts: 2             # 回退槽位下限（不同候选首试；同目标重试不占槽位；低于候选数时解析层自动扩展并告警）
     deadline_ms: 60000
     candidates:
       - id: qwen-small
@@ -704,7 +704,7 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 
 | Version | Date | Highlights |
 |---------|------|------------|
-| **v7.11.3** | **2026-11-24** | **池回退预算修复（fabric-max 事故根因）** — ① `run_attempts` 预算语义重定义：`max_attempts` 只计不同候选的首试（fallback 槽位），同目标重试（429 等待/5xx 一次）不计入预算，由 retried 集限每候选全程 1 次 + deadline 全局硬上限（总上游调用上界 2×max_attempts）；修复「主选 5xx 同目标重试耗尽 max_attempts=2 预算 → 候选 2/3 从未尝试」的结构性回退不可达（journal 930 条 attempt 链实证，候选 3 同窗为他池服务 1379 次成功而触达 0 次）。② 静态校验：CAS 写入拒绝 `max_attempts < 候选数`（可操作文案），磁盘存量载入 warning 容忍；`flip_pool_enabled` docstring 同步（整份配置校验）。行为变化：`max_attempts=1` 池的主选同目标重试由「被预算截断」变为「执行一次」。门禁：新钉 9 例 RED→GREEN + pool_forward/config/registry 141 passed；部署排序 = 先调生产 YAML max_attempts ≥ 候选数、后加载新代码（顺序颠倒窗口期内 dashboard CAS 写入 400，fail-closed 可操作）。 |
+| **v7.11.3** | **2026-11-24** | **池回退预算修复（fabric-max 事故根因）** — ① `run_attempts` 预算语义重定义：`max_attempts` 只计不同候选的首试（fallback 槽位），同目标重试（429 等待/5xx 一次）不计入预算，由 retried 集限每候选全程 1 次 + deadline 预算判定（循环尝试总数 ≤ 2×max_attempts，candidate attempts 口径）；修复「主选 5xx 同目标重试耗尽 max_attempts=2 预算 → 候选 2/3 从未尝试」的结构性回退不可达（journal 930 条 attempt 链实证，候选 3 同窗为他池服务 1379 次成功而触达 0 次）。② 回退可达性：`max_attempts` < 候选数的配置在解析层**自动扩展**有效槽位至全覆盖并告警——**部署零配置变更**（用户裁决：修复不得绑定配置迁移），YAML 对齐为可选整理。行为变化：`max_attempts=1` 池的主选同目标重试由「被预算截断」变为「执行一次」。门禁：新钉 12 例 RED→GREEN + 全量 2739 passed。附带修复：包卸载校验闸前移（purge 拒绝 → 零删除副作用 + 可操作 400）、legacy 卸载响应新增 pool_purge_error。 |
 | **v7.11.2** | **2026-11-20** | **Dashboard IA 重构批次 A（impeccable 评审 26/40 驱动）** — ① 侧栏 10 平铺 tab → 5 组导航（状态/推理与池/网关策略/可观测/接入，`.nav-cap` 组标题）；② 推理页主色纪律：整页至多一张「建议启动」卡（GPU=idle 时独占组首个停止模型，btn-pri + 建议 徽标），其余停止卡中性 btn-sec；③ 停止卡卡体塌缩：4 槽死 "—" → 2 槽摘要（模式/精度），等高由 grid 拉伸 + actions margin-top:auto 结构保证；④ nav `aria-current="page"`（store.js + base.html fallback 双路）；⑤ 生产部署差距 P1 消除（F7/F4/F1/F9/F10 五批上线，10 tab 全可见）。 |
 | **v7.11.1** | **2026-11-19** | **池旧名别名移除（用户裁决：客户端已全部迁移 fabric-\*）** — 移除 `POOL_ALIASES`/`canonical_pool_name`（fabric-fast→flash、fabric-small→lite、fabric-premium→max 只读入站别名），请求名即池键，旧名按 unknown_pool 404；活 registry CAS 删除 legacy 池键 small/fast/premium（rev 71→72，备份 `model_pools.yaml.bak-before-legacy-removal`）；`_resolve_pool_snap` 简化为单查（别名移除后原短名回落为死代码）；`iff models` 池配置语义不变。行为变化：`fabric-fast/small/premium` 不再路由（7.11.0 部署当天已把所有客户端配置迁到 fabric-classifier/lite/flash/max，无存量依赖）。门禁：unit+dashboard+proxy 999 全绿 + 全量回归 + 端到端验证（4 个正名 200、3 个旧名 404）。 |
 | **v7.11.0** | **2026-11-19** | **平台抽象层 + 设备遥测 + 卸载 CLI + 池 v2（PR #1–#12 批次，25 commits）** — ① 平台抽象层 `inferfabric/platform/`（detect/probe/resource/procguard/engines，`IFF_FORCE_PLATFORM` 覆盖，`IFF_*`/`MACFABRIC_*` 双读别名，ledger_mode on_demand/resident）；② DeviceTelemetry 统一设备观测/控制层（Apple unified memory + NVIDIA nvidia-smi 双后端；unavailable=null 非 0、观测 fail-open/控制 fail-closed、memory_kind 语义；v011 迁移：`gpu_power_samples`→平台中立 `device_power_samples`，历史行一次性拷贝+兼容视图，重启自动执行）；`iff gpu-clear` 阈值 1024→2048MB + force 感知门；③ 模型池 v2：priority 重建、CAS 写回（expected_revision）、结构化传输、legacy 池键反查兜底（`_resolve_pool_snap`）；④ 镜像管理 L3b：容器 `com.inferfabric.managed` label + `ManagedImageLedger`（digest 键台账）+ scoped prune（永不全局 prune，identity 门）；⑤ 卸载 CLI `iff remove <model\|env\|image>`：引擎 refcount 门 + dry-run + 活 registry CAS purge（PUT→POST 修复，同步 server 仅路由 GET/POST）+ llama_cpp 权重路径预览；⑥ 场景侧车漂移检测（`find_scenario_drift`，config-name-only 基线，report-only，`iff models` 尾部警告块，fail-open）；⑦ docker 启动 fail-fast：`ensure_image_pulled` 失败即中止启动（带 stderr 摘要+重试指引），不再落入 docker run 无超时隐式重拉（busybox 实测显式 pull 9.3s vs run 自动拉 9.7s，无系统性翻倍；失败路径 30GB 镜像才是真实 stall）；⑧ docker-first 隔离硬化：vllm/sglang/ninfer 权重挂载 `:ro`；⑨ 云路由加固：resolve_route 全名优先 + resolve_cloud_model 三态解析 + 云发现后台单飞；qwen36-35b-vl (vLLM 版) 归档（NInfer 版 qwen36-35b-ninfer 在位）。门禁：每 PR 独立评审（Blocking/Nits）+ 干净 worktree 全量回归（2262 passed）+ `import inferfabric` 冒烟；部署回归全量 + v011 迁移验证。 |
