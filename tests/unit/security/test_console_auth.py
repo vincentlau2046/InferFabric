@@ -67,3 +67,12 @@ def test_audit_has_no_secrets(console, caplog):
         with pytest.raises(LoginError):
             auth.login('wrong-secret')
     assert all(value not in caplog.text for value in ('test-password-long', 'wrong-secret', session, csrf))
+
+
+def test_password_set_reports_initialization(tmp_path):
+    # PR3（WS4）：设置页/reveal 门状态展示的判定源 — settings.id=1 是否有口令记录
+    from inferfabric.security.console_auth import password_set
+    store = KeyStore(tmp_path / 'security.db', provision=True)
+    assert password_set(store) is False
+    set_password(store, 'test-password-long')
+    assert password_set(store) is True

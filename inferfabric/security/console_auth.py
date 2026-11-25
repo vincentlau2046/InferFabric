@@ -39,6 +39,21 @@ def set_password(store, password):
     log.info('Console password updated; existing sessions invalidated')
 
 
+def password_set(store):
+    """True when a console password record exists (settings.id=1 password non-empty).
+
+    Db-layer errors report False rather than raising — status endpoints must
+    not 500 on a missing/damaged store (PR3 WS4).
+    """
+    import sqlite3
+    try:
+        with store._db() as db:
+            row = db.execute('SELECT password FROM settings WHERE id=1').fetchone()
+        return bool(row and row[0])
+    except sqlite3.Error:
+        return False
+
+
 class ConsoleAuth:
     def __init__(self, store, *, clock=time.monotonic):
         self.store = store
