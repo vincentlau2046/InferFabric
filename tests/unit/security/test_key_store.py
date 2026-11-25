@@ -2,6 +2,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import sqlite3
+import time
 
 import pytest
 
@@ -77,7 +78,8 @@ def test_key_status_valid_unknown_revoked_expired(store, monkeypatch):
     assert store.key_status(token) == 'valid'
     assert store.key_status('sk-iff-never-issued') == 'unknown'
     store.revoke_key(meta['id'])
-    assert store.key_status(token) == 'revoked'
+    # issue #48：吊销即硬删 — token 不再被识别（unknown，而非 revoked 态）
+    assert store.key_status(token) == 'unknown'
     deadline = datetime.now(timezone.utc) + timedelta(hours=1)
     _, exp = store.create_key('b', None, deadline)
     assert store.key_status(exp) == 'valid'
@@ -122,3 +124,45 @@ def test_active_key_id_valid_unknown_revoked_expired(store, monkeypatch):
     assert store.active_key_id(exp) is not None
     monkeypatch.setattr(store, '_now', lambda: deadline.timestamp())
     assert store.active_key_id(exp) is None
+
+
+# ── issue #48：吊销即硬删 — 列表只保留有效 key ───────────────────
+
+def test_revoke_hard_deletes_row_and_frees_name(store):
+    meta, token = store.create_key('client-a', None, None)
+    store.revoke_key(meta['id'])
+    # 行已物理删除：列表/校验/状态三面都不再见
+    assert all(k['id'] != meta['id'] for k in store.list_keys())
+    assert store.check(token, 'x')[0] is False
+    assert store.key_status(token) == 'unknown'   # 不再被识别（非 revoked 态）
+    # UNIQUE 名字随行删除而释放 — 同名可重建
+    meta2, _ = store.create_key('client-a', None, None)
+    assert meta2['id'] != meta['id']
+
+
+def test_revoke_unknown_id_still_raises(store):
+    with pytest.raises(KeyError):
+        store.revoke_key('nonexistent-id')
+
+
+def test_legacy_revoked_rows_purged_on_open(tmp_path):
+    """升级迁移：存量 revoked 行在任意进程首次打开时被清除（幂等）。"""
+    import sqlite3 as _sq
+    p = tmp_path / 'legacy.db'
+    store = KeyStore(p, provision=True)
+    meta, token = store.create_key('old-client', None, None)
+    with _sq.connect(p) as db:
+        db.execute('UPDATE api_keys SET revoked_at=? WHERE id=?',
+                   (time.time(), meta['id']))
+    # 模拟 7.12.3 及以前的生产库：列表仍带出 revoked 行
+    with _sq.connect(p) as db:
+        db.row_factory = _sq.Row
+        assert db.execute('SELECT revoked_at FROM api_keys WHERE id=?',
+                          (meta['id'],)).fetchone()['revoked_at'] is not None
+    reopened = KeyStore(p)          # 任意打开者触发迁移
+    assert all(k['id'] != meta['id'] for k in reopened.list_keys())
+    with _sq.connect(p) as db:      # 库内也无残留（幂等：再开一次不报错）
+        assert db.execute('SELECT COUNT(*) FROM api_keys WHERE '
+                          'revoked_at IS NOT NULL').fetchone()[0] == 0
+    KeyStore(p)                      # 第二次打开 no-op
+    assert reopened.check(token, 'x')[0] is False

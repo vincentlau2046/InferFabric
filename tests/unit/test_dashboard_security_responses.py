@@ -136,7 +136,9 @@ def test_status_never_contains_plaintext(env):
     assert data["key_count"] == 2
     assert token not in json.dumps(data), "plaintext token leaked in status"
     for k in data["keys"]:
-        assert set(k) <= {"id", "name", "created_at", "revoked"}
+        # issue #48：吊销即硬删 — 列表只含有效 key，无 revoked 字段
+        assert set(k) == {"id", "name", "created_at"}
+    assert data["key_count"] == len(data["keys"])
 
 
 def test_revoke_drops_key_count(env):
