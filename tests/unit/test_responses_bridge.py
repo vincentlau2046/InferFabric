@@ -450,11 +450,14 @@ def _fake_pm_for_probe(kind="local"):
         active_services={"m1"})
     pm.dual_gate = _FakeDualGate()
     pm.get_target_port = lambda n: 8123
+    _reg = {"prov/mdl-x": object()}
     pm.cloud = types.SimpleNamespace(
         get_provider_config=lambda name: types.SimpleNamespace(
             openai_base="https://api.x.test/v1", api_key="sk-t", timeout=5)
         if name == "prov" else None,
-        cloud_models={"prov/mdl-x": object()})
+        cloud_models=_reg,
+        # PR2: _probe_native 查表走 resolve_cloud_model（键 ∪ model_id 双匹配）
+        resolve_cloud_model=lambda p, m, _reg=_reg: _reg.get(f"{p}/{m}"))
     return pm, model_obj
 
 
@@ -550,7 +553,8 @@ def _fake_pm_for_direct():
         resolve_route=lambda m, local: "cloud:prov",
         get_provider_config=lambda n: types.SimpleNamespace(
             openai_base="https://api.x.test/v1", api_key="sk-t", timeout=5),
-        resolve_cloud_model=lambda p, m: object())
+        resolve_cloud_model=lambda p, m: object(),
+        alias_target=lambda m: None)  # PR2: 直连分支别名解析面（非别名基线）
     logs = []
     pm.logger = types.SimpleNamespace(log=logs.append)
     pm.model_to_service = lambda m: None
