@@ -3174,6 +3174,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 pm.cloud.secrets.write(env_var, new_api_key)
                 touched_env[env_var] = os.environ.get(env_var)
                 os.environ[env_var] = new_api_key
+                # 内存=已解析明文（与 POST add 路径契约一致，验收发现：
+                # 引用字面量会让 forward 发出 Bearer ${VAR}）
+                cfg.api_key = new_api_key
         except Exception as e:
             pm.cloud.providers[name] = backup  # 内存回滚（磁盘未动）
             for var, old in touched_env.items():

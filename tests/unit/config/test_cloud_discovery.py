@@ -1277,3 +1277,18 @@ class TestProviderEditFields:
         assert sm.has("IFF_TEST_KS_B") is False
         assert sm.has("IFF_TEST_KS_C") is False
         assert sm.has("IFF_TEST_KS_MISSING") is False
+
+    def test_load_resolves_key_reference_from_env(self, tmp_path, monkeypatch):
+        """重启/重载后内存 api_key = 已解析明文（_load_config 文本级 ${VAR}
+        展开）——与 POST add 路径契约一致，forward/探针/发现不发字面量 ${VAR}；
+        显式 key_env_var 保留（凭证来源标注）。"""
+        monkeypatch.setenv("IFF_TEST_RES_KEY", "sk-resolved-value")
+        p = tmp_path / "cloud.yaml"
+        _write_yaml(p, {"providers": {
+            "prov-a": {"openai_base": "http://a", "api_key": "${IFF_TEST_RES_KEY}",
+                       "key_env_var": "IFF_TEST_RES_KEY"},
+        }})
+        cd = CloudDiscovery(p)
+        cfg = cd.providers["prov-a"]
+        assert cfg.api_key == "sk-resolved-value", cfg.api_key
+        assert cfg.key_env_var == "IFF_TEST_RES_KEY"

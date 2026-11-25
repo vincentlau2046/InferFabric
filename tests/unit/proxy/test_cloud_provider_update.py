@@ -349,6 +349,27 @@ class TestCredentialEditGate:
         finally:
             _stop_upstream(srv)
 
+    def test_replace_memory_key_resolved_not_literal(self, tmp_path, monkeypatch):
+        """验收发现（2026-11-25）：replace 后内存存引用字面量 → 转发发出
+        Bearer ${VAR}。契约（test_post_provider_key_expand.py）：内存=已解析明文。"""
+        monkeypatch.delenv("IFF_TEST_UPD_KEY", raising=False)
+        up, base, srv = _mk_upstream()
+        try:
+            cd, _p = _mk_cd(tmp_path, {"prov-a": {"openai_base": base,
+                                                  "key_env_var": "IFF_TEST_UPD_KEY"}})
+            cd.secrets.write("IFF_TEST_UPD_KEY", "sk-old-value")
+            sent = self._post(cd, {"name": "prov-a",
+                                   "expected_config_fingerprint": cd.config_fingerprint(),
+                                   "api_key": "sk-new-value", "key_action": "replace",
+                                   "probe_model": "test-model"})
+            assert sent[0][1] == 200, sent
+            cfg = cd.providers["prov-a"]
+            assert cfg.api_key == "sk-new-value", cfg.api_key  # 非字面量 ${...}
+            assert _os.environ["IFF_TEST_UPD_KEY"] == "sk-new-value"
+        finally:
+            _os.environ.pop("IFF_TEST_UPD_KEY", None)
+            _stop_upstream(srv)
+
 
 # ── Task 4: 停用影响预览 + enabled 切换 ──────────────────────────
 
