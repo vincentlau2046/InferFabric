@@ -41,7 +41,7 @@ def test_security_js_consumes_full_surface():
         assert endpoint in src, f"missing endpoint: {endpoint}"
     assert "UI.adminHeaders" in src
     assert "tabRenderers['tab-security']" in src
-    assert "UI.confirm" in src          # 吊销确认（最后一把未吊销 key 有警告）
+    assert "UI.confirm" in src          # 吊销确认（最后一把有效 key 有警告；吊销即删除）
 
 
 def test_security_js_one_time_reveal_hygiene():

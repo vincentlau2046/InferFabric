@@ -131,7 +131,7 @@
           : '<span class="badge warn">实际鉴权：未生效</span>';
       }
       html += policyBadge + ' ' + enforcedBadge
-           +  '<p class="if-field-hint">未吊销密钥：' + s.key_count + ' 把 — 在「鉴权」页管理</p>';
+           +  '<p class="if-field-hint">有效密钥：' + s.key_count + ' 把 — 在「鉴权」页管理</p>';
       // 动作按钮按 policy 渲染（review F3：off 态必须能再开启）
       var buttons = '';
       if (s.policy !== 'all') {
@@ -143,7 +143,7 @@
       html += '<div class="if-grid" style="margin-top:12px">' + buttons + '</div>';
       if (s.policy !== 'all') {
         html += '<p class="if-field-hint">开启后所有客户端请求需携带 API key（未携带将 401）。'
-             +  (s.key_count === 0 ? '当前没有未吊销 key — 请先在「鉴权」页创建替换 key。' : '')
+             +  (s.key_count === 0 ? '当前没有有效 key — 请先在「鉴权」页创建替换 key。' : '')
              +  '</p>';
       }
       if (s.policy !== 'off') {
@@ -208,10 +208,10 @@
 
   /* ── 动作（window 导出：事件委托与面板测试共用同一入口） ── */
   function doEnable(enforce) {
-    // 全吊销 ≠ 首次启用（security.js 同款守卫）：库在但无未吊销 key 时，
+    // 全吊销 ≠ 首次启用（security.js 同款守卫）：库在但无有效 key 时，
     // 开启会拒绝全体客户端 — 先引导建替换 key
     if (enforce && _status && _status.active && _status.key_count === 0) {
-      UI.toast('密钥库已初始化但没有未吊销 key — 请先在「鉴权」页创建替换 key，再开启鉴权', 'error');
+      UI.toast('密钥库已初始化但没有有效 key — 请先在「鉴权」页创建替换 key，再开启鉴权', 'error');
       return;
     }
     var gen = _gen;

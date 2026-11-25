@@ -2173,12 +2173,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if isinstance(auth, SecurityAuth):
             policy = auth.store.get_policy()
             enforced = policy == "all" or auth.legacy.enabled
+            # issue #48：吊销即硬删 — 列表只含有效 key（无 revoked 字段）
             keys = [{"id": k.get("id"), "name": k.get("name"),
-                     "created_at": k.get("created_at"),
-                     "revoked": k.get("revoked_at") is not None}
+                     "created_at": k.get("created_at")}
                     for k in auth.store.list_keys()]
             self._send_json({"active": True, "policy": policy, "enforced": enforced,
-                             "key_count": sum(1 for k in keys if not k["revoked"]),
+                             "key_count": len(keys),
                              "password_set": password_set(auth.store),
                              "keys": keys})
         else:

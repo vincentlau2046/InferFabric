@@ -36,6 +36,17 @@ class KeyStore:
                 self.path.unlink(missing_ok=True)
                 raise
         self.validate()
+        self._purge_revoked()
+
+    def _purge_revoked(self):
+        """issue #48：吊销即硬删 — 打开时清除存量 revoked 行（升级迁移，幂等）。
+
+        列表语义=「只保留有效 key」：任何进程（网关/CLI/评审工具）首次打开
+        升级前的库，都会把历史 revoked 行物理删除；此后 revoke 直接删行，
+        不再产生 revoked_at 非空行。revoked_at 列保留仅为 schema 兼容。
+        """
+        with self._db() as db:
+            db.execute('DELETE FROM api_keys WHERE revoked_at IS NOT NULL')
 
     @contextmanager
     def _db(self):
@@ -102,9 +113,9 @@ class KeyStore:
             return [self._metadata(row) for row in db.execute('SELECT * FROM api_keys ORDER BY created_at,id')]
 
     def revoke_key(self, key_id):
+        """吊销即硬删（issue #48）：行物理删除，名字 UNIQUE 释放可重建。"""
         with self._db() as db:
-            r = db.execute('UPDATE api_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?',
-                           (self._now(), key_id))
+            r = db.execute('DELETE FROM api_keys WHERE id=?', (key_id,))
             if not r.rowcount:
                 raise KeyError('unknown key id')
 

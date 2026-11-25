@@ -309,7 +309,7 @@ class TestInferenceAuthToggle:
         assert not any(c["url"] == "/admin/security/enable" for c in out["calls"])
 
     def test_zero_keys_blocks_enable(self, run_panel):
-        # review F3 附带：库在但只剩已吊销 key → 开启前拦截（security.js 同款守卫）
+        # review F3 附带：库在但有效 key 数为 0 → 开启前拦截（security.js 同款守卫）
         zero_keys = {"active": True, "policy": "off", "enforced": False,
                      "key_count": 0, "keys": [], "password_set": True}
         out = run_panel(

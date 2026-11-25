@@ -9,8 +9,8 @@
  * 行为契约（评审 2026-11-19 / Review Focus 2）：
  *   - 三态分立：active=密钥存储可用；policy=新策略（all/off）；
  *     enforced=实际鉴权。policy 'off' 是迁移宽限，绝不渲染成“无需鉴权”。
- *   - 全吊销 ≠ 首次启用：已初始化且未吊销数为 0 时，开启前先引导创建替换 key；
- *     从未初始化走后端首次发 key 流程。最后一把未吊销 key 的吊销有警告。
+ *   - 全吊销 ≠ 首次启用：已初始化且有效 key 数为 0 时，开启前先引导创建替换 key；
+ *     从未初始化走后端首次发 key 流程。最后一把有效 key 的吊销有警告（吊销即删除）。
  *   - 策略变更后重读 status，不凭 /enable 返回值推断实际鉴权。
  *   - 明文一次性回显：textContent 渲染、仅主动复制；不写浏览器存储/全局
  *     状态/toast/URL；关闭、Esc、切页、迟到响应均不留明文在 DOM。
@@ -112,10 +112,9 @@
         '（明文仅回显一次）。</p>' + enforcedBadge;
     } else {
       html = policyLabel(s.policy) + ' ' + enforcedBadge +
-        '<p class="if-field-hint">未吊销密钥：' + s.key_count + ' 把</p>';
+        '<p class="if-field-hint">有效密钥：' + s.key_count + ' 把</p>';
       var rows = (s.keys || []).map(function (k) {
-        var act = k.revoked ? '<span class="badge">已吊销</span>' :
-          '<button type="button" class="btn btn-danger btn-sm" data-action="sec-revoke"' +
+        var act = '<button type="button" class="btn btn-danger btn-sm" data-action="sec-revoke"' +
           ' data-kid="' + escHtml(k.id) + '"' +
           ' data-kname="' + escHtml(k.name || '') + '">' + UI.icon('trash', 14) + '吊销</button>';
         return '<tr><td class="mono">' + escHtml(k.id) + '</td>' +
@@ -137,7 +136,7 @@
     var hint = $('secEnableHint');
     if (!hint || !_status) return;
     if (_status.active && _status.key_count === 0) {
-      hint.textContent = '密钥库已初始化但没有未吊销 key — 请先创建一个替换 key，再开启鉴权（否则客户端将全部被拒）。';
+      hint.textContent = '密钥库已初始化但没有有效 key — 请先创建一个替换 key，再开启鉴权（否则客户端将全部被拒）。';
     } else if (!_status.active) {
       hint.textContent = '开启后所有客户端请求需携带 API key（明文仅首次回显一次）。';
     } else {
@@ -189,7 +188,7 @@
     UI.confirm({
       title: '吊销 API key' + (kname ? ' ' + kname : ''),
       body: lastActive
-        ? '这是最后一把未吊销 key — 吊销后没有任何可用 key，所有客户端请求将被拒绝。请先创建替换 key 再吊销。'
+        ? '这是最后一把有效 key — 吊销后没有任何可用 key，所有客户端请求将被拒绝。请先创建替换 key 再吊销。'
         : '吊销后使用该 key 的客户端将立即被拒绝（policy off 下已注册凭证的吊销仍生效）。',
       danger: true,
       onOk: function () {
@@ -198,7 +197,7 @@
             if (!err.unauthorized) UI.toast('吊销失败：' + err.message, 'error');
             return;
           }
-          UI.toast('已吊销', 'ok');
+          UI.toast('已吊销并移除', 'ok');
           loadStatus();
         });
       },
