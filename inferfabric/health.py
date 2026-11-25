@@ -9,6 +9,9 @@ import time
 import signal
 import logging
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -83,14 +86,41 @@ def wait_gpu_free(timeout: int = GPU_FREE_TIMEOUT,
 
 # ─── HTTP Health ─────────────────────────────────────────────────
 
+# issue #56: 系统代理（如 FlClash :7890）开启且 bypass 不含 localhost 时，
+# urllib 会把 `http://localhost:<port>` 的健康检查转发到远端代理节点 ——
+# 每个死模型 3s×3 全超时，snapshot 冷路径 17-28s。本机目标一律直连。
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+_local_opener_instance = None
+
+
+def _is_local_url(url: str) -> bool:
+    """True for loopback targets (localhost / 127.0.0.1 / ::1)."""
+    try:
+        host = urllib.parse.urlsplit(url).hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in _LOCAL_HOSTS
+
+
+def _local_opener():
+    """No-proxy opener singleton — local health checks never traverse a proxy."""
+    global _local_opener_instance
+    if _local_opener_instance is None:
+        _local_opener_instance = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+    return _local_opener_instance
+
+
 def check_http_status(url: str, timeout: int = 3, retries: int = 3) -> str:
     """Check HTTP endpoint: '✅' (200), '⏳' (503 loading), '❌' (unreachable/error).
-    Retries on transient failure to avoid false negatives from GC pauses / load spikes."""
-    import urllib.request
-    import urllib.error
+    Retries on transient failure to avoid false negatives from GC pauses / load spikes.
+    Local (loopback) URLs bypass system/env proxies (issue #56)."""
+    opener = _local_opener() if _is_local_url(url) else None
     for attempt in range(retries):
         try:
-            resp = urllib.request.urlopen(url, timeout=timeout)
+            resp = (opener.open(url, timeout=timeout) if opener is not None
+                    else urllib.request.urlopen(url, timeout=timeout))
             try:
                 if resp.status == 200:
                     return "✅"
@@ -109,14 +139,15 @@ def check_http_status(url: str, timeout: int = 3, retries: int = 3) -> str:
 
 def wait_http(url: str, timeout: int = 300) -> bool:
     """Wait for HTTP endpoint to return 200. Respects 503 as transient (loading).
-    Returns True if healthy within timeout, False otherwise."""
-    import urllib.request
-    import urllib.error
+    Returns True if healthy within timeout, False otherwise.
+    Local (loopback) URLs bypass system/env proxies (issue #56)."""
     deadline = time.time() + timeout
     consecutive_non_503_errors = 0
+    opener = _local_opener() if _is_local_url(url) else None
     while time.time() < deadline:
         try:
-            resp = urllib.request.urlopen(url, timeout=5)
+            resp = (opener.open(url, timeout=5) if opener is not None
+                    else urllib.request.urlopen(url, timeout=5))
             try:
                 if resp.status == 200:
                     return True
