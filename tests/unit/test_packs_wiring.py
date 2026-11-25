@@ -161,6 +161,42 @@ def test_uninstall_full_flow_hits_production_callbacks(pack_manager, tmp_path):
     assert not pack_dir.exists()                      # 零残留
 
 
+def test_attach_reconciles_persisted_ownership_records_issue51(
+        tmp_path, monkeypatch):
+    """issue #51 真实 attach 路径回归：生产 state.json 已含 ownership 段时，
+    PackManager 构造（reconcile_on_boot → store.all() → PackRecord(**d)）
+    与 attach_pack_uninstaller 全链必须成功。
+
+    2026-11-21 生产实锤：磁盘记录含 ownership 而运行代码为旧 schema →
+    attach 阶段 TypeError，卸载 API 整体 404（fail-closed，网关其余功能
+    不受影响）。本测试以持久化记录 + 真实构造路径复现该现场（非
+    mock-only）：PackRecord 字段与持久化形状再漂移时在此红灯。
+    """
+    import json
+    from inferfabric.proxy import pack_handlers
+    reset_pack_manager()
+    (tmp_path / "packs" / PID / "1.0.0").mkdir(parents=True)  # reconcile 不改判
+    (tmp_path / "packs" / "state.json").write_text(json.dumps({
+        PID: {"pack_id": PID, "pack_version": "1.0.0", "status": "installed",
+              "stage": "installed", "error": None, "sandbox_degraded": False,
+              "installed_at": 1,
+              "ownership": {"marker_version": 1, "role": "owned",
+                            "gpu_devices": ""}}}))
+    mgr = PackManager(root=tmp_path / "packs",
+                      models_d=tmp_path / "models.d",
+                      catalog_path=_catalog(tmp_path))
+    monkeypatch.setattr(pack_handlers, "_manager", mgr)
+    pm = FakePM()
+    attach_pack_uninstaller(pm)
+    assert pm.pack_manager is mgr
+    assert mgr.store.get(PID).ownership["role"] == "owned"
+    code, payload = mgr.preview_uninstall(PID)
+    assert code == 200
+    assert payload == {"affected_pools": [
+        {"pool": "fast", "candidate_id": "c1", "model_name": MODEL_ID}]}
+    reset_pack_manager()
+
+
 def test_is_alive_reads_active_services(pack_manager):
     # 运行中（active_services 交集非空）→ drain 分支触发 stop
     pm = FakePM()
