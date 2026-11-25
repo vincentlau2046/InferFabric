@@ -3040,14 +3040,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """
         body = self._read_body() or {}
         name = body.get("name") or ""
+        # ── CAS 对磁盘现算指纹（终审 C3）：缓存在两次 load/save 之间对外部
+        # 手改全盲。缓存≠磁盘先 reload 拉入外部修改，再以磁盘值判定 ——
+        # 绝不以旧内存视图覆盖磁盘上的新设置（spec §2）。
+        disk_fp = pm.cloud.disk_fingerprint()
+        if pm.cloud.config_fingerprint() != disk_fp:
+            pm.cloud.reload()
+        if (body.get("expected_config_fingerprint") or "") != disk_fp:
+            self._send_json({"error": "config_conflict",
+                             "config_fingerprint": disk_fp}, status=409)
+            return
         cfg = pm.cloud.providers.get(name)
         if cfg is None:
             self._send_json({"error": "provider_not_found"}, status=404)
-            return
-        current_fp = pm.cloud.config_fingerprint()
-        if (body.get("expected_config_fingerprint") or "") != current_fp:
-            self._send_json({"error": "config_conflict",
-                             "config_fingerprint": current_fp}, status=409)
             return
 
         # ── 凭证/端点意图解析 ─────────────────────────────────────
@@ -3065,6 +3070,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                              "detail": "api_key 仅可随 key_action=replace 提交"}, status=400)
             return
 
+        # ── 字段校验前置（终审 I2）：类型错误 400 字段级，不落进 apply 的
+        # 500 save_failed 兜底；布尔只收 JSON 布尔，拒字符串/数字 ──
+        new_timeout = new_interval = None
+        if body.get("timeout") is not None:
+            try:
+                new_timeout = int(body["timeout"])
+            except (TypeError, ValueError):
+                self._send_json({"error": "invalid_field", "field": "timeout",
+                                 "detail": "timeout 须为整数（秒）"}, status=400)
+                return
+        if body.get("discovery_interval") is not None:
+            try:
+                new_interval = int(body["discovery_interval"])
+            except (TypeError, ValueError):
+                self._send_json({"error": "invalid_field", "field": "discovery_interval",
+                                 "detail": "discovery_interval 须为整数（秒）"}, status=400)
+                return
+        for _flag in ("enabled", "discovery_enabled"):
+            if body.get(_flag) is not None and not isinstance(body[_flag], bool):
+                self._send_json({"error": "invalid_field", "field": _flag,
+                                 "detail": f"{_flag} 须为布尔值"}, status=400)
+                return
+
         def _dest(url: str):
             u = urlparse(url or "")
             scheme = u.scheme or "https"
@@ -3076,8 +3104,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         new_anthropic = str(body["anthropic_base"]).strip() \
             if body.get("anthropic_base") is not None else (cfg.anthropic_base or "")
         changed_dests = []
+        changed_bases = []
         for proto, old_b, new_b in (("openai", cfg.openai_base, new_openai),
                                     ("anthropic", cfg.anthropic_base, new_anthropic)):
+            if new_b and new_b != (old_b or ""):
+                # I1: 任意 base 变化（含仅路径）都须探针 —— 打错路径不该静默上线
+                changed_bases.append(proto)
             if new_b and _dest(new_b) != _dest(old_b):
                 changed_dests.append(proto)
 
@@ -3100,7 +3132,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # ── 探针门禁（零变更不联网；改动先探测后落盘）─────────────
         cred_changed = key_action == "replace" or (key_action == "none" and bool(cfg.api_key))
-        if cred_changed or changed_dests:
+        # C2: 门禁看拟应用 enabled —— 停用提供方「启用+换Key」同样必须探针；
+        # 当前已启用（即使本次请求同时停用）仍探，验证通过的新值留档待复用
+        proposed_enabled = bool(body["enabled"]) if body.get("enabled") is not None \
+            else cfg.enabled
+        probe_active = proposed_enabled or cfg.enabled
+        if (cred_changed or changed_bases) and probe_active:
             probe_model = (body.get("probe_model") or "").strip() \
                 or (cfg.enabled_models[0] if cfg.enabled_models else "")
             if not probe_model:
@@ -3113,8 +3150,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 cur_key = os.environ.get(cur_key[2:-1], "")
             for proto in ("openai", "anthropic"):
                 new_b = new_openai if proto == "openai" else new_anthropic
-                if not new_b or not cfg.enabled:
-                    continue  # 未配置该协议 / 提供方停用 → 不探
+                if not new_b:
+                    continue  # 未配置该协议 → 不探
                 key_for_probe = new_api_key if key_action == "replace" \
                     else ("" if key_action == "none" else cur_key)
                 valid, reason, safe_ips = self._validate_cloud_test_url(new_b, pm)
@@ -3141,11 +3178,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if body.get("display_name") is not None:
                 cfg.display_name = str(body["display_name"])
             if body.get("timeout") is not None:
-                cfg.timeout = int(body["timeout"])
+                cfg.timeout = new_timeout
             if body.get("discovery_enabled") is not None:
-                cfg.discovery_enabled = bool(body["discovery_enabled"])
+                cfg.discovery_enabled = body["discovery_enabled"]
             if body.get("discovery_interval") is not None:
-                cfg.discovery_interval = int(body["discovery_interval"])
+                cfg.discovery_interval = new_interval
             if body.get("include_pattern") is not None:
                 cfg.include_pattern = str(body["include_pattern"])
             if body.get("openai_base") is not None:
@@ -3163,11 +3200,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             elif key_action == "none":
                 cfg.api_key = ""
             pm.cloud.save_config()
-            if enabled_changed:
-                # 停用/启用即时生效（不触探针）：reload 按 7.9.1 严格重建
-                # floor —— disabled provider 的注册表条目即时撤销；重新启用
-                # 即时恢复 specs ∪ 白名单。旧发现任务不复活停用项目（spec §2）。
-                pm.cloud.reload()
             if key_action == "replace":
                 # env 覆盖 setdefault 注入残留（受管优先）— 否则「改了文件」
                 # 不等于「出站换了 Key」
@@ -3177,6 +3209,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # 内存=已解析明文（与 POST add 路径契约一致，验收发现：
                 # 引用字面量会让 forward 发出 Bearer ${VAR}）
                 cfg.api_key = new_api_key
+            if enabled_changed:
+                # 停用/启用即时生效（不触探针）：reload 按 7.9.1 严格重建
+                # floor —— disabled provider 的注册表条目即时撤销；重新启用
+                # 即时恢复 specs ∪ 白名单。旧发现任务不复活停用项目（spec §2）。
+                # 终审 C1：reload 必须在 env 覆盖之后 —— 重建对象经 ${VAR}
+                # 文本展开取 env，先 reload 会把旧 Key 展开进 live 内存，
+                # 而明文只写到被 reload 抛弃的旧对象上。
+                pm.cloud.reload()
         except Exception as e:
             pm.cloud.providers[name] = backup  # 内存回滚（磁盘未动）
             for var, old in touched_env.items():
@@ -3192,9 +3232,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_cloud_providers(self, pm):
         """GET/POST/DELETE /admin/cloud/providers — 列出、添加或删除 provider。"""
         if self.command == "GET":
-            providers = []
+            # 终审 C3: GET 以磁盘现算指纹自愈 —— 缓存落后（外部手改）即
+            # reload，否则仪表盘 409 刷新流会拿回同样的陈旧指纹而死循环
+            _disk_fp = pm.cloud.disk_fingerprint()
+            if pm.cloud.config_fingerprint() != _disk_fp:
+                pm.cloud.reload()
+            config_fingerprint = pm.cloud.disk_fingerprint()  # PR1: 编辑 CAS 基础
             all_models = pm.cloud.cloud_models  # 快照一次（含短名 + provider/ 前缀双键）
-            config_fingerprint = pm.cloud.config_fingerprint()  # PR1: 编辑 CAS 基础
+            providers = []
             for name, cfg in pm.cloud.providers.items():
                 env_set = bool(os.environ.get(cfg.key_env_var, "")) if cfg.key_env_var else False
                 # PR1: key_source 三态 — managed（secrets.env 托管）/

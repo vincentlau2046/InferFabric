@@ -466,3 +466,141 @@ class TestImpactAndEnabled:
                        for m in cd.cloud_models.values())
         finally:
             _stop_upstream(srv)
+
+
+# ── 终审修复轮：C1/C2/C3/I1/I2（每例先 RED）────────────────────────
+
+class TestReviewFixPass:
+    def _post(self, cd, body):
+        h, sent = _mk_handler(cd, command="POST", body=json.dumps(body).encode())
+        h._handle_cloud_provider_update(SimpleNamespace(cloud=cd))
+        return sent
+
+    def test_enabled_toggle_plus_replace_updates_live_memory(self, tmp_path, monkeypatch):
+        """C1: enabled 变更触发 reload 重建对象后，live 内存必须持新明文 Key。
+
+        旧序（reload 在 env 覆盖前）会把展开出的旧 Key 留在重建对象上，
+        而明文写到已被 reload 抛弃的旧对象 —— 出站继续发旧 Key。
+        """
+        cd, _p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a",
+                                              "key_env_var": "IFF_TEST_GS_A",
+                                              "enabled_models": ["m1"]}},
+                        secrets_vars=["IFF_TEST_GS_A"], monkeypatch=monkeypatch)
+        up, base, srv = _mk_upstream()
+        try:
+            fp = cd.config_fingerprint()
+            sent = self._post(cd, {"name": "prov-a", "expected_config_fingerprint": fp,
+                                   "enabled": False, "key_action": "replace",
+                                   "api_key": "sk-brand-new", "openai_base": base,
+                                   "probe_model": "m1"})
+            assert sent[0][1] == 200, sent
+            assert cd.providers["prov-a"].api_key == "sk-brand-new", \
+                f"live api_key={cd.providers['prov-a'].api_key!r}"
+        finally:
+            _stop_upstream(srv)
+
+    def test_enable_plus_replace_probes_proposed_state(self, tmp_path, monkeypatch):
+        """C2: 探针门禁看拟应用 enabled —— 停用提供方「启用+换Key」必须先探针。"""
+        cd, _p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a",
+                                              "key_env_var": "IFF_TEST_GS_A",
+                                              "enabled": False,
+                                              "enabled_models": ["m1"]}},
+                        secrets_vars=["IFF_TEST_GS_A"], monkeypatch=monkeypatch)
+        up, base, srv = _mk_upstream()
+        try:
+            fp = cd.config_fingerprint()
+            sent = self._post(cd, {"name": "prov-a", "expected_config_fingerprint": fp,
+                                   "enabled": True, "key_action": "replace",
+                                   "api_key": "sk-brand-new", "openai_base": base,
+                                   "probe_model": "m1"})
+            assert sent[0][1] == 200, sent
+            assert len(up.REQS) >= 1, "停用提供方「启用+换Key」未发探针就上线"
+            assert cd.providers["prov-a"].api_key == "sk-brand-new"
+        finally:
+            _stop_upstream(srv)
+
+    def test_external_hand_edit_conflicts_with_disk_fingerprint(self, tmp_path):
+        """C3: CAS 对磁盘现算指纹 —— 运行期间外部手改 YAML 必 409 且不被覆盖。"""
+        cd, p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a"},
+                                  "prov-b": {"openai_base": "http://b"}})
+        stale_fp = cd.config_fingerprint()
+        data = yaml.safe_load(p.read_text())
+        data["providers"]["prov-b"]["timeout"] = 999
+        _write_yaml(p, data)
+        sent = self._post(cd, {"name": "prov-a",
+                               "expected_config_fingerprint": stale_fp,
+                               "display_name": "X"})
+        assert sent[0][1] == 409, sent
+        assert sent[0][0]["error"] == "config_conflict"
+        assert sent[0][0]["config_fingerprint"] != stale_fp  # 带磁盘现算指纹
+        on_disk = yaml.safe_load(p.read_text())
+        assert on_disk["providers"]["prov-b"]["timeout"] == 999  # 手改未被覆盖
+
+    def test_retry_with_disk_fp_applies_and_preserves_external_edit(self, tmp_path):
+        """C3 续：409 后携磁盘指纹重试 → 外部手改先入内存，应用不覆盖它。"""
+        cd, p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a"},
+                                  "prov-b": {"openai_base": "http://b"}})
+        data = yaml.safe_load(p.read_text())
+        data["providers"]["prov-b"]["timeout"] = 999
+        _write_yaml(p, data)
+        first = self._post(cd, {"name": "prov-a",
+                                "expected_config_fingerprint": "stale000000000000",
+                                "display_name": "X"})
+        assert first[0][1] == 409, first
+        disk_fp = first[0][0]["config_fingerprint"]
+        second = self._post(cd, {"name": "prov-a",
+                                 "expected_config_fingerprint": disk_fp,
+                                 "display_name": "X"})
+        assert second[0][1] == 200, second
+        on_disk = yaml.safe_load(p.read_text())
+        assert on_disk["providers"]["prov-b"]["timeout"] == 999
+        assert on_disk["providers"]["prov-a"]["display_name"] == "X"
+
+    def test_get_refreshes_stale_view_after_external_edit(self, tmp_path):
+        """C3 续：GET 在缓存落后磁盘时自愈（仪表盘 409 刷新流可恢复）。"""
+        cd, p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a"}})
+        stale_fp = cd.config_fingerprint()
+        data = yaml.safe_load(p.read_text())
+        data["providers"]["prov-a"]["display_name"] = "手改"
+        _write_yaml(p, data)
+        h, sent = _mk_handler(cd)
+        h._handle_cloud_providers(SimpleNamespace(cloud=cd))
+        assert sent[0][1] == 200
+        by_name = {pr["name"]: pr for pr in sent[0][0]["providers"]}
+        assert by_name["prov-a"]["config_fingerprint"] != stale_fp
+        assert by_name["prov-a"]["display_name"] == "手改"  # 外部手改可见
+
+    def test_path_only_base_change_triggers_probe(self, tmp_path, monkeypatch):
+        """I1: base 任意变化（含仅路径）都触发探针；dest 门禁范围不变。"""
+        cd, _p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a",
+                                              "key_env_var": "IFF_TEST_GS_A",
+                                              "enabled_models": ["m1"]}},
+                        secrets_vars=["IFF_TEST_GS_A"], monkeypatch=monkeypatch)
+        up, base, srv = _mk_upstream()
+        try:
+            # 先把 provider 指到 mock 上游（经一次合法编辑），再仅改路径
+            fp = cd.config_fingerprint()
+            sent = self._post(cd, {"name": "prov-a", "expected_config_fingerprint": fp,
+                                   "key_action": "replace", "api_key": "sk-once",
+                                   "openai_base": base, "probe_model": "m1"})
+            assert sent[0][1] == 200, sent
+            up.REQS.clear()
+            fp2 = cd.config_fingerprint()
+            sent2 = self._post(cd, {"name": "prov-a",
+                                    "expected_config_fingerprint": fp2,
+                                    "openai_base": base + "/v2",
+                                    "key_action": "keep", "probe_model": "m1"})
+            assert sent2[0][1] == 200, sent2
+            assert len(up.REQS) >= 1, "仅路径变化未触发探针"
+        finally:
+            _stop_upstream(srv)
+
+    def test_invalid_timeout_returns_400_field_error(self, tmp_path):
+        """I2: 非整数 timeout → 400 字段错误，而非 500 save_failed。"""
+        cd, _p = _mk_cd(tmp_path, {"prov-a": {"openai_base": "http://a"}})
+        fp = cd.config_fingerprint()
+        sent = self._post(cd, {"name": "prov-a", "expected_config_fingerprint": fp,
+                               "timeout": "abc"})
+        assert sent[0][1] == 400, sent
+        assert sent[0][0]["error"] != "save_failed"
+        assert "timeout" in json.dumps(sent[0][0])

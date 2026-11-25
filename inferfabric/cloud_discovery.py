@@ -724,6 +724,15 @@ class CloudDiscovery:
         """
         return self._config_fingerprint
 
+    def disk_fingerprint(self) -> str:
+        """磁盘现算指纹（绕过缓存）。
+
+        终审 C3：缓存在两次 load/save 之间对外部手改全盲 —— 管理端点
+        以本值做 CAS 判定与视图自愈（缓存≠磁盘时 reload 拉入外部修改），
+        不以旧内存视图覆盖磁盘上的新设置（spec §2）。
+        """
+        return self._compute_fingerprint()
+
     def _compute_fingerprint(self) -> str:
         if not self._config_path or not self._config_path.exists():
             return "none"
