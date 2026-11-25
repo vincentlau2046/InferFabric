@@ -356,6 +356,7 @@ _GET_ROUTES = {
     "/admin/security/status":  _admin(lambda h, pm: h._handle_security_status(pm)),
     "/admin/connect/status":    lambda h, pm: handle_connect_status(h, pm),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
+    "/admin/cloud/provider-impact": _admin(lambda h, pm: h._handle_cloud_provider_impact(pm)),
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
@@ -2994,6 +2995,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         ok = all(r["pass"] for r in results)
         self._send_json({"provider": name, "key_set": key_set, "results": results, "ok": ok})
 
+    def _handle_cloud_provider_impact(self, pm):
+        """GET /admin/cloud/provider-impact?name= — 停用/关闭提供方的影响预览。
+
+        返回 {name, models: [{model_id, pools: [...]}], routable_count}：
+        models 按 provider 归并池引用（编辑前端在关闭/换址前展示受影响面）。
+        """
+        from urllib.parse import parse_qs
+        qs = parse_qs(urlparse(self.path).query)
+        name = (qs.get("name") or [""])[0].strip()
+        if pm.cloud.providers.get(name) is None:
+            self._send_json({"error": "provider_not_found"}, status=404)
+            return
+        pools_by_model = {}
+        for pool_name, ps in pm.pool_registry.snapshot().pools.items():
+            for rc in ps.candidates:
+                cand = rc.candidate
+                if cand.kind == "cloud" and cand.provider == name:
+                    pools_by_model.setdefault(cand.model_id, set()).add(pool_name)
+        routable = sum(1 for k, m in pm.cloud.cloud_models.items()
+                       if "/" not in k and m.provider == name)
+        self._send_json({
+            "name": name,
+            "models": [{"model_id": mid, "pools": sorted(pools)}
+                       for mid, pools in sorted(pools_by_model.items())],
+            "routable_count": routable,
+        })
+
     def _handle_cloud_provider_update(self, pm):
         """POST /admin/cloud/provider-update — 原地编辑（指纹 CAS + 凭证门禁）。
 
@@ -3124,12 +3152,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 cfg.openai_base = str(body["openai_base"]).strip()
             if body.get("anthropic_base") is not None:
                 cfg.anthropic_base = str(body["anthropic_base"]).strip()
+            enabled_changed = False
+            if body.get("enabled") is not None:
+                new_enabled = bool(body["enabled"])
+                enabled_changed = new_enabled != cfg.enabled
+                cfg.enabled = new_enabled
             if key_action == "replace":
                 cfg.api_key = f"${{{env_var}}}"   # YAML 只存引用，明文只进 secrets.env
                 cfg.key_env_var = env_var
             elif key_action == "none":
                 cfg.api_key = ""
             pm.cloud.save_config()
+            if enabled_changed:
+                # 停用/启用即时生效（不触探针）：reload 按 7.9.1 严格重建
+                # floor —— disabled provider 的注册表条目即时撤销；重新启用
+                # 即时恢复 specs ∪ 白名单。旧发现任务不复活停用项目（spec §2）。
+                pm.cloud.reload()
             if key_action == "replace":
                 # env 覆盖 setdefault 注入残留（受管优先）— 否则「改了文件」
                 # 不等于「出站换了 Key」

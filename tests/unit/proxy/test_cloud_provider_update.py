@@ -348,3 +348,100 @@ class TestCredentialEditGate:
             assert up.REQS == []
         finally:
             _stop_upstream(srv)
+
+
+# ── Task 4: 停用影响预览 + enabled 切换 ──────────────────────────
+
+from inferfabric.model_pool.registry import PoolRegistry as _PoolRegistry
+
+
+class TestImpactAndEnabled:
+    def _post(self, cd, body):
+        h, sent = _mk_handler(cd, command="POST", body=json.dumps(body).encode())
+        h._handle_cloud_provider_update(SimpleNamespace(cloud=cd))
+        return sent
+
+    def _get_impact(self, cd, pm):
+        h, sent = _mk_handler(cd, command="GET")
+        h.path = "/admin/cloud/provider-impact?name=prov-a"
+        h._handle_cloud_provider_impact(pm)
+        return sent
+
+    def test_impact_lists_pools_referencing_provider(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        })
+        reg = _PoolRegistry(tmp_path / "model_pools.yaml", tmp_path / "evidence.json",
+                            known_providers=lambda: set(cd.providers))
+        reg.load()
+        reg.update({"schema_version": 1, "pools": {
+            "pool-x": {"enabled": True, "candidates": [
+                {"id": "c1", "priority": 1, "kind": "cloud",
+                 "provider": "prov-a", "model_id": "glm-5"}]},
+            "pool-y": {"enabled": True, "candidates": [
+                {"id": "c2", "priority": 1, "kind": "cloud",
+                 "provider": "prov-b", "model_id": "glm-5"}]},
+            "pool-z": {"enabled": True, "candidates": [
+                {"id": "c3", "priority": 1, "kind": "cloud",
+                 "provider": "prov-a", "model_id": "glm-5"}]},
+        }}, expected_revision=0)
+        sent = self._get_impact(cd, SimpleNamespace(cloud=cd, pool_registry=reg))
+        assert sent and sent[0][1] == 200
+        data = sent[0][0]
+        by_id = {m["model_id"]: m for m in data["models"]}
+        # 按 provider 归并：prov-a 的 glm-5 同时被 pool-x 与 pool-z 引用
+        assert sorted(by_id["glm-5"]["pools"]) == ["pool-x", "pool-z"]
+        assert data["routable_count"] == 1
+        # 未知 provider → 404
+        h2, sent2 = _mk_handler(cd, command="GET")
+        h2.path = "/admin/cloud/provider-impact?name=ghost"
+        h2._handle_cloud_provider_impact(SimpleNamespace(cloud=cd, pool_registry=reg))
+        assert sent2[0][1] == 404 and sent2[0][0]["error"] == "provider_not_found"
+
+    def test_disable_no_probe_required(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("IFF_TEST_UPD_KEY", raising=False)
+        up, base, srv = _mk_upstream()
+        try:
+            cd, p = _mk_cd(tmp_path, {"prov-a": {"openai_base": base,
+                                                 "key_env_var": "IFF_TEST_UPD_KEY",
+                                                 "enabled_models": ["glm-5"]}})
+            cd.secrets.write("IFF_TEST_UPD_KEY", "sk-old-value")
+            sent = self._post(cd, {"name": "prov-a",
+                                   "expected_config_fingerprint": cd.config_fingerprint(),
+                                   "enabled": False})
+            assert sent[0][1] == 200, sent
+            # 停用不触探针 — 上游零请求
+            assert up.REQS == []
+            assert cd.providers["prov-a"].enabled is False
+        finally:
+            _stop_upstream(srv)
+
+    def test_disable_persists_and_unregisters(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("IFF_TEST_UPD_KEY", raising=False)
+        up, base, srv = _mk_upstream()
+        try:
+            cd, p = _mk_cd(tmp_path, {"prov-a": {"openai_base": base,
+                                                 "key_env_var": "IFF_TEST_UPD_KEY",
+                                                 "enabled_models": ["glm-5"]}})
+            cd.secrets.write("IFF_TEST_UPD_KEY", "sk-old-value")
+            assert any(m.provider == "prov-a" for m in cd.cloud_models.values())
+            sent = self._post(cd, {"name": "prov-a",
+                                   "expected_config_fingerprint": cd.config_fingerprint(),
+                                   "enabled": False})
+            assert sent[0][1] == 200
+            # 注册表即时撤销（不等下一轮发现）
+            assert not any(m.provider == "prov-a" for m in cd.cloud_models.values())
+            # 磁盘持久：重载读回 enabled=false
+            cd2 = CloudDiscovery(p)
+            assert cd2.providers["prov-a"].enabled is False
+            assert not any(m.provider == "prov-a" for m in cd2.cloud_models.values())
+            # 重新启用（新指纹 CAS）：floor 即时恢复
+            sent2 = self._post(cd, {"name": "prov-a",
+                                    "expected_config_fingerprint": cd.config_fingerprint(),
+                                    "enabled": True})
+            assert sent2[0][1] == 200
+            assert any(m.provider == "prov-a" and m.model_id == "glm-5"
+                       for m in cd.cloud_models.values())
+        finally:
+            _stop_upstream(srv)
