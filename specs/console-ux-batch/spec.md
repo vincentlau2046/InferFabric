@@ -48,6 +48,16 @@
 - 重看验密：WS3 的逐次密码验证，密码是本页管理的那把控制台密码。
 - 忘记密码（UX 审视 ISSUE-04）：设置页密码卡提供恢复指引——终端 `iff keys recover`（明示**会作废全部 API key** 并重建）；reveal 验密失败的错误提示同带此指引。
 - 导航重组（`base.html:178-211`）：**监控移入「状态」组**（总览、监控）；异常并入「状态」组尾部（避免单条目组——此项为随附建议，用户可单独否决）；「可观测」组取消。tab id 与 `data-tab` 不变，`localStorage.iff_active_tab` 迁移逻辑不受影响。
+- **PR3 实施修订（2026-11-25 方案分析获用户批准，代码核实后）**：
+  - 首次设密（网页）：强制验证网关管理员凭证 — `X-Admin-Token` 对进程内 `_admin_token` **恒校验**（即便 admin auth 关闭；零摩擦回环默认不豁免设密这一步）；`security.db` 缺失时按 `iff keys init` 语义初始化（policy 'off'、**不建 key、不改策略**，marker 由 `build_auth` 落）；无凭证 → 走本机 `iff keys init`。端点 `POST /admin/security/console-password`（仅未设置时可用，已设置 409）。**不得借用** `/admin/security/enable` 路径（其会置 policy 'all' + 建首个 key，会让现有客户端突然 401）。
+  - 修改密码：控制台会话 + CSRF + Origin（`SecurityAdmin` 新 action，`POST /admin/keys/password`，复用既有 `Path=/admin/keys` 会话 cookie）+ 请求体携带旧密码（逐次验密原语，PR4 reveal 同源）；成功后旧会话随口令记录更新自动失效（`ConsoleAuth.validate` 比对记录原文，无需额外清理）。
+  - 忘记密码指引修正：**健康库优先 `iff keys set-password`**（保留全部 API key 与策略，`security/cli.py` 既有能力）；仅库损坏/确需全量重置才 `iff keys recover`（作废全部 key、新库强制 all）。原「recover 为默认指引」不成立。
+  - 状态展示：`GET /admin/security/status` 增 `password_set` 字段（只加字段，鉴权页契约向后兼容）。
+  - 导航：nav 9→10 项（设置入网关策略组，鉴权旁），既有 nav 钉测试同步更新。
+  - **授权体系审计修订（2026-11-25 用户反馈「装能力包竟没权限/找不到开权限入口，软件变死进程」后全面梳理）**：设置页定位收敛为**授权设置**——
+    - 本机控制台（回环）**零门槛是默认且不变的行为**：装包/部署/切模型/开设置永不过密码，不新增全站锁、不做登录页；页面卡体常驻边界说明（每次渲染重申）。
+    - 三卡结构：①本机零门槛边界说明 ②推理 API 鉴权卡（客户端 401 与否——用户主动开启的独立授权，开/关写前 UI.confirm，关=迁移宽限不删 key）③Key 保护密码卡（仅保护 API Key 敏感操作如 PR4 reveal，**不是控制台登录**）；远程管理开关本期不做（留待后续 PR 另行裁决）。
+    - 进入/退出/恢复路径显式化：首设表单带「无凭证 → 网关本机 `iff keys init`」；改密表单带「忘记密码 → `iff keys set-password`（保留全部 key）」；鉴权关闭不删除任何 key（可随时再开）。
 
 ## 5. 全局约束与非目标
 

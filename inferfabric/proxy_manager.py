@@ -51,6 +51,25 @@ HEALTH_CHECK_INTERVAL = int(os.environ.get("EDGE_HEALTH_CHECK", "60"))
 WATCHDOG_INTERVAL = 20
 
 
+def console_origins():
+    """Console origins for SecurityAdmin — shared by startup wiring and web
+    first-set (PR3 review I5: 首设必须先过与启动同源的校验，再落任何盘).
+
+    Default covers loopback (127.0.0.1 / localhost / [::1]); remote binds
+    require explicit all-HTTPS IFF_CONSOLE_ORIGINS — same rule the startup
+    path enforces (raises ValueError, startup aborts / first-set replies 400).
+    """
+    configured = os.environ.get("IFF_CONSOLE_ORIGINS", "")
+    origins = ([o.strip() for o in configured.split(",") if o.strip()] if configured else [
+        f"http://127.0.0.1:{PROXY_PORT}", f"http://localhost:{PROXY_PORT}",
+        f"http://[::1]:{PROXY_PORT}",
+    ])
+    if PROXY_HOST not in ("127.0.0.1", "localhost", "::1") and (
+            not configured or any(not o.startswith("https://") for o in origins)):
+        raise ValueError("Remote console requires explicit HTTPS IFF_CONSOLE_ORIGINS")
+    return origins
+
+
 class ProxyManager:
     """Manages model switching + request routing (v4.0: model-plugin)."""
 
@@ -65,14 +84,7 @@ class ProxyManager:
         self.security_admin = None
         if isinstance(self.auth, SecurityAuth):
             from inferfabric.security.admin import SecurityAdmin
-            configured = os.environ.get("IFF_CONSOLE_ORIGINS", "")
-            origins = [o.strip() for o in configured.split(",") if o.strip()] if configured else [
-                f"http://127.0.0.1:{PROXY_PORT}", f"http://localhost:{PROXY_PORT}",
-                f"http://[::1]:{PROXY_PORT}",
-            ]
-            if PROXY_HOST not in ("127.0.0.1", "localhost", "::1") and (
-                    not configured or any(not o.startswith("https://") for o in origins)):
-                raise ValueError("Remote console requires explicit HTTPS IFF_CONSOLE_ORIGINS")
+            origins = console_origins()
             self.security_admin = SecurityAdmin(self.auth.store, origins=origins)
         # v6.5: 客户端 Agent 识别引擎（agents.d 双目录；用户目录 ~/.inferfabric/agents.d）
         self.agent_registry = AgentRegistry(

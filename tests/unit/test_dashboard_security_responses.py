@@ -13,6 +13,7 @@ import pytest
 from inferfabric.proxy import handler as proxy_handler
 from inferfabric.proxy.auth import AuthManager
 from inferfabric.security.auth_facade import build_auth
+from inferfabric.security.console_auth import password_set
 
 
 class _FakeHandler:
@@ -21,9 +22,17 @@ class _FakeHandler:
     def __init__(self, body):
         self._body = body
         self.replies = []
+        self.headers = {"Host": "127.0.0.1:8999",
+                        "Origin": "http://127.0.0.1:8999"}
 
     def _read_body(self):
         return self._body
+
+    def _check_admin(self):
+        # 路由级 round-trip 测试直连 _admin 包装器：门在本套件恒放行
+        # （token 门语义已由 _TokenHandler 用例单独覆盖）
+        self._admin_token = getattr(self, "_admin_token", "")
+        return True
 
     def _send_json(self, data, status=200, extra_headers=None):
         self.replies.append((data, status, dict(extra_headers or {})))
@@ -145,3 +154,249 @@ def test_revoke_drops_key_count(env):
     h = _FakeHandler(None)
     proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
     assert h.last[0]["key_count"] == 1
+
+
+# ── status password_set 三态（PR3 WS4：设置页 Key 保护密码卡） ────
+
+def test_status_reports_password_set_field(env):
+    from inferfabric.security.console_auth import set_password
+
+    # 未初始化库（legacy auth）→ 恒 False，且不得 500
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["password_set"] is False
+
+    # 已初始化库、无口令（enable 不建口令）→ False
+    proxy_handler.ProxyHandler._handle_security_enable(
+        _FakeHandler({"enforce": True, "key_name": "qa"}), env.pm)
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["active"] is True and data["password_set"] is False
+
+    # 已设口令 → True
+    set_password(env.pm.auth.store, "a-console-password")
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["password_set"] is True
+
+
+# ── 首次网页设密（PR3 WS4：管理员凭证恒校验 + iff keys init 语义） ──
+
+class _TokenHandler(_FakeHandler):
+    """带请求头与已注入管理凭证的 fake（真实分发中 _check_admin 设 _admin_token）。"""
+
+    def __init__(self, body, token, headers=None):
+        super().__init__(body)
+        self.headers = {"Host": "127.0.0.1:8999", **(headers or {})}
+        self._admin_token = token
+
+
+_TOKEN_OK = {"X-Admin-Token": "secret-token"}
+
+
+def test_console_password_missing_token_rejected_and_no_store(env):
+    # Review Focus 1：拒绝的首次设密不得落任何盘
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token")
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 401
+    assert "iff keys init" in data["error"]
+    assert not (env.tmp / "security.db").exists()
+    assert not (env.tmp / "security.enabled").exists()
+
+
+def test_console_password_wrong_token_rejected_and_no_store(env):
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers={"X-Admin-Token": "nope"})
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 401 and "iff keys init" in data["error"]
+    assert not (env.tmp / "security.db").exists()
+    assert not (env.tmp / "security.enabled").exists()
+
+
+def test_console_password_unconfigured_token_rejected(env):
+    h = _TokenHandler({"new_password": "a-console-password"}, token="")
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    assert h.last[1] == 401
+    assert not (env.tmp / "security.db").exists()
+
+
+def test_console_password_first_set_provisions_store_without_policy_or_keys(env):
+    from inferfabric.security.auth_facade import SecurityAuth
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, headers = h.last
+    assert status == 200 and data == {"status": "ok", "provisioned": True}
+    assert headers.get("Cache-Control") == "no-store"
+    assert (env.tmp / "security.db").exists()
+    assert (env.tmp / "security.enabled").exists()
+    assert isinstance(env.pm.auth, SecurityAuth)
+    assert env.pm.security_admin is not None
+    assert env.pm.auth.store.get_policy() == "off"   # 不置 policy — enable 是用户的独立动作
+    assert env.pm.auth.store.list_keys() == []       # 不建 key
+    assert password_set(env.pm.auth.store) is True
+    assert b"a-console-password" not in (env.tmp / "security.db").read_bytes()
+
+
+def test_console_password_second_set_conflicts(env):
+    proxy_handler.ProxyHandler._handle_security_console_password(
+        _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK), env.pm)
+    h = _TokenHandler({"new_password": "another-long-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 409 and "已设置" in data["error"]
+
+
+def test_console_password_rejects_short(env):
+    h = _TokenHandler({"new_password": "short"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 400
+    assert not (env.tmp / "security.db").exists()   # 口令校验先于任何落盘
+
+
+def test_console_password_existing_store_without_password(env):
+    proxy_handler.ProxyHandler._handle_security_enable(
+        _FakeHandler({"enforce": True, "key_name": "qa"}), env.pm)
+    policy_before = env.pm.auth.store.get_policy()
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["provisioned"] is False
+    assert password_set(env.pm.auth.store) is True
+    assert env.pm.auth.store.get_policy() == policy_before   # enable 的 policy 不被动
+    assert env.pm.security_admin is not None
+
+
+# ── 评审修复（fresh-context 2026-11-25）──────────────────────────
+# C1: /admin/keys/password 必须在真实路由表可达（改密第二跳 404）
+# C2: 首设热接保留在役 legacy manager（enforced 态 + reloader 身份）
+# I5: origins 校验先于任何落盘（与启动同源，含 [::1]）
+# I9: 非对象 JSON 体 → 400（而非无响应/500）
+
+def test_password_route_registered_and_dispatches(env):
+    """改密两跳必须走真实 _POST_ROUTES（review C1）：login → password。"""
+    import io
+    from inferfabric.security.admin import SecurityAdmin
+    from inferfabric.security.console_auth import set_password as _sp
+    from inferfabric.security.key_store import KeyStore
+
+    class _RouteHandler:
+        def __init__(self, body=None, headers=None, method="POST"):
+            raw = json.dumps(body or {}).encode()
+            self.headers = {"Host": "127.0.0.1:8999",
+                            "Origin": "http://127.0.0.1:8999",
+                            "Content-Length": str(len(raw)), **(headers or {})}
+            self.command = method
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self.response_headers = {}
+            self.status = None
+        def send_response(self, s): self.status = s
+        def send_header(self, k, v): self.response_headers[k] = v
+        def end_headers(self): pass
+        def _check_admin(self): return True   # 门语义由 _TokenHandler 用例覆盖
+
+    store = KeyStore(env.tmp / "security.db", provision=True)
+    _sp(store, "test-password-long")
+    env.pm.auth = build_auth(env.tmp)
+    env.pm.security_admin = SecurityAdmin(store, origins=["http://127.0.0.1:8999"])
+
+    login_route = proxy_handler._POST_ROUTES["/admin/keys/login"]
+    h = _RouteHandler({"password": "test-password-long"})
+    login_route(h, env.pm)
+    assert h.status == 200
+    cookie = h.response_headers["Set-Cookie"].split(";")[0]
+    csrf = json.loads(h.wfile.getvalue())["csrf"]
+
+    pw_route = proxy_handler._POST_ROUTES["/admin/keys/password"]
+    h2 = _RouteHandler({"current_password": "test-password-long",
+                        "new_password": "a-new-password-long"},
+                       headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+    pw_route(h2, env.pm)
+    assert h2.status == 200, json.loads(h2.wfile.getvalue())
+
+
+def _legacy_enforcing(tmp):
+    yaml = tmp / "api_keys.yaml"
+    yaml.write_text('primary: "sk-iff-test-primary-key"\n', encoding="utf-8")
+    return AuthManager(yaml)
+
+
+def test_first_set_preserves_enforcing_legacy_manager(env):
+    """review C2：热接不得新建 legacy manager — enforced 态与 reloader 身份保留。"""
+    old = _legacy_enforcing(env.tmp)
+    assert old.enabled is True
+    env.pm.auth = old
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    assert h.last[1] == 200
+    from inferfabric.security.auth_facade import SecurityAuth as SA
+    assert isinstance(env.pm.auth, SA)
+    assert env.pm.auth.legacy is old          # 同一对象：reloader reload 生效
+    assert env.pm.auth.legacy.enabled is True  # 在役强制态不被静默降级
+
+
+def test_first_set_invalid_origins_rejected_before_disk(env, monkeypatch):
+    """review I5：非回环 bind + 无 HTTPS origins → 400，先于任何落盘。"""
+    from inferfabric import proxy_manager
+    monkeypatch.setattr(proxy_manager, "PROXY_HOST", "0.0.0.0")
+    monkeypatch.delenv("IFF_CONSOLE_ORIGINS", raising=False)
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    assert h.last[1] == 400
+    assert not (env.tmp / "security.db").exists()
+    assert not (env.tmp / "security.enabled").exists()
+
+
+def test_first_set_non_object_body_rejected(env):
+    """review I9：JSON 数组体 → 400（线程模式不得无响应关闭）。"""
+    h = _TokenHandler(["not", "an", "object"], token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    assert h.last[1] == 400
+    assert not (env.tmp / "security.db").exists()
+
+
+def test_read_body_json_null_replies_400():
+    """review I9：JSON null 此前静默关闭连接 — read_body 统一 400 后保持
+    「None = 已回复」契约（端点的 if data is None: return 不双写）。"""
+    import io
+    from inferfabric import forwarder
+
+    class RawHandler:
+        def __init__(self, raw):
+            self.headers = {"Content-Length": str(len(raw))}
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self.status = None
+        def send_response(self, s): self.status = s
+        def send_header(self, k, v): pass
+        def end_headers(self): pass
+
+    h = RawHandler(b"null")
+    assert forwarder.read_body(h) is None
+    assert h.status == 400
+    h2 = RawHandler(b"{}")
+    assert forwarder.read_body(h2) == {}   # 空对象不受影响
+
+
+def test_bootstrap_admin_token_shared_by_async(monkeypatch):
+    """review I4：async 启动必须引导 born token（否则首设恒 401）。"""
+    import inspect
+    from inferfabric.proxy import async_server
+    monkeypatch.setenv("IFF_ADMIN_TOKEN", "env-token-x")
+    assert proxy_handler.bootstrap_admin_token() == "env-token-x"
+    assert proxy_handler._ADMIN_TOKEN == "env-token-x"
+    assert "bootstrap_admin_token" in inspect.getsource(async_server.start_async)

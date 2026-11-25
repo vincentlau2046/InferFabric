@@ -176,7 +176,7 @@ def _admin_gate(handler, expected_host, write=False):
     return True
 from inferfabric.proxy_manager import (
     ProxyManager, PROXY_HOST, PROXY_PORT, IFF_DATA_DIR,
-    HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
+    HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL, console_origins,
 )
 from inferfabric import forwarder, __version__
 from inferfabric.proxy.chat_handlers import handle_chat, handle_ollama_native
@@ -375,6 +375,9 @@ def _serve_api_spec(handler, pm):
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
 from inferfabric.security.auth_facade import SecurityAuth, build_auth  # noqa: E402
+from inferfabric.security.console_auth import (  # noqa: E402
+    _password_bytes, password_set, set_password)
+from inferfabric.security.key_store import KeyStore  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
@@ -444,6 +447,7 @@ _POST_ROUTES = {
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "create")),
     "/admin/keys/revoke":       _admin(lambda h, pm: key_admin.handle(h, pm, "revoke")),
     "/admin/keys/policy":       _admin(lambda h, pm: key_admin.handle(h, pm, "policy")),
+    "/admin/keys/password":     _admin(lambda h, pm: key_admin.handle(h, pm, "password")),
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
@@ -492,6 +496,8 @@ _POST_ROUTES = {
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
     "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
     "/admin/security/enable":       _admin(lambda h, pm: h._handle_security_enable(pm)),
+    "/admin/security/console-password": _admin(
+        lambda h, pm: h._handle_security_console_password(pm)),
     "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
     "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
     # Connect（F10）：自带更严门禁（回环对端 + 精确 authority + 强制 token），
@@ -2247,10 +2253,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     for k in auth.store.list_keys()]
             self._send_json({"active": True, "policy": policy, "enforced": enforced,
                              "key_count": sum(1 for k in keys if not k["revoked"]),
+                             "password_set": password_set(auth.store),
                              "keys": keys})
         else:
             self._send_json({"active": False, "policy": None, "enforced": auth.enabled,
-                             "key_count": 0, "keys": []})
+                             "key_count": 0, "password_set": False, "keys": []})
 
     def _handle_security_create_key(self, pm):
         """POST /admin/security/keys {name?} — 新建 API key（明文仅本次回显一次）。"""
@@ -2357,6 +2364,79 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except (OSError, ValueError, sqlite3.Error) as e:
             log.error("security enable failed: %s", e)
             self._send_json({"error": f"security toggle failed: {e}"}, 500)
+
+    def _handle_security_console_password(self, pm):
+        """POST /admin/security/console-password {new_password} — 首次网页设密。
+
+        设置保护 API Key 敏感操作（PR4 reveal 等）的控制台口令。管理员凭证
+        恒校验（X-Admin-Token vs born token）——回环下 _admin_gate 不验
+        token，故在此显式校验，杜绝本地页面无凭证驱动设密。
+
+        失败路径次序（fresh-context 评审 2026-11-25）：
+        - 401 token 缺/错/未配置 → 任何落盘之前；
+        - 400 体非 JSON 对象 / 口令 <12B → 任何落盘之前；
+        - 400 origins 与启动同源校验不过（非回环需显式 HTTPS）→ 任何落盘之前；
+        - SecurityAdmin 先于口令落库构建（其失败仅留一个空 provision 库，可重试）；
+        - 热接保留在役 legacy manager（enforced 态 + ConfigReloader 身份不变，
+          build_auth 自落 security.enabled 标记）；
+        - 口令条件写入（expect='unset'）：竞态下后写不得静默覆盖（rowcount=0
+          → 409）。已设口令 → 409；不置 policy、不建 key — 鉴权开关
+          （/admin/security/enable）仍是用户主动的独立动作。
+        """
+        token = self.headers.get("X-Admin-Token", "")
+        configured = getattr(self, "_admin_token", "")
+        if (not configured
+                or not hmac.compare_digest(token.encode("utf-8"),
+                                           configured.encode("utf-8"))):
+            self._send_json({"error": "需要管理员凭证（X-Admin-Token）— 无凭证请"
+                                      "在网关本机运行 \"iff keys init\""}, 401)
+            return
+        data = self._read_body()
+        if data is None:
+            return   # read_body 已回复（413 / JSON 语法 400）
+        if not isinstance(data, dict):
+            self._send_json({"error": "请求体需为 JSON 对象"}, 400)
+            return
+        new_password = data.get("new_password")
+        was_active = isinstance(pm.auth, SecurityAuth)
+        db_path = IFF_DATA_DIR / "security.db"
+        try:
+            # 口令合法性先于任何落盘：拒绝的设密不创建 store
+            _password_bytes(new_password)
+            # origins 与启动同源校验（含 [::1] 默认与非回环 HTTPS 强制）
+            origins = console_origins()
+            store = pm.auth.store if was_active else KeyStore(db_path, provision=True)
+            if password_set(store):
+                self._send_json({"error": "控制台口令已设置 — 更改请在设置页走会话改密，"
+                                          "或本机运行 \"iff keys set-password\""
+                                          "（保留全部 API key）"}, 409)
+                return
+            from inferfabric.security.admin import SecurityAdmin
+            security_admin = SecurityAdmin(store, origins=origins)
+            if not was_active:
+                # 与启动同源热接；build_auth 自落 security.enabled 标记。
+                # 保留在役 legacy manager：enforced 态不被静默降级，且
+                # ConfigReloader 持有的旧对象 reload 后仍作用于在役 facade。
+                auth = build_auth(IFF_DATA_DIR)
+                if not isinstance(auth, SecurityAuth):
+                    self._send_json({"error": "security init failed"}, 500)
+                    return
+                pm.security_admin = security_admin
+                pm.auth = SecurityAuth(pm.auth, auth.store)
+                log.info("Security store initialized from app settings console-password")
+            else:
+                pm.security_admin = security_admin
+            # 条件写入：竞态下后写不得静默覆盖（review I6）
+            if not set_password(store, new_password, expect="unset"):
+                self._send_json({"error": "控制台口令已被并发设置 — 请刷新设置页后重试"}, 409)
+                return
+            self._send_json({"status": "ok", "provisioned": not was_active},
+                            extra_headers={"Cache-Control": "no-store"})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+        except (OSError, sqlite3.Error) as e:
+            log.error("console password set failed: %s", e)
+            self._send_json({"error": f"security store unavailable: {e}"}, 503)
 
     def _handle_switch(self, pm):
         data = self._read_body()
@@ -3594,6 +3674,21 @@ def _validate_admin_token_safety():
         )
 
 
+def bootstrap_admin_token():
+    """Born-token bootstrap shared by threaded main() and async start_async.
+
+    F7 review (PR3, 2026-11-25): the async server performed only the safety
+    check, so _ADMIN_TOKEN stayed empty there and web first-set (恒校验)
+    could never succeed even with the correct secrets.env token. Idempotent:
+    derives once per process (env override > secrets.env, writing back when
+    missing). Callers must run this BEFORE serving; never generate or persist
+    a token from a rejected request path.
+    """
+    global _ADMIN_TOKEN
+    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    return _ADMIN_TOKEN
+
+
 def _create_server(retries: int = 5, retry_delay: float = 2.0):
     """Create the HTTP server, retrying on EADDRINUSE (stale proxy holding the port).
 
@@ -3731,9 +3826,7 @@ def main():
     # subprocesses (vllm/sglang/docker) inherit the environment and would each
     # receive the control-plane secret. In-process consumers read the module
     # global; out-of-process consumers (e.g. iff remove) read secrets.env.
-    from inferfabric.proxy_manager import IFF_DATA_DIR
-    global _ADMIN_TOKEN
-    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    bootstrap_admin_token()
     _validate_admin_token_safety()
 
     mgr = ProxyManager()

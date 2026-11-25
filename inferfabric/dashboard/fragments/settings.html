@@ -1,0 +1,37 @@
+<div class="tab-content" id="tab-settings">
+  <!-- 设置 = 授权设置（PR3 WS4）：本机零门槛边界说明 + 推理 API 鉴权 + Key 保护密码。
+       settings.js 渲染状态与表单，无 inline onclick；密码只进请求体，绝不进 innerHTML。 -->
+  <div class="if-card">
+    <div class="if-card-hdr">
+      <span class="if-card-title">授权设置</span>
+      <span class="if-card-sub">本机控制台零门槛是默认且不变的行为 — 本页只管理两类需主动启用的授权</span>
+    </div>
+    <div class="if-card-body">
+      <div id="setBody">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="if-card">
+    <div class="if-card-hdr">
+      <span class="if-card-title">Key 保护密码</span>
+      <span class="if-card-sub">仅保护 API Key 敏感操作（如重看 key 明文）— 与本机控制台登录无关</span>
+    </div>
+    <div class="if-card-body">
+      <div id="pwBody">
+        <div class="skeleton"><div class="skeleton-row"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 一次性明文回显区（开启鉴权首建 key）：textContent 渲染；切页/关闭/Esc 即清空 -->
+  <div id="stReveal" class="if-grid" style="display:none;margin-top:12px">
+    <p class="if-field-hint">⚠ 明文仅本次显示 — 请立即复制保存，关闭后无法找回：</p>
+    <p class="mono" id="stRevealToken" style="word-break:break-all;user-select:all"></p>
+    <div>
+      <button type="button" class="btn btn-sec btn-sm" data-action="st-copy-key">复制</button>
+      <button type="button" class="btn btn-sec btn-sm" data-action="st-dismiss-key">已保存，关闭</button>
+    </div>
+  </div>
+</div>

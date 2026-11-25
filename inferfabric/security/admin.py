@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from urllib.parse import urlsplit
 
-from inferfabric.security.console_auth import ConsoleAuth, LoginError
+from inferfabric.security.console_auth import ConsoleAuth, LoginError, set_password
 
 log = logging.getLogger('inferfabric.security')
 COOKIE = 'iff_console'
@@ -115,6 +115,27 @@ class SecurityAdmin:
                 self.store.set_policy(policy)
                 log.info('API key enforcement changed policy=%s', policy)
                 _reply(h, {'policy': policy})
+            elif action == 'password':
+                current, new = data.get('current_password'), data.get('new_password')
+                if not isinstance(current, str) or not isinstance(new, str):
+                    raise ValueError('current_password and new_password required')
+                try:
+                    raw = self.console.verify_current(current)
+                except LoginError:
+                    log.warning('Console password change rejected: wrong current password')
+                    _reply(h, {'error': '当前密码不正确 — 忘记密码可在网关本机运行 "iff keys set-password"'
+                               '（保留全部 API key）'}, 400)
+                    return
+                # 条件写入（review I6）：仅当记录仍为刚验证的原文时应用 —
+                # 竞态下（记录已被并发修改）rowcount=0 → 400，绝不静默覆盖
+                if not set_password(self.store, new, expect=raw):
+                    log.warning('Console password change raced: record changed during verify')
+                    _reply(h, {'error': '当前密码已变更（可能已在别处修改）— 请刷新后重试；'
+                               '忘记密码可在网关本机运行 "iff keys set-password"'
+                               '（保留全部 API key）'}, 400)
+                    return
+                log.info('Console password changed; existing sessions invalidated')
+                _reply(h, {'status': 'ok'})
             else:
                 _reply(h, {'error': 'not found'}, 404)
         except LoginError as e:

@@ -125,3 +125,91 @@ def test_audit_redacted(admin, caplog):
     assert h.response()['key'] not in caplog.text
     assert headers['Cookie'] not in caplog.text
     assert headers['X-CSRF-Token'] not in caplog.text
+
+
+def test_password_change_requires_session(admin):
+    # PR3（WS4）：改密走控制台会话 + CSRF — 无会话 401
+    h = Handler({'current_password': 'test-password-long',
+                 'new_password': 'a-new-password-long'})
+    admin.handle(h, 'password')
+    assert h.status == 401
+
+
+def test_password_change_wrong_current_rejected_with_recovery_hint(admin):
+    # 逐次验密：错旧密码 → 400 + 可操作指引（ISSUE-04：健康库走 set-password）
+    headers = login(admin)
+    h = Handler({'current_password': 'wrong-password-x',
+                 'new_password': 'a-new-password-long'}, headers)
+    admin.handle(h, 'password')
+    assert h.status == 400
+    assert '当前密码' in h.response()['error']
+    assert 'iff keys set-password' in h.response()['error']
+    # review 评审修复：失败不动旧会话 — 同一会话仍可用（计划承诺，此前漏断言）
+    h2 = Handler(headers=headers, method='GET')
+    admin.handle(h2, 'list')
+    assert h2.status == 200
+
+
+def test_password_change_raced_record_rejected(admin, monkeypatch):
+    # review I6：改密竞态守卫 — 条件更新 rowcount=0 → 400（旧记录已被并发改掉）
+    stale = admin.console._record()  # 竞态窗口前读到的记录原文（A）
+    set_password(admin.store, 'concurrently-set-x')   # 并发方（CLI 路径）已改写为 B
+    # 并发写使旧会话失效 — 用 B 重新登录（被测第二跳会话本身有效）
+    h = Handler({'password': 'concurrently-set-x'})
+    admin.handle(h, 'login')
+    assert h.status == 200
+    fresh = {'Cookie': h.response_headers['Set-Cookie'].split(';')[0],
+             'X-CSRF-Token': h.response()['csrf']}
+
+    real_verify = admin.console.verify_current
+
+    def raced_verify(password):
+        real_verify(password)          # 对当前记录 B 验证通过
+        return stale                   # 却返回竞态前的旧 raw（模拟窗口交错）
+    monkeypatch.setattr(admin.console, 'verify_current', raced_verify)
+
+    h2 = Handler({'current_password': 'concurrently-set-x',
+                  'new_password': 'a-new-password-long'}, fresh)
+    admin.handle(h2, 'password')
+    assert h2.status == 400
+    assert '已变更' in h2.response()['error'] or '重试' in h2.response()['error']
+
+
+def test_password_change_rejects_short_new(admin):
+    headers = login(admin)
+    hk = Handler({'name': 'client'}, headers)
+    admin.handle(hk, 'create')
+    key_token = hk.response()['key']
+    h = Handler({'current_password': 'test-password-long',
+                 'new_password': 'short'}, headers)
+    admin.handle(h, 'password')
+    assert h.status == 400
+    assert admin.store.check(key_token, 'fabric-work')[0] is True  # 拒绝不伤既有 key
+
+
+def test_password_change_success_invalidates_old_session_keeps_keys(admin):
+    # 成功改密：200；旧会话随口令记录更新失效；新密码可登录；key 与策略原样
+    headers = login(admin)
+    hk = Handler({'name': 'client'}, headers)
+    admin.handle(hk, 'create')
+    key_token = hk.response()['key']
+
+    h = Handler({'current_password': 'test-password-long',
+                 'new_password': 'a-new-password-long'}, headers)
+    admin.handle(h, 'password')
+    assert h.status == 200
+
+    h2 = Handler(headers=headers, method='GET')
+    admin.handle(h2, 'list')
+    assert h2.status == 401                      # 旧会话失效
+
+    h3 = Handler({'password': 'a-new-password-long'})
+    admin.handle(h3, 'login')
+    assert h3.status == 200
+    fresh = {'Cookie': h3.response_headers['Set-Cookie'].split(';')[0],
+             'X-CSRF-Token': h3.response()['csrf']}
+    h4 = Handler(headers=fresh, method='GET')
+    admin.handle(h4, 'list')
+    assert h4.status == 200
+    assert admin.store.check(key_token, 'fabric-work')[0] is True  # key 仍可校验
+    assert any(k.get('name') == 'client' for k in h4.response()['keys'])

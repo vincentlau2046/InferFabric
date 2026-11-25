@@ -136,14 +136,28 @@ def send_json(handler, body_d, status=200, extra_headers=None):
         pass
 
 
+def _parsed_or_400(handler, parsed):
+    """Shared null-body guard (PR3 review I9): a parsed JSON ``null`` used to
+    return None WITHOUT any reply — threaded dispatch then closed the
+    connection silently and every handler's ``if data is None: return``
+    contract silently swallowed the request. Reply 400 once, keep the
+    None-means-replied contract intact."""
+    if parsed is None:
+        send_json(handler, {"error": "Invalid JSON: body must be a JSON object"}, 400,
+                  extra_headers={"Cache-Control": "no-store"})
+        return None
+    return parsed
+
+
 def read_body(handler):
-    """Read and parse JSON request body. Returns dict or None on error."""
+    """Read and parse JSON request body. Returns dict or None on error (a
+    reply has always been sent when None returns)."""
     try:
         cl = handler.headers.get("Content-Length")
         if cl is None:
             # No Content-Length (e.g. chunked transfer encoding) — read all
             raw = handler.rfile.read()
-            return json.loads(raw) if raw else {}
+            return _parsed_or_400(handler, json.loads(raw)) if raw else {}
         size = int(cl)
         if size == 0:
             return {}
@@ -152,7 +166,7 @@ def read_body(handler):
                       extra_headers={"Cache-Control": "no-store"})
             return None
         raw = handler.rfile.read(size)
-        return json.loads(raw)
+        return _parsed_or_400(handler, json.loads(raw))
     except (json.JSONDecodeError, ValueError) as e:
         send_json(handler, {"error": f"Invalid JSON: {e}"}, 400,
                   extra_headers={"Cache-Control": "no-store"})
