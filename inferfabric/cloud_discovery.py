@@ -1038,6 +1038,8 @@ class CloudDiscovery:
 
             provider = ProviderConfig(
                 name=name,
+                # api_key 已在上方文本级 ${VAR} 展开为明文（env 缺失时展开为空
+                # 并告警）—— 内存恒为可直发的真实值，与 POST add 路径契约一致
                 api_key=raw_api_key,
                 openai_base=pcfg.get("openai_base", ""),
                 anthropic_base=pcfg.get("anthropic_base", ""),
