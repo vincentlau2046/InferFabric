@@ -8,6 +8,7 @@ Core HTTP handler with routing, dashboard, and delegation to:
 Extracted from proxy.py (v4.1 P3 split).
 """
 
+import copy
 import errno
 import re
 import sys
@@ -413,6 +414,7 @@ _POST_ROUTES = {
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
     "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
+    "/admin/cloud/provider-update": _admin(lambda h, pm: h._handle_cloud_provider_update(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
@@ -2989,6 +2991,46 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             r["pass"] = r["status"] in self.CLOUD_TEST_PASS_STATUSES
         ok = all(r["pass"] for r in results)
         self._send_json({"provider": name, "key_set": key_set, "results": results, "ok": ok})
+
+    def _handle_cloud_provider_update(self, pm):
+        """POST /admin/cloud/provider-update — 原地编辑非凭证字段（指纹 CAS）。
+
+        body: {name, expected_config_fingerprint, display_name?, timeout?,
+               discovery_enabled?, discovery_interval?, include_pattern?}
+        缺省 = 不改。凭证/端点变更与 enabled 切换不在本端点（Task 3/4）。
+        失败语义：404 未知提供方；409 指纹冲突（响应带当前指纹供刷新重试）；
+        500 落盘失败（内存以编辑前快照回滚，磁盘保持原值）。
+        """
+        body = self._read_body() or {}
+        name = body.get("name") or ""
+        cfg = pm.cloud.providers.get(name)
+        if cfg is None:
+            self._send_json({"error": "provider_not_found"}, status=404)
+            return
+        current_fp = pm.cloud.config_fingerprint()
+        if (body.get("expected_config_fingerprint") or "") != current_fp:
+            self._send_json({"error": "config_conflict",
+                             "config_fingerprint": current_fp}, status=409)
+            return
+        backup = copy.deepcopy(cfg)
+        try:
+            if body.get("display_name") is not None:
+                cfg.display_name = str(body["display_name"])
+            if body.get("timeout") is not None:
+                cfg.timeout = int(body["timeout"])
+            if body.get("discovery_enabled") is not None:
+                cfg.discovery_enabled = bool(body["discovery_enabled"])
+            if body.get("discovery_interval") is not None:
+                cfg.discovery_interval = int(body["discovery_interval"])
+            if body.get("include_pattern") is not None:
+                cfg.include_pattern = str(body["include_pattern"])
+            pm.cloud.save_config()
+        except Exception as e:
+            pm.cloud.providers[name] = backup  # 内存回滚（磁盘未动）
+            self._send_json({"error": "save_failed", "detail": str(e)}, status=500)
+            return
+        self._send_json({"status": "updated",
+                         "config_fingerprint": pm.cloud.config_fingerprint()})
 
     def _handle_cloud_providers(self, pm):
         """GET/POST/DELETE /admin/cloud/providers — 列出、添加或删除 provider。"""
