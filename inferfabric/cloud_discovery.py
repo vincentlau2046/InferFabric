@@ -9,6 +9,7 @@ v4.6.0: 模型能力属性 (context_window, max_output_tokens 等)
   - 自动发现结果与手动配置合并（手动优先）
 """
 
+import hashlib
 import logging
 import os
 import re
@@ -134,6 +135,8 @@ class ProviderConfig:
     # v4.7.0: ENV-based key management
     key_env_var: str = ""           # API Key 对应的 ENV 变量名
     preset_id: str = ""            # 来源预设 ID（可选）
+    # PR1: 控制台显示名（仅供人读，非路由名；空 = 未设置）
+    display_name: str = ""
     # v4.6.0: 模型能力属性手动覆盖
     model_specs: dict[str, dict] = field(default_factory=dict)
 
@@ -210,6 +213,10 @@ class SecretsManager:
         """检查 ENV 变量是否已设置且非空。"""
         return bool(os.environ.get(var_name, ""))
 
+    def has(self, var_name: str) -> bool:
+        """PR1: secrets.env 中是否已存在该变量（非空值）— key_source=managed 判定。"""
+        return bool(self.load().get(var_name, ""))
+
 
 class CloudDiscovery:
     """云端模型发现引擎。
@@ -238,6 +245,8 @@ class CloudDiscovery:
         self._config_path: Path | None = config_path
         self._save_lock = threading.Lock()
         self._config_corrupt = False
+        # PR1: 配置指纹缓存（文件字节 sha256 前 16 位；缺失/未配置 = "none"）
+        self._config_fingerprint = "none"
         if config_path:
             self._load_config(config_path)
             # Register spec-only models on startup so they're visible before first discover
@@ -705,6 +714,21 @@ class CloudDiscovery:
 
     # ── internal ──
 
+    # ── PR1: 配置指纹（原地编辑 CAS 的基础）──────────────────────
+
+    def config_fingerprint(self) -> str:
+        """当前配置文件的指纹：文件字节 sha256 前 16 位；文件缺失 = "none"。
+
+        缓存值在 _load_config / save_config 末尾刷新；编辑端点以此做
+        CAS 防覆盖（外部手改 YAML 或并发编辑使视图失效）。
+        """
+        return self._config_fingerprint
+
+    def _compute_fingerprint(self) -> str:
+        if not self._config_path or not self._config_path.exists():
+            return "none"
+        return hashlib.sha256(self._config_path.read_bytes()).hexdigest()[:16]
+
     def save_config(self):
         """原子写入当前 providers 到 cloud_provider.yaml
 
@@ -728,6 +752,7 @@ class CloudDiscovery:
                 os.replace(tmp, self._config_path)
                 log.info("Saved cloud provider config to %s", self._config_path)
                 self._config_corrupt = False  # 成功保存后重置
+                self._config_fingerprint = self._compute_fingerprint()  # PR1: 保存后刷新指纹
             except Exception as e:
                 log.error("Failed to save cloud provider config: %s", e)
                 # 清理 tmp
@@ -760,6 +785,9 @@ class CloudDiscovery:
                 pd["key_env_var"] = p.key_env_var
             if p.preset_id:
                 pd["preset_id"] = p.preset_id
+            # PR1: 显示名（非空才写 — 保持存量 YAML 最小差异）
+            if p.display_name:
+                pd["display_name"] = p.display_name
             if p.anthropic_base:
                 pd["anthropic_base"] = p.anthropic_base
             if p.timeout and p.timeout != 60:
@@ -1025,6 +1053,7 @@ class CloudDiscovery:
                 model_specs=model_specs,
                 key_env_var=key_env_var,
                 preset_id=pcfg.get("preset_id", ""),
+                display_name=pcfg.get("display_name", ""),
             )
             self._providers[name] = provider
 
@@ -1032,6 +1061,7 @@ class CloudDiscovery:
                  len(self._providers),
                  sum(len(p.model_specs) for p in self._providers.values()))
         self._config_corrupt = False  # 成功加载后重置 corrupt 标志
+        self._config_fingerprint = self._compute_fingerprint()  # PR1: 加载后刷新指纹
 
     def _discover_provider(self, cfg: ProviderConfig) -> "list[CloudModel] | None":
         """对单个 provider 执行 GET /models。

@@ -2995,8 +2995,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if self.command == "GET":
             providers = []
             all_models = pm.cloud.cloud_models  # 快照一次（含短名 + provider/ 前缀双键）
+            config_fingerprint = pm.cloud.config_fingerprint()  # PR1: 编辑 CAS 基础
             for name, cfg in pm.cloud.providers.items():
                 env_set = bool(os.environ.get(cfg.key_env_var, "")) if cfg.key_env_var else False
+                # PR1: key_source 三态 — managed（secrets.env 托管）/
+                # external（仅外部环境注入）/ unset（两者皆无）
+                if cfg.key_env_var and pm.cloud.secrets.has(cfg.key_env_var):
+                    key_source = "managed"
+                elif env_set:
+                    key_source = "external"
+                else:
+                    key_source = "unset"
                 # v6.1 Phase 1: 可路由数 = 短名键计数（避免双键重复统计）
                 routable = sum(1 for k, m in all_models.items()
                                if "/" not in k and m.provider == name)
@@ -3041,6 +3050,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "model_count": routable,  # 兼容旧字段：语义对齐可路由数
                     "key_env_var": cfg.key_env_var,
                     "key_env_set": env_set,
+                    "display_name": cfg.display_name,
+                    "config_fingerprint": config_fingerprint,
+                    "key_source": key_source,
                     "preset_id": cfg.preset_id,
                 })
             # Include cloud models with capabilities (deduplicate: skip provider/ prefixed keys)
