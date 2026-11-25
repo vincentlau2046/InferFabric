@@ -412,3 +412,33 @@ def test_platform_probe_mem_available_mb_shape():
     from inferfabric.platform.probe import mem_available_mb
     v = mem_available_mb()
     assert v is None or (isinstance(v, int) and v >= 0)
+
+
+def test_rec_payload_failed_error_self_explanatory(mgr):
+    """issue #49：status 载荷 failed 行带 reason/kind/message/action
+    （由 installer 错误串前缀查统一目录）；非 failed 行四键为 None。"""
+    from inferfabric.packs.store import PackRecord
+    mgr.store.set(PackRecord(pack_id="llm.a", pack_version="1.0.0",
+                             status="failed", stage="downloading",
+                             error="download_error:URLError",
+                             sandbox_degraded=False, installed_at=None))
+    row = {x["pack_id"]: x for x in mgr.status_payload()["packs"]}["llm.a"]
+    assert row["reason"] == "download_error"
+    assert row["kind"] == "download"
+    assert "下载失败" in row["message"]
+    assert row["action"]
+    # 未登记前缀 → unknown 回退且原文保留
+    mgr.store.set(PackRecord(pack_id="llm.b", pack_version="1.0.0",
+                             status="failed", stage="preflight",
+                             error="parameter_count_b 40 > max 8",
+                             sandbox_degraded=False, installed_at=None))
+    row_b = {x["pack_id"]: x for x in mgr.status_payload()["packs"]}["llm.b"]
+    assert row_b["kind"] == "unknown"
+    assert "parameter_count_b 40 > max 8" in row_b["message"]
+    # installed 行：分类键为 None
+    mgr.store.set(PackRecord(pack_id="llm.c", pack_version="1.0.0",
+                             status="installed", stage="installed",
+                             error=None, sandbox_degraded=False,
+                             installed_at=1))
+    row_c = {x["pack_id"]: x for x in mgr.status_payload()["packs"]}["llm.c"]
+    assert row_c["reason"] is None and row_c["kind"] is None

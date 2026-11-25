@@ -163,3 +163,25 @@ def test_switch_http_error_with_non_json_body_is_not_reported_as_success(run_swi
     assert len(result["toasts"]) == 1
     assert result["toasts"][0]["kind"] == "error"
     assert "502" in result["toasts"][0]["message"]
+
+
+def test_switch_managed_admission_rejection_toasts_hint_and_action(run_switch):
+    """issue #49：受管闸拒绝（resource_busy）→ toast 展示人话 hint 与
+    下一步 action，不再复读英文原文 message；无 hint 的旧载荷仍回退。"""
+    result = run_switch({
+        "status": "error", "reason_code": "resource_busy",
+        "message": "resource_busy: GPU busy — managed GPU pack admission is idle-only",
+        "hint": "GPU 忙 — 托管能力包仅允许 GPU idle 时启动，不挤占现役模型",
+        "action": "先把 GPU 切回 idle（控制台「回到 idle」或 ./iff reset），再安装/启动该包",
+    })
+    assert len(result["toasts"]) == 1
+    toast = result["toasts"][0]
+    assert toast["kind"] == "error"
+    assert "GPU 忙" in toast["message"]
+    assert "下一步" in toast["message"] and "idle" in toast["message"]
+    assert "resource_busy: GPU busy" not in toast["message"]   # 原文不进 toast
+
+
+def test_switch_legacy_error_payload_unchanged(run_switch):
+    result = run_switch({"status": "error", "message": "VRAM budget exceeded"})
+    assert "VRAM budget exceeded" in result["toasts"][0]["message"]

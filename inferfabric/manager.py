@@ -372,15 +372,22 @@ class ModelManager:
             return None
         from .packs.managed_runtime import (get_managed_runtime,
                                             PackRuntimeError)
+        from .packs import error_classify
         rt = get_managed_runtime()
         if rt is None:
             return {"status": "error", "reason_code": "runtime_unavailable",
-                    "message": "managed pack runtime not wired"}
+                    "message": "managed pack runtime not wired",
+                    **error_classify.hint_for("runtime_unavailable")}
         try:
             rt.check_start(model, proc=self._proc)
         except PackRuntimeError as e:
+            # issue #49：自解释 — 原文 message 保留，附加 kind/hint/action
+            # （人话 + 建议动作），控制台/CLI 据此给出下一步
             return {"status": "error", "reason_code": e.reason_code,
-                    "message": str(e)}
+                    "message": str(e), "kind": error_classify.hint_for(
+                        e.reason_code)["kind"],
+                    "hint": error_classify.hint_for(e.reason_code)["message"],
+                    "action": error_classify.hint_for(e.reason_code)["action"]}
         return None
 
     # ── Switch ────────────────────────────────────────────────────

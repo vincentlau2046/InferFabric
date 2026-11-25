@@ -238,3 +238,28 @@ class TestInstallAdmission:
         assert called, "默认路径必须调用真实主机事实探测"
         assert code == 422
         assert payload["decision"]["reason_code"] == "platform_mismatch"
+
+
+class TestAdmissionPayloadSelfExplanatory:
+    """issue #49：422 拒绝载荷必须自解释 — reason/kind/message/action
+    （人话 + 建议动作）与 decision 并存，前端不再只能复读
+    "admission rejected (install)"（用户两次误读为「没权限」）。"""
+
+    def test_422_payload_carries_reason_kind_message_action(self, env):
+        code, payload = _mgr(env, facts=LINUX_NVIDIA).start_install(
+            env["pack_id"])
+        assert code == 422, payload
+        assert payload["reason"] == "platform_mismatch"
+        assert payload["kind"] == "admission"
+        assert payload["message"] and payload["message"] != \
+            payload["error"]
+        assert payload["action"]
+        assert payload["decision"]["reason_code"] == "platform_mismatch"  # 保留
+
+    def test_404_unknown_pack_carries_reason(self, env):
+        code, payload = _mgr(env, facts=DARWIN_ARM).start_install(
+            "llm.nope")
+        assert code == 404
+        assert payload["reason"] == "unknown_pack_id"
+        assert payload["kind"] == "not_found"
+        assert payload["action"]

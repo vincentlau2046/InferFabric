@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 from inferfabric.packs.catalog import Catalog, load_catalog
+from inferfabric.packs import error_classify
 from inferfabric.packs.sandbox import probe_sandbox
 from inferfabric.platform.pack_probe import probe_pack_host
 from inferfabric.packs.custom import (
@@ -208,12 +209,14 @@ class PackManager:
 
     def preview_uninstall(self, pack_id: str) -> tuple[int, dict]:
         if self._uninstaller is None or self._manifest_for(pack_id) is None:
-            return 404, {"error": f"unknown pack {pack_id!r}"}
+            return 404, {"error": f"unknown pack {pack_id!r}",
+                         **error_classify.hint_for("unknown_pack_id")}
         return 200, self._uninstaller.preview_uninstall(pack_id)
 
     def uninstall(self, pack_id: str, confirmed: bool = False) -> tuple[int, dict]:
         if self._uninstaller is None or self._manifest_for(pack_id) is None:
-            return 404, {"error": f"unknown pack {pack_id!r}"}
+            return 404, {"error": f"unknown pack {pack_id!r}",
+                         **error_classify.hint_for("unknown_pack_id")}
         code, payload = self._uninstaller.uninstall(pack_id, confirmed=confirmed)
         if code == 200:
             self._disabled_models.discard(
@@ -359,6 +362,13 @@ class PackManager:
              "sandbox_degraded": rec.sandbox_degraded,
              "install_path": install_path,
              "installed_at": rec.installed_at, "affected_pools": []}
+        # issue #49：failed 行自解释 — reason/kind/message/action 由错误串
+        # 前缀查统一目录；未登记前缀回退 unknown（message 保留原文）
+        if rec.status == "failed" and rec.error:
+            d.update(reason=error_classify.parse_error_prefix(rec.error),
+                     **error_classify.classify_error(rec.error))
+        else:
+            d.update(reason=None, kind=None, message=None, action=None)
         return d
 
     # ── 安装 ──
@@ -464,11 +474,17 @@ class PackManager:
             rec = self._custom.get(pack_id)
             if rec is not None:
                 return self._retry_custom(rec)
-            return 404, {"error": f"unknown pack_id {pack_id!r}"}
+            return 404, {"error": f"unknown pack_id {pack_id!r}",
+                         "reason": "unknown_pack_id",
+                         **error_classify.hint_for("unknown_pack_id")}
         admitted, decision = self._install_admission(entry)
         if not admitted:
+            # issue #49：拒绝必须自解释 — reason/kind/message/action 与
+            # decision 并存，人话不再是裸 "admission rejected (install)"
+            reason = decision.get("reason_code") or ""
             return 422, {"error": "admission rejected (install)",
-                         "decision": decision}
+                         "decision": decision, "reason": reason,
+                         **error_classify.hint_for(reason)}
         rec = self.store.get(pack_id)
         if rec is not None and rec.status == "installed":
             # 终审 F1：失败的重装不得摧毁已装工作包 — 已装包重装一律拒绝
