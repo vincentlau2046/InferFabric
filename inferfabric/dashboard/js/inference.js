@@ -443,7 +443,12 @@
           var result = await res.json();
           var status = result && result.status;
           if (status !== 'switched' && status !== 'already_active') {
-            throw new Error((result && (result.error || result.message)) || '切换结果无效，请刷新状态确认');
+            // issue #49：受管闸拒绝自解释 — hint（人话）优先于 message
+            // （英文原文），action 是下一步建议；旧载荷形态不变
+            var r = result || {};
+            var em = r.hint || r.error || r.message || '切换结果无效，请刷新状态确认';
+            if (r.action) em += '。下一步：' + r.action;
+            throw new Error(em);
           }
           if (result.rollback === 'succeeded') {
             store.forceRefresh();

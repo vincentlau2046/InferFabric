@@ -82,7 +82,12 @@
           UI.toast('401：请求被拒绝 — 请刷新页面后重试', 'error');
           cb({ unauthorized: true, message: (j && j.error) || 'unauthorized' }, j, res.status);
         } else if (!res.ok) {
-          cb({ message: (j && (j.error || j.message)) || ('HTTP ' + res.status) }, j, res.status);
+          // issue #49：后端自解释载荷（reason/kind/message/action）随错误
+          // 对象透传；message 优先（422 的 j.message 是人话，j.error 是
+          // 机器短语），无 message 的旧端点行为不变
+          cb({ message: (j && (j.message || j.error)) || ('HTTP ' + res.status),
+               reason: j && j.reason, kind: j && j.kind, action: j && j.action },
+             j, res.status);
         } else {
           cb(null, j, res.status);
         }
@@ -107,13 +112,25 @@
       var failed = p.status === 'failed' || p.stage === 'failed';
       var inProgress = !failed && p.status !== 'installed' && p.stage !== 'installed';
       var badgeCls = failed ? 'badge crit' : (inProgress ? 'badge warn' : 'badge ok');
-      var errTxt = (failed && p.error) ? ' — ' + escHtml(p.error) : '';
+      // issue #49：failed 行自解释 — 原因（人话，回退原文）+ 下一步动作；
+      // 下载类失败给「重试」按钮（复用 install 动作，同一校验链）
+      var errHtml = '';
+      if (failed && p.error) {
+        errHtml = '<br><span class="if-field-hint">原因：' +
+          escHtml(p.message || p.error) +
+          (p.action ? '。下一步：' + escHtml(p.action) : '') + '</span>' +
+          (p.kind === 'download'
+            ? ' <button type="button" class="btn btn-sec btn-sm" data-action="install"' +
+              ' data-pack="' + escHtml(p.pack_id) + '">' + UI.icon('download', 14) +
+              '重试</button>'
+            : '');
+      }
       var pathTxt = p.install_path ? ' <span class="mono if-field-hint">' +
         escHtml(p.install_path) + '</span>' : '';
       return '<tr><td class="mono">' + escHtml(p.pack_id) + '</td>' +
         '<td>' + escHtml(p.pack_version || '—') + '</td>' +
         '<td><span class="' + badgeCls + '">' + stageLabel(p.stage || p.status) + '</span>' +
-        errTxt + pathTxt + '</td></tr>';
+        errHtml + pathTxt + '</td></tr>';
     }).join('');
     el.innerHTML = '<h3 class="if-card-title">装机状态</h3>' +
       '<table class="if-table"><thead><tr><th>包</th><th>版本</th><th>阶段</th></tr></thead>' +
@@ -227,7 +244,16 @@
       function (err, j, status) {
         setBusy(packId, false);
         if (err) {
-          if (!err.unauthorized) UI.toast('安装请求失败：' + err.message, 'error');
+          if (!err.unauthorized) {
+            // issue #49：拒绝自解释 — 有 kind（登记过的 reason）时人话 +
+            // 建议动作；未登记/旧端点保持原文 toast
+            if (err.kind && err.kind !== 'unknown') {
+              UI.toast('未能开始安装 — ' + err.message +
+                       '。下一步：' + (err.action || '见装机状态'), 'error');
+            } else {
+              UI.toast('安装请求失败：' + err.message, 'error');
+            }
+          }
           return;   // 401 已由 _fetch 统一提示，回调不再覆盖
         }
         UI.toast('安装已开始：' + packId + '（进度见装机状态）', 'ok');

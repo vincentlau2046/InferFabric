@@ -201,3 +201,43 @@ def test_managed_gpu_start_passes_recheck_then_deploys(monkeypatch):
         assert events == ["check", "check", "deploy", "release"], events
     finally:
         set_managed_runtime(None)
+
+
+def test_managed_admission_error_self_explanatory(monkeypatch):
+    """issue #49：switch 被受管闸拒绝时，错误 dict 除 reason_code/message
+    外，还带 kind/hint/action（人话 + 建议动作）— 控制台 toast 与 CLI
+    都能给出下一步，而不是让用户把 resource_busy 误读成「没权限」。"""
+    from inferfabric.packs.managed_runtime import (
+        set_managed_runtime, PackRuntimeError)
+    from inferfabric.manager import ModelManager
+
+    class _RT:
+        def check_start(self, model, proc=None):
+            raise PackRuntimeError("resource_busy", "gpu busy")
+
+    model = _managed_model()
+    models = {"pilot": model}
+    monkeypatch.setattr("inferfabric.manager.load_models",
+                        lambda d: models)
+    mgr = ModelManager.__new__(ModelManager)
+    mgr.state = _FakeState(gpu_mode="idle")
+    mgr._models = models
+    mgr._lock = SimpleNamespace(acquire=lambda: True, release=lambda: None)
+    mgr._lifecycle = SimpleNamespace(
+        _deploy_model=lambda m, mode: {"status": "switched"})
+    mgr._gpu_state = SimpleNamespace(
+        _scan_actual_services=lambda: [],
+        _scan_port_owners=lambda: {})
+    mgr._device_telemetry = None
+    mgr.models_dir = "/nonexistent"
+    mgr._proc = MagicMock()
+    set_managed_runtime(_RT())
+    try:
+        res = mgr.switch("pilot")
+        assert res["status"] == "error"
+        assert res["reason_code"] == "resource_busy"
+        assert res["kind"] == "admission"
+        assert "GPU 忙" in res["hint"]
+        assert "idle" in res["action"]
+    finally:
+        set_managed_runtime(None)
