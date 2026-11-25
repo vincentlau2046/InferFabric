@@ -41,6 +41,37 @@ _SPEC_INT_KEYS = ("context_window", "max_output_tokens")
 _SPEC_FLOAT_KEYS = ("price_input", "price_output")
 _SPEC_ALL_KEYS = _CAPABILITY_KEYS + _SPEC_INT_KEYS + _SPEC_FLOAT_KEYS
 
+# PR2: 调用别名命名空间 — 与本地调用名、池逻辑名、云短名、其他别名隔离。
+# 保留前缀 fabric-（模型池命名空间）不可占用。
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9._:@-]+$")
+
+
+def validate_alias(alias: str, provider: str, model_id: str, *,
+                   local_names, registry_short_names, other_aliases) -> "tuple[bool, str]":
+    """调用别名合法性校验 → (ok, 拒绝原因)。
+
+    规则（spec §3 PR2）：非空；不含 '/' 与空白；仅允许 [A-Za-z0-9._:@-]；
+    保留前缀 fabric- 拒绝；与本地名/池逻辑名（由调用方并入 local_names）、
+    任一云短名、其他别名撞名拒绝。冲突拒绝且不写入。
+    """
+    if not alias or not alias.strip():
+        return False, "别名不能为空"
+    if "/" in alias:
+        return False, f"别名不能包含 '/': {alias}"
+    if any(c.isspace() for c in alias):
+        return False, f"别名不能包含空白: {alias}"
+    if not _ALIAS_RE.match(alias):
+        return False, f"别名仅允许字母、数字与 . _ : @ -: {alias}"
+    if alias.startswith("fabric-"):
+        return False, f"保留前缀 fabric- 不可用作别名: {alias}"
+    if alias in local_names:
+        return False, f"与本地模型/池调用名冲突: {alias}"
+    if alias in registry_short_names:
+        return False, f"与云模型调用名冲突: {alias}"
+    if alias in other_aliases:
+        return False, f"与其他调用别名冲突: {alias}"
+    return True, ""
+
 
 @dataclass
 class CloudModel:

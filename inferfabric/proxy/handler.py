@@ -416,6 +416,7 @@ _POST_ROUTES = {
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
     "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
     "/admin/cloud/provider-update": _admin(lambda h, pm: h._handle_cloud_provider_update(pm)),
+    "/admin/cloud/provider-alias": _admin(lambda h, pm: h._handle_cloud_provider_alias(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
@@ -3229,6 +3230,113 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"status": "updated",
                          "config_fingerprint": pm.cloud.config_fingerprint()})
 
+    def _handle_cloud_provider_alias(self, pm):
+        """POST /admin/cloud/provider-alias — 模型调用别名设置/移除（指纹 CAS）。
+
+        body: {provider, model_id, alias, expected_config_fingerprint}
+        alias 非空 = 设置（该 (provider, model_id) 行至多一个别名，重设即让位）；
+        alias 为空字符串 = 移除该 model_id 的别名（幂等）。model_id 必须在
+        提供方可路由 floor（enabled_models ∪ model_specs）内，否则 400
+        model_not_routable。命名规则见 validate_alias —— 与本地名/池逻辑名/
+        云短名/其他别名撞名拒绝且不写入。显式重设与退役条目同名时从
+        retired_aliases 移除（重建同名连接不自动复活，须显式确认恢复）。
+        失败语义：404 未知提供方；409 指纹冲突（带当前指纹）；400 校验拒绝；
+        500 落盘失败（内存以编辑前快照回滚）。
+        """
+        from inferfabric.cloud_discovery import validate_alias
+        body = self._read_body() or {}
+        # CAS 同 provider-update（终审 C3）：对磁盘现算指纹，缓存≠磁盘先 reload
+        disk_fp = pm.cloud.disk_fingerprint()
+        if pm.cloud.config_fingerprint() != disk_fp:
+            pm.cloud.reload()
+        if (body.get("expected_config_fingerprint") or "") != disk_fp:
+            self._send_json({"error": "config_conflict",
+                             "config_fingerprint": disk_fp}, status=409)
+            return
+        name = body.get("provider") or ""
+        cfg = pm.cloud.providers.get(name)
+        if cfg is None:
+            self._send_json({"error": "provider_not_found"}, status=404)
+            return
+        alias = str(body.get("alias") or "").strip()
+        model_id = str(body.get("model_id") or "").strip()
+        if not model_id:
+            self._send_json({"error": "invalid_field", "field": "model_id",
+                             "detail": "model_id 必填"}, status=400)
+            return
+
+        if alias:
+            # ── 设置：model_id 必须在可路由 floor 内（不 Routable 不宣称可调用）──
+            floor = set(cfg.enabled_models) | set(cfg.model_specs)
+            floor |= {s.get("model_id") for s in cfg.model_specs.values()
+                      if isinstance(s, dict) and s.get("model_id")}
+            if model_id not in floor:
+                self._send_json({"error": "model_not_routable",
+                                 "detail": f"{model_id} 不在提供方 {name} 的"
+                                           "可路由集（enabled_models ∪ model_specs）内"},
+                                status=400)
+                return
+            # 撞名集合：本地名 ∪ 池逻辑名 / 云短名 / 其他别名（幂等重设除外）
+            local_names = set()
+            mgr = getattr(pm, "mgr", None)
+            if mgr is not None:
+                local_names = {m.served_name for m in mgr._models.values()
+                               if getattr(m, "served_name", None)}
+            pool_reg = getattr(pm, "pool_registry", None)
+            if pool_reg is not None:
+                try:
+                    local_names |= set(pool_reg.snapshot().pools.keys())
+                except Exception as e:
+                    log.warning("pool registry snapshot failed: %s", e)
+            registry_short_names = {k for k in pm.cloud.cloud_models
+                                    if "/" not in k}
+            other_aliases = set()
+            for pname, pc in pm.cloud.providers.items():
+                for a, mid in pc.aliases.items():
+                    if pname == name and a == alias and mid == model_id:
+                        continue  # 幂等重设不与自己撞
+                    other_aliases.add(a)
+            ok, why = validate_alias(alias, name, model_id,
+                                     local_names=local_names,
+                                     registry_short_names=registry_short_names,
+                                     other_aliases=other_aliases)
+            if not ok:
+                self._send_json({"error": "alias_conflict", "detail": why},
+                                status=400)
+                return
+            backup_aliases = dict(cfg.aliases)
+            backup_retired = {p: dict(v)
+                              for p, v in pm.cloud._retired_aliases.items()}
+            # 同行旧别名让位（每行至多一个）；显式重设即确认恢复退役条目
+            for a, mid in list(cfg.aliases.items()):
+                if mid == model_id and a != alias:
+                    del cfg.aliases[a]
+            cfg.aliases[alias] = model_id
+            pm.cloud.unretire_alias(name, alias)
+            action = "updated"
+        else:
+            # ── 移除：按 (provider, model_id) 行清别名（幂等）──
+            backup_aliases = dict(cfg.aliases)
+            backup_retired = {p: dict(v)
+                              for p, v in pm.cloud._retired_aliases.items()}
+            removed = [a for a, mid in cfg.aliases.items() if mid == model_id]
+            for a in removed:
+                del cfg.aliases[a]
+            action = "removed" if removed else "not_set"
+
+        try:
+            pm.cloud.save_config()
+        except Exception as e:
+            cfg.aliases.clear()
+            cfg.aliases.update(backup_aliases)
+            pm.cloud._retired_aliases = backup_retired
+            log.error("Failed to persist alias change: %s", e)
+            self._send_json({"error": "save_failed", "detail": str(e)}, status=500)
+            return
+        self._send_json({"status": action, "provider": name,
+                         "model_id": model_id,
+                         "config_fingerprint": pm.cloud.config_fingerprint()})
+
     def _handle_cloud_providers(self, pm):
         """GET/POST/DELETE /admin/cloud/providers — 列出、添加或删除 provider。"""
         if self.command == "GET":
@@ -3325,6 +3433,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         elif self.command == "DELETE":
             data = self._read_body()
             name = (data or {}).get("name", "")
+            # PR2: 删除前退役别名 → 顶层 retired_aliases（未激活、不自动复活；
+            # provider 不存在时 no-op，不改变 drop 的 KeyError 语义）
+            pm.cloud.retire_provider_aliases(name)
             try:
                 pm.cloud.drop_provider(name)
             except KeyError:

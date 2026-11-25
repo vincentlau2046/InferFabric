@@ -115,3 +115,173 @@ def test_provider_delete_retires_aliases_no_auto_reactivate(tmp_path):
     assert cd3._retired_aliases == {}
     on_disk2 = yaml.safe_load(p.read_text())
     assert "retired_aliases" not in on_disk2
+
+
+# ── Task 2: validate_alias + POST /admin/cloud/provider-alias ─────────
+
+import json
+from types import SimpleNamespace
+
+from inferfabric.cloud_discovery import validate_alias
+from inferfabric.proxy.handler import ProxyHandler
+
+
+def _mk_handler(cd, command="GET", body=b""):
+    """ProxyHandler.__new__ + stub（照 test_cloud_provider_update.py 同款）。"""
+    h = ProxyHandler.__new__(ProxyHandler)
+    h.command = command
+    sent = []
+    h._send_json = lambda data, status=200, extra_headers=None: sent.append((data, status))
+    h._read_body = lambda: json.loads(body.decode("utf-8")) if body else {}
+    return h, sent
+
+
+class TestValidateAlias:
+    def _va(self, alias, *, local=(), short=(), others=()):
+        return validate_alias(alias, "prov-a", "glm-5",
+                              local_names=set(local),
+                              registry_short_names=set(short),
+                              other_aliases=set(others))
+
+    def test_ok_shapes(self):
+        for a in ("glm-5-b", "My_Model:2", "k3@beta", "a.b-c_d", "v1.2"):
+            ok, why = self._va(a)
+            assert ok, f"{a!r} 应合法: {why}"
+
+    def test_alias_conflict_local_name(self):
+        ok, why = self._va("glm-5", local={"glm-5"})
+        assert not ok and "glm-5" in why
+
+    def test_alias_conflict_reserved_fabric_prefix(self):
+        ok, why = self._va("fabric-fast")
+        assert not ok and "fabric-" in why
+
+    def test_alias_conflict_existing_short_name(self):
+        ok, why = self._va("glm-5", short={"glm-5"})
+        assert not ok and "glm-5" in why
+
+    def test_alias_conflict_other_alias(self):
+        ok, why = self._va("glm-5-b", others={"glm-5-b"})
+        assert not ok and "glm-5-b" in why
+
+    def test_alias_slash_rejected(self):
+        for bad in ("a/b", "a b", "", "  ", "别名", "a!b"):
+            ok, why = self._va(bad)
+            assert not ok, f"{bad!r} 应拒绝"
+
+
+def _mk_pm(cd):
+    return SimpleNamespace(cloud=cd,
+                           mgr=SimpleNamespace(_models={}),
+                           pool_registry=None)
+
+
+class TestProviderAliasEndpoint:
+    def _post(self, cd, body, pool_registry=None, models=None):
+        pm = _mk_pm(cd)
+        pm.pool_registry = pool_registry
+        if models:
+            pm.mgr._models = models
+        h, sent = _mk_handler(cd, command="POST", body=json.dumps(body).encode())
+        h._handle_cloud_provider_alias(pm)
+        return sent
+
+    def _cd(self, tmp_path, aliases=None):
+        return _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": aliases or {}},
+        })
+
+    def test_alias_set_and_persist(self, tmp_path):
+        cd, p = self._cd(tmp_path)
+        fp = cd.disk_fingerprint()
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "glm-5-b",
+                               "expected_config_fingerprint": fp})
+        assert sent[0][1] == 200, sent
+        assert cd.alias_target("glm-5-b") == ("prov-a", "glm-5")
+        assert yaml.safe_load(p.read_text())["providers"]["prov-a"]["aliases"] \
+            == {"glm-5-b": "glm-5"}
+
+    def test_alias_remove_via_empty(self, tmp_path):
+        cd, p = self._cd(tmp_path, aliases={"glm-5-b": "glm-5"})
+        fp = cd.disk_fingerprint()
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "",
+                               "expected_config_fingerprint": fp})
+        assert sent[0][1] == 200, sent
+        assert cd.alias_target("glm-5-b") is None
+        # 序列化契约：空 aliases 不落盘（非空才写）
+        assert yaml.safe_load(p.read_text())["providers"]["prov-a"].get("aliases", {}) == {}
+
+    def test_alias_fingerprint_conflict_409(self, tmp_path):
+        cd, _p = self._cd(tmp_path)
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "glm-5-b",
+                               "expected_config_fingerprint": "stale-stale-stale"})
+        assert sent[0][1] == 409, sent
+        assert sent[0][0]["error"] == "config_conflict"
+        assert len(sent[0][0]["config_fingerprint"]) == 16
+
+    def test_alias_model_not_routable_400(self, tmp_path):
+        cd, _p = self._cd(tmp_path)
+        fp = cd.disk_fingerprint()
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "no-such",
+                               "alias": "x1",
+                               "expected_config_fingerprint": fp})
+        assert sent[0][1] == 400, sent
+        assert sent[0][0]["error"] == "model_not_routable"
+
+    def test_alias_conflict_via_endpoint_local_and_pool(self, tmp_path):
+        """端点把本地名与池逻辑名并入 local_names — 撞名拒绝且不写入。"""
+        cd, _p = self._cd(tmp_path)
+
+        class _M:
+            served_name = "glm-5"
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "glm-5",
+                               "expected_config_fingerprint": cd.disk_fingerprint()},
+                          models={"m": _M()})
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+
+        class _Pool:
+            def snapshot(self):
+                return SimpleNamespace(pools={"fast-pool": SimpleNamespace()})
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "fast-pool",
+                               "expected_config_fingerprint": cd.disk_fingerprint()},
+                          pool_registry=_Pool())
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+        assert cd.alias_target("fast-pool") is None
+
+    def test_alias_set_unretires_deleted_pair(self, tmp_path):
+        """重建同名 provider 后端点显式重设 → 激活且 retired 清空。"""
+        cd, p = self._cd(tmp_path)
+        # 退役：删除 provider（retire → drop → save）
+        cd.retire_provider_aliases("prov-a")
+        cd.drop_provider("prov-a")
+        cd.save_config()
+        # 重建同名 provider（无别名）：写回 YAML 后 reload（POST add 的磁盘等价态）
+        _write_yaml(p, {"providers": {"prov-a": {
+                            "openai_base": "http://a",
+                            "enabled_models": ["glm-5"]}},
+                        "retired_aliases": {"prov-a": {"glm-5-b": "glm-5"}}})
+        cd.reload()
+        assert cd.alias_target("glm-5-b") is None
+        fp = cd.disk_fingerprint()
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "glm-5-b",
+                               "expected_config_fingerprint": fp})
+        assert sent[0][1] == 200, sent
+        assert cd.alias_target("glm-5-b") == ("prov-a", "glm-5")
+        assert cd._retired_aliases == {}
+
+    def test_provider_delete_endpoint_retires_aliases(self, tmp_path):
+        """DELETE /admin/cloud/providers 调 retire_provider_aliases（Task 1 接线）。"""
+        cd, p = self._cd(tmp_path, aliases={"glm-5-b": "glm-5"})
+        h, sent = _mk_handler(cd, command="DELETE",
+                              body=json.dumps({"name": "prov-a"}).encode())
+        h._handle_cloud_providers(_mk_pm(cd))
+        assert sent[0][1] == 200, sent
+        on_disk = yaml.safe_load(p.read_text())
+        assert on_disk["retired_aliases"] == {"prov-a": {"glm-5-b": "glm-5"}}
