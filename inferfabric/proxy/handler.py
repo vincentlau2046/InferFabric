@@ -2770,7 +2770,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         return conn
 
     def _probe_cloud_endpoint(self, base_url: str, api_key: str, protocol: str,
-                              probe_model: str, resolved_ip: str) -> dict:
+                              probe_model: str, resolved_ip: str,
+                              probe_timeout: int = 15) -> dict:
         """Probe one provider base URL; classify the result.
 
         Returns {"status", "protocol", "url", "http_status", "model_count",
@@ -2839,7 +2840,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for path_url in paths:
             path = path_url[len(base):] or "/"
             try:
-                conn = self._make_pinned_conn(host, port, resolved_ip, use_tls)
+                conn = self._make_pinned_conn(host, port, resolved_ip, use_tls,
+                                              timeout=probe_timeout)
             except Exception as e:
                 return {"status": "error", "protocol": protocol, "url": base_url,
                         "http_status": 0, "model_count": 0,
@@ -2993,13 +2995,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"provider": name, "key_set": key_set, "results": results, "ok": ok})
 
     def _handle_cloud_provider_update(self, pm):
-        """POST /admin/cloud/provider-update — 原地编辑非凭证字段（指纹 CAS）。
+        """POST /admin/cloud/provider-update — 原地编辑（指纹 CAS + 凭证门禁）。
 
         body: {name, expected_config_fingerprint, display_name?, timeout?,
-               discovery_enabled?, discovery_interval?, include_pattern?}
-        缺省 = 不改。凭证/端点变更与 enabled 切换不在本端点（Task 3/4）。
-        失败语义：404 未知提供方；409 指纹冲突（响应带当前指纹供刷新重试）；
-        500 落盘失败（内存以编辑前快照回滚，磁盘保持原值）。
+               discovery_enabled?, discovery_interval?, include_pattern?,
+               openai_base?, anthropic_base?, api_key?, key_action?, probe_model?}
+        缺省 = 不改。key_action: keep（默认）｜replace（需 api_key 非空）｜none（置空）。
+        门禁：换域 + keep → 400 destination_key_unconfirmed（旧 Key 绝不自动发往
+        新域）；外部托管 Key 不可覆盖（external_key_managed）；api_key 或任一 base
+        变更 → 对每个仍配置 base 且 provider 启用的协议，用拟应用值发 1-token 真
+        实生成探针（公共 /models 200 不算鉴权通过；探针超时 60s）；任一失败 →
+        400 probe_failed，零写入。放行后 save_config() 成功才写 secrets.env 并
+        覆盖 env 注入残留（受管优先，出站值真实变化）。
+        失败语义：404 未知提供方；409 指纹冲突（带当前指纹供刷新重试）；
+        500 落盘失败（内存以编辑前快照回滚，env 同步还原）。
         """
         body = self._read_body() or {}
         name = body.get("name") or ""
@@ -3012,7 +3021,94 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "config_conflict",
                              "config_fingerprint": current_fp}, status=409)
             return
+
+        # ── 凭证/端点意图解析 ─────────────────────────────────────
+        key_action = (body.get("key_action") or "keep").strip()
+        new_api_key = (body.get("api_key") or "").strip()
+        if key_action not in ("keep", "replace", "none"):
+            self._send_json({"error": "invalid_key_action"}, status=400)
+            return
+        if key_action == "replace" and not new_api_key:
+            self._send_json({"error": "api_key_required",
+                             "detail": "key_action=replace 需要 api_key 非空"}, status=400)
+            return
+        if new_api_key and key_action != "replace":
+            self._send_json({"error": "api_key_required",
+                             "detail": "api_key 仅可随 key_action=replace 提交"}, status=400)
+            return
+
+        def _dest(url: str):
+            u = urlparse(url or "")
+            scheme = u.scheme or "https"
+            return (scheme, (u.hostname or "").lower(),
+                    u.port or (443 if scheme == "https" else 80))
+
+        new_openai = str(body["openai_base"]).strip() \
+            if body.get("openai_base") is not None else (cfg.openai_base or "")
+        new_anthropic = str(body["anthropic_base"]).strip() \
+            if body.get("anthropic_base") is not None else (cfg.anthropic_base or "")
+        changed_dests = []
+        for proto, old_b, new_b in (("openai", cfg.openai_base, new_openai),
+                                    ("anthropic", cfg.anthropic_base, new_anthropic)):
+            if new_b and _dest(new_b) != _dest(old_b):
+                changed_dests.append(proto)
+
+        if changed_dests and key_action == "keep":
+            # 旧 Key 绝不自动发往新域 — 换域须显式 replace 或显式 none
+            self._send_json({"error": "destination_key_unconfirmed",
+                             "protocols": changed_dests,
+                             "detail": "更换端点须显式确认凭证：key_action=replace（新 Key）或 none（无凭证）"},
+                            status=400)
+            return
+
+        if key_action == "replace" and cfg.key_env_var \
+                and not pm.cloud.secrets.has(cfg.key_env_var) \
+                and os.environ.get(cfg.key_env_var):
+            # 外部环境托管的凭证不可在管理面覆盖：env 外部值会在下轮注入覆盖，
+            # 覆写只会造成「看似成功、重启回滚」的半套状态
+            self._send_json({"error": "external_key_managed",
+                             "detail": "该 Key 由外部环境变量托管，请在环境中更换"}, status=400)
+            return
+
+        # ── 探针门禁（零变更不联网；改动先探测后落盘）─────────────
+        cred_changed = key_action == "replace" or (key_action == "none" and bool(cfg.api_key))
+        if cred_changed or changed_dests:
+            probe_model = (body.get("probe_model") or "").strip() \
+                or (cfg.enabled_models[0] if cfg.enabled_models else "")
+            if not probe_model:
+                self._send_json({"error": "probe_target_missing",
+                                 "detail": "请传 probe_model，或先为该提供方启用至少一个模型"},
+                                status=400)
+                return
+            cur_key = cfg.api_key
+            if cur_key.startswith("${") and cur_key.endswith("}"):
+                cur_key = os.environ.get(cur_key[2:-1], "")
+            for proto in ("openai", "anthropic"):
+                new_b = new_openai if proto == "openai" else new_anthropic
+                if not new_b or not cfg.enabled:
+                    continue  # 未配置该协议 / 提供方停用 → 不探
+                key_for_probe = new_api_key if key_action == "replace" \
+                    else ("" if key_action == "none" else cur_key)
+                valid, reason, safe_ips = self._validate_cloud_test_url(new_b, pm)
+                if not valid:
+                    self._send_json({"error": "probe_failed", "protocol": proto,
+                                     "detail": f"URL check failed: {reason}"}, status=400)
+                    return
+                r = self._probe_cloud_endpoint(new_b, key_for_probe, proto,
+                                               probe_model, safe_ips[0], probe_timeout=60)
+                # 放行证据 = 真实 1-token 生成（ok）或已验证鉴权（403+模型不在套餐）
+                passed = r.get("status") == "ok" or (
+                    r.get("status") == "model_unavailable" and r.get("http_status") == 403)
+                if not passed:
+                    self._send_json({"error": "probe_failed", "protocol": proto,
+                                     "detail": r.get("message", ""),
+                                     "probe_status": r.get("status")}, status=400)
+                    return
+
+        # ── 应用（全部通过才落盘；save 成功才写 secrets/env）──────
         backup = copy.deepcopy(cfg)
+        touched_env = {}
+        env_var = cfg.key_env_var or pm.cloud._env_key_for_provider(name)
         try:
             if body.get("display_name") is not None:
                 cfg.display_name = str(body["display_name"])
@@ -3024,9 +3120,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 cfg.discovery_interval = int(body["discovery_interval"])
             if body.get("include_pattern") is not None:
                 cfg.include_pattern = str(body["include_pattern"])
+            if body.get("openai_base") is not None:
+                cfg.openai_base = str(body["openai_base"]).strip()
+            if body.get("anthropic_base") is not None:
+                cfg.anthropic_base = str(body["anthropic_base"]).strip()
+            if key_action == "replace":
+                cfg.api_key = f"${{{env_var}}}"   # YAML 只存引用，明文只进 secrets.env
+                cfg.key_env_var = env_var
+            elif key_action == "none":
+                cfg.api_key = ""
             pm.cloud.save_config()
+            if key_action == "replace":
+                # env 覆盖 setdefault 注入残留（受管优先）— 否则「改了文件」
+                # 不等于「出站换了 Key」
+                pm.cloud.secrets.write(env_var, new_api_key)
+                touched_env[env_var] = os.environ.get(env_var)
+                os.environ[env_var] = new_api_key
         except Exception as e:
             pm.cloud.providers[name] = backup  # 内存回滚（磁盘未动）
+            for var, old in touched_env.items():
+                if old is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = old
             self._send_json({"error": "save_failed", "detail": str(e)}, status=500)
             return
         self._send_json({"status": "updated",
