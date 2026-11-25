@@ -69,6 +69,20 @@ class ConsoleAuth:
             raise ValueError('console password not initialized')
         return row[0]
 
+    def _match_record(self, password):
+        """(valid, raw) for password against the stored record; (False, None) on unset/damaged."""
+        try:
+            raw = self._record()
+            record = json.loads(raw)
+            if record['v'] != 1 or len(record['salt']) != 32 or len(record['hash']) != 64:
+                raise ValueError('invalid password record')
+            valid = hmac.compare_digest(
+                _derive(_password_bytes(password), bytes.fromhex(record['salt'])),
+                bytes.fromhex(record['hash']))
+        except (ValueError, KeyError, TypeError):
+            return False, None
+        return valid, raw
+
     def login(self, password):
         with self._lock:
             now = self._clock()
@@ -79,16 +93,7 @@ class ConsoleAuth:
                 raise LoginError(429)
             # Bound total KDF work, including successful login churn.
             self._attempts.append(now)
-            try:
-                raw = self._record()
-                record = json.loads(raw)
-                if record['v'] != 1 or len(record['salt']) != 32 or len(record['hash']) != 64:
-                    raise ValueError('invalid password record')
-                valid = hmac.compare_digest(
-                    _derive(_password_bytes(password), bytes.fromhex(record['salt'])),
-                    bytes.fromhex(record['hash']))
-            except (ValueError, KeyError, TypeError):
-                valid = False
+            valid, raw = self._match_record(password)
             if not valid:
                 log.warning('Console login rejected')
                 raise LoginError()
@@ -99,6 +104,17 @@ class ConsoleAuth:
             self._sessions[session] = (csrf, now + 900, raw)
             log.info('Console login accepted')
             return session, csrf
+
+    def verify_current(self, password):
+        """Verify password against the current record (PR3 WS4 password change).
+
+        Raises LoginError on wrong/unset password. Touches neither the login
+        rate-limit window nor the session store.
+        """
+        valid, _ = self._match_record(password)
+        if not valid:
+            log.warning('Console password verification rejected')
+            raise LoginError()
 
     def validate(self, session, csrf, *, write):
         with self._lock:
