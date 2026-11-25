@@ -117,14 +117,10 @@
     return '<svg width="' + size + '" height="' + size + '"><use href="#s-' + name + '"/></svg>';
   }
 
-  /* ── adminHeaders（自 legacy 巨石模块逐字移植，原行 269）
-   * 读 #adminToken 输入（若存在），否则取 ?token= URL 参数；
-   * 非空时附带 X-Admin-Token。 ── */
+  /* ── adminHeaders（issue #47：控制面零凭证 — 只带 Content-Type；
+   * 凭证头/#凭证输入框概念已删除，所有面板统一经此取请求头） ── */
   function adminHeaders() {
-    var h = { 'Content-Type': 'application/json' };
-    var tk = document.getElementById('adminToken')?.value || new URLSearchParams(location.search).get('token') || '';
-    if (tk) h['X-Admin-Token'] = tk;
-    return h;
+    return { 'Content-Type': 'application/json' };
   }
 
   window.UI = {

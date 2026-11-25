@@ -278,13 +278,11 @@ def _write_pools_local(pools_path: Path, new_raw: dict) -> int:
     return rev
 
 
-def _admin_request(method: str, path: str, *, host, port, token,
+def _admin_request(method: str, path: str, *, host, port,
                    payload=None, timeout: float = 10.0):
     url = f"http://{host}:{port}{path}"
     data = json.dumps(payload).encode() if payload is not None else None
     headers = {"Content-Type": "application/json"} if data is not None else {}
-    if token:
-        headers["X-Admin-Token"] = token
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode() or "{}"
@@ -292,7 +290,7 @@ def _admin_request(method: str, path: str, *, host, port, token,
 
 
 def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
-                          port=None, token=None,
+                          port=None,
                           timeout: float = 10.0) -> dict:
     """Drop local candidates naming `model_names`; returns removed + reload state.
 
@@ -306,6 +304,7 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
        pending (takes effect at next proxy start / reload).
 
     An unreadable/invalid config raises PoolsConfigError either way.
+    Issue #47：控制面零凭证 — 不再读取/发送 admin token。
     """
     pools_path = Path(pools_path)
     if not pools_path.exists():
@@ -317,25 +316,12 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
 
     host = host or os.environ.get("EDGE_PROXY_HOST", "127.0.0.1")
     port = int(port or os.environ.get("EDGE_PROXY_PORT", "8999"))
-    if token is None:
-        # Review PR#15 N2: the proxy no longer seeds IFF_ADMIN_TOKEN into the
-        # environment (it leaked to engine subprocesses). A born token lives in
-        # the state-dir secrets.env — same priority as the proxy's own
-        # bootstrap: explicit env > secrets.env (legacy alias honored).
-        token = os.environ.get("IFF_ADMIN_TOKEN", "")
-        if not token:
-            try:
-                from inferfabric.cloud_discovery import SecretsManager
-                data = SecretsManager().load()
-                token = data.get("IFF_ADMIN_TOKEN") or data.get("MACFABRIC_ADMIN_TOKEN", "")
-            except OSError:
-                token = ""
 
     last_err = None
     for _attempt in range(2):   # one refresh+retry on revision conflict
         try:
             _s, view = _admin_request("GET", "/admin/model-pools", host=host,
-                                      port=port, token=token, timeout=timeout)
+                                      port=port, timeout=timeout)
         except urllib.error.HTTPError as e:
             raise PoolsConfigError(
                 f"pool admin API refused the read (HTTP {e.code}) — refusing "
@@ -368,7 +354,7 @@ def purge_pool_candidates(pools_path, model_names: set[str], *, host=None,
             # body). PUT was a PR #7 regression: no do_PUT exists server-side,
             # so the live-registry purge 501'd every time.
             _s, res = _admin_request("POST", "/admin/model-pools", host=host,
-                                     port=port, token=token, payload=payload,
+                                     port=port, payload=payload,
                                      timeout=timeout)
         except urllib.error.HTTPError as e:
             if e.code == 409:

@@ -44,8 +44,6 @@ from aiohttp import web
 from inferfabric import forwarder  # noqa: F401  (保持 _deps 注入顺序与线程模式一致)
 from inferfabric.proxy.handler import (
     ProxyHandler,
-    _validate_admin_token_safety,
-    bootstrap_admin_token,
     PROXY_HOST, PROXY_PORT,
     HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
 )
@@ -697,10 +695,7 @@ def start_async():
     fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
     logging.getLogger("inferfabric").addHandler(fh)
 
-    _validate_admin_token_safety()
-    # F7 review (PR3): async 启动同样引导 born token — 首设恒校验读取进程内
-    # _ADMIN_TOKEN；此前 async 只有 safety 检查，装好的服务首设永远 401。
-    bootstrap_admin_token()
+    # Issue #47：控制面零凭证 — 无 token 校验/引导。
 
     mgr = ProxyManager()
     shutdown_event = threading.Event()

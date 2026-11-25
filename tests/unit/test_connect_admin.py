@@ -4,13 +4,13 @@
 - GET /admin/connect/status → {clients:[{client,state,target,revision},...]}
 - POST /admin/connect/apply {client,expected_revision,confirmed:true,key_id,api_key}
 - POST /admin/connect/rollback {client,expected_revision,confirmed:true}
-- 错误映射：输入/确认缺失 400、token 缺失或错误 401、来源或对端拒绝 403、
+- 错误映射：输入/确认缺失 400、来源或对端拒绝 403、
   配置不可用 422、revision 冲突 409、文件 I/O 500；F7 不匹配/失效统一
   400 invalid_key（不区分命中情况）。
 - 门禁先于读含 key 的 body；对端只信 socket peer（threaded client_address /
   async request.transport peername），绝不相信转发头；Host 必须精确等于实例
-  回环 authority；POST 必须带同源 Origin；admin token 恒定时间比较，
-  Connect 不继承无 token 兼容放行。
+  回环 authority；POST 必须带同源 Origin；issue #47 后零凭证（token 头无
+  语义，不再有 401 分支）。
 - 成功/失败响应一律 Cache-Control: no-store，绝不回显 api_key，不写日志。
 
 repo 无 aiohttp 测试夹具（Ruling，同 test_admin_models_remove.py）：
@@ -34,12 +34,10 @@ ORIGIN = "http://" + HOST   # 拼接写法：URL 字面量 guard 不扫占位符
 # ── 假 self（函数级直测）─────────────────────────────────────────
 
 class _H:
-    def __init__(self, *, headers, body=b"", peer=None, async_peer=None,
-                 admin_token=ADMIN):
+    def __init__(self, *, headers, body=b"", peer=None, async_peer=None):
         self.headers = headers
         self._body = body
         self._sent = []
-        self._admin_token = admin_token
         if peer is not None:
             self.client_address = peer          # threaded 模式
         if async_peer is not None:
@@ -108,16 +106,16 @@ def wired(tmp_path, monkeypatch):
     return {"kid": kid["id"], "token": token, "target": target}
 
 
-def _call_apply(peer=None, async_peer=None, headers=None, body=None,
-                admin_token=ADMIN):
+def _call_apply(peer=None, async_peer=None, headers=None, body=None):
     h = _H(headers=headers or _post_headers(), body=body or _apply_body(),
-           peer=peer, async_peer=async_peer, admin_token=admin_token)
+           peer=peer, async_peer=async_peer)
     connect_handlers.handle_connect_apply(h, None)
     return h
 
 
 @pytest.mark.parametrize("use_async", [False, True])
-def test_connect_admin_requires_token_and_real_loopback(wired, use_async):
+def test_connect_admin_zero_credential_and_real_loopback(wired, use_async):
+    """Issue #47：token 缺/错不再 401（凭证概念删除）；对端/Host/Origin 保留。"""
     ok_peer = ("127.0.0.1", 51234)
     kw = {"async_peer": ok_peer} if use_async else {"peer": ok_peer}
 
@@ -131,13 +129,11 @@ def test_connect_admin_requires_token_and_real_loopback(wired, use_async):
     assert _last(h)[1] == 403
     assert not wired["target"].exists()
 
-    # 缺 admin token → 401
-    h = _call_apply(headers=_post_headers(token=None), **kw)
-    assert _last(h)[1] == 401
-
-    # 错 admin token → 401
-    h = _call_apply(headers=_post_headers(token="wrong"), **kw)
-    assert _last(h)[1] == 401
+    # 缺 admin token / 错 admin token → 门放行（token 头无语义），
+    # 走到 F7 key 校验：默认体 key 无效 → 400 invalid_key
+    for headers in (_post_headers(token=None), _post_headers(token="wrong")):
+        h = _call_apply(headers=headers, **kw)
+        assert _last(h)[1] == 400, headers
 
     # 错误端口 / 错误 Host / 跨站 Origin / 缺 Origin → 403
     for headers in (_post_headers(host="127.0.0.1:9999"),
@@ -149,15 +145,14 @@ def test_connect_admin_requires_token_and_real_loopback(wired, use_async):
     assert not wired["target"].exists()
 
     # 对端信息缺失（两处属性都拿不到）→ 403
-    h = _H(headers=_post_headers(), body=_apply_body(),
-           admin_token=ADMIN)
+    h = _H(headers=_post_headers(), body=_apply_body())
     connect_handlers.handle_connect_apply(h, None)
     assert _last(h)[1] == 403
     assert not wired["target"].exists()
 
-    # 同源 + 有效 token + 有效 key → 200 托管成功（正向放最后）
+    # 同源（token 头可无）+ 有效 key → 200 托管成功（正向放最后）
     body = _apply_body(key_id=wired["kid"], api_key=wired["token"])
-    h = _call_apply(headers=_post_headers(), body=body, **kw)
+    h = _call_apply(headers=_post_headers(token=None), body=body, **kw)
     obj, status, _ = _last(h)
     assert status == 200
     assert obj["state"] == "managed"
@@ -165,7 +160,7 @@ def test_connect_admin_requires_token_and_real_loopback(wired, use_async):
 
 
 def test_connect_gate_on_status_get(wired):
-    # GET /status：Origin 可省；token 错误仍 401；Host 错误 403
+    # GET /status：Origin 可省；无 token 也 200（issue #47 零凭证）；Host 错误 403
     h = _H(headers={"X-Admin-Token": ADMIN, "Host": HOST},
            peer=("127.0.0.1", 5000))
     connect_handlers.handle_connect_status(h, None)
@@ -177,7 +172,7 @@ def test_connect_gate_on_status_get(wired):
 
     h = _H(headers={"Host": HOST}, peer=("127.0.0.1", 5000))
     connect_handlers.handle_connect_status(h, None)
-    assert _last(h)[1] == 401
+    assert _last(h)[1] == 200   # 零凭证：无 token 头同样放行
 
     h = _H(headers={"X-Admin-Token": ADMIN, "Host": "127.0.0.1:1"},
            peer=("127.0.0.1", 5000))

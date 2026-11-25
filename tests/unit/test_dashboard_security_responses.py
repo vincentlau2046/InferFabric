@@ -22,6 +22,7 @@ class _FakeHandler:
     def __init__(self, body):
         self._body = body
         self.replies = []
+        self.command = "POST"
         self.headers = {"Host": "127.0.0.1:8999",
                         "Origin": "http://127.0.0.1:8999"}
 
@@ -31,7 +32,6 @@ class _FakeHandler:
     def _check_admin(self):
         # 路由级 round-trip 测试直连 _admin 包装器：门在本套件恒放行
         # （token 门语义已由 _TokenHandler 用例单独覆盖）
-        self._admin_token = getattr(self, "_admin_token", "")
         return True
 
     def _send_json(self, data, status=200, extra_headers=None):
@@ -183,46 +183,34 @@ def test_status_reports_password_set_field(env):
     assert status == 200 and data["password_set"] is True
 
 
-# ── 首次网页设密（PR3 WS4：管理员凭证恒校验 + iff keys init 语义） ──
+# ── 首次网页设密（PR3 WS4；issue #47 后零凭证 — 401 路径不存在） ──
 
 class _TokenHandler(_FakeHandler):
-    """带请求头与已注入管理凭证的 fake（真实分发中 _check_admin 设 _admin_token）。"""
+    """带请求头的 fake。issue #47 后 X-Admin-Token 无语义（服务端不读）—
+    保留传参以钉住「携带任意凭证头不影响放行」。"""
 
-    def __init__(self, body, token, headers=None):
+    def __init__(self, body, token=None, headers=None):
         super().__init__(body)
         self.headers = {"Host": "127.0.0.1:8999", **(headers or {})}
-        self._admin_token = token
+        if token:
+            self.headers["X-Admin-Token"] = token
 
 
 _TOKEN_OK = {"X-Admin-Token": "secret-token"}
 
 
-def test_console_password_missing_token_rejected_and_no_store(env):
-    # Review Focus 1：拒绝的首次设密不得落任何盘
-    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token")
-    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
-    data, status, _ = h.last
-    assert status == 401
-    assert "iff keys init" in data["error"]
-    assert not (env.tmp / "security.db").exists()
-    assert not (env.tmp / "security.enabled").exists()
-
-
-def test_console_password_wrong_token_rejected_and_no_store(env):
+def test_console_password_no_disk_on_untrusted_origin(env):
+    """拒绝先于落盘（浏览器安全面，走真实路由+真实门）：跨站 Origin → 403，
+    不建任何文件。"""
     h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
-                      headers={"X-Admin-Token": "nope"})
-    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+                      headers={"Origin": "http://evil.test"})
+    # 真实 _check_admin（而非 passthrough）驱动 Host/Origin 拒绝
+    h._check_admin = lambda: proxy_handler.ProxyHandler._check_admin(h)
+    proxy_handler._POST_ROUTES["/admin/security/console-password"](h, env.pm)
     data, status, _ = h.last
-    assert status == 401 and "iff keys init" in data["error"]
+    assert status == 403
     assert not (env.tmp / "security.db").exists()
     assert not (env.tmp / "security.enabled").exists()
-
-
-def test_console_password_unconfigured_token_rejected(env):
-    h = _TokenHandler({"new_password": "a-console-password"}, token="")
-    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
-    assert h.last[1] == 401
-    assert not (env.tmp / "security.db").exists()
 
 
 def test_console_password_first_set_provisions_store_without_policy_or_keys(env):
@@ -392,11 +380,12 @@ def test_read_body_json_null_replies_400():
     assert forwarder.read_body(h2) == {}   # 空对象不受影响
 
 
-def test_bootstrap_admin_token_shared_by_async(monkeypatch):
-    """review I4：async 启动必须引导 born token（否则首设恒 401）。"""
+def test_async_server_has_no_token_bootstrap():
+    """issue #47：async 启动不再有任何 token 引导（概念删除 pin）。"""
     import inspect
     from inferfabric.proxy import async_server
-    monkeypatch.setenv("IFF_ADMIN_TOKEN", "env-token-x")
-    assert proxy_handler.bootstrap_admin_token() == "env-token-x"
-    assert proxy_handler._ADMIN_TOKEN == "env-token-x"
-    assert "bootstrap_admin_token" in inspect.getsource(async_server.start_async)
+    source = inspect.getsource(async_server)
+    assert "bootstrap_admin_token" not in source
+    assert "_validate_admin_token_safety" not in source
+    assert not hasattr(proxy_handler, "bootstrap_admin_token")
+    assert not hasattr(proxy_handler, "_ADMIN_TOKEN")

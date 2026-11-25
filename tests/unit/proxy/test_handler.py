@@ -31,12 +31,11 @@ import pytest
 
 
 def _make_handler(monkeypatch, headers=None, admin_token=""):
-    """Create a ProxyHandler with minimal mocked state."""
-    monkeypatch.setenv("IFF_ADMIN_TOKEN", admin_token)
-    # Force re-import to pick up new _ADMIN_TOKEN
-    import importlib
+    """Create a ProxyHandler with minimal mocked state.
+
+    issue #47：admin_token 参数保留但已无语义（凭证概念删除），
+    不再改环境变量、不再 reload 模块。"""
     import inferfabric.proxy.handler as handler_module
-    importlib.reload(handler_module)
     ProxyHandler = handler_module.ProxyHandler
 
     h = ProxyHandler.__new__(ProxyHandler)
@@ -61,32 +60,12 @@ class FakeResponseCache:
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_admin_no_token_configured(monkeypatch):
-    """没有配置 admin token 时，所有请求都通过。"""
-    h, _ = _make_handler(monkeypatch, admin_token="")
-    assert h._check_admin() is True
-
-
-def test_admin_correct_token(monkeypatch):
-    """正确的 admin token 通过验证。"""
-    h, _ = _make_handler(monkeypatch, headers={"X-Admin-Token": "secret123"}, admin_token="secret123")
-    assert h._check_admin() is True
-
-
-def test_admin_wrong_token(monkeypatch):
-    """错误的 admin token 返回 401（严格模式）。"""
-    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
-    h, _ = _make_handler(monkeypatch, headers={"X-Admin-Token": "wrong"}, admin_token="secret123")
-    assert h._check_admin() is False
-    h._send_json.assert_called_once()
-    assert h._send_json.call_args[0][0]["status"] == "unauthorized"
-
-
-def test_admin_missing_token(monkeypatch):
-    """没有提供 token 时返回 401（严格模式且配置了 token）。"""
-    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
-    h, _ = _make_handler(monkeypatch, headers={}, admin_token="secret123")
-    assert h._check_admin() is False
+def test_admin_zero_credential_passes(monkeypatch):
+    """Issue #47：零凭证门 — 任意/缺失 token 头不影响放行（401 不存在）。"""
+    for headers in ({}, {"X-Admin-Token": "wrong"}, {"X-Admin-Token": "secret123"}):
+        h, _ = _make_handler(monkeypatch, headers=headers)
+        assert h._check_admin() is True, headers
+        h._send_json.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -223,10 +202,9 @@ def test_gpu_clear_failure(monkeypatch):
 # ═══════════════════════════════════════════════════════════════
 
 
-def test_admin_guard_blocks_unauthorized(monkeypatch):
-    """_admin guard 阻止未授权请求执行 handler（严格模式）。"""
-    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
-    h, mod = _make_handler(monkeypatch, headers={}, admin_token="secret123")
+def test_admin_guard_blocks_untrusted_host(monkeypatch):
+    """_admin guard 阻止不可信 Host（浏览器安全保留；凭证概念已删除）。"""
+    h, mod = _make_handler(monkeypatch, headers={"Host": "evil.test"})
     _admin = mod._admin
     pm = MagicMock()
 
@@ -235,8 +213,9 @@ def test_admin_guard_blocks_unauthorized(monkeypatch):
     guarded(h, pm)
     # handler should NOT have been called
     fn.assert_not_called()
-    # but 401 should have been sent
+    # but 403 should have been sent
     h._send_json.assert_called_once()
+    assert h._send_json.call_args[0][1] == 403
 
 
 def test_admin_guard_allows_authorized(monkeypatch):

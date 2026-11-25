@@ -10,7 +10,7 @@ info:
     
     ## Authentication
     
-    - **Control-plane routes** (`/switch`, `/stop`, `/deploy`, `/pull`, `/admin/cloud/*`, etc.) require `X-Admin-Token` header when `IFF_ADMIN_TOKEN` is configured. If no token is configured, these routes are open (localhost-only binding is the security boundary).
+    - **Control-plane routes** (`/switch`, `/stop`, `/deploy`, `/pull`, `/admin/cloud/*`, etc.) require no credentials (issue #47: single-user local workstation, zero-friction). Browser-security Host/Origin checks still apply; API-key sensitive operations are protected by the console session + password.
     - **Inference routes** (`/v1/chat/completions`, `/v1/messages`, etc.) do not require admin auth; they may require API keys for cloud provider forwarding.
     - **Cloud provider API keys** are referenced via `${ENV_VAR}` syntax and stored in a `chmod 600` secrets file — never in plaintext config.
     
@@ -39,9 +39,9 @@ tags:
   - name: Ollama
     description: Ollama-compatible native endpoints (transparent pass-through)
   - name: Control
-    description: Model lifecycle control (requires admin token)
+    description: Model lifecycle control (no credentials; localhost workstation)
   - name: Cloud Admin
-    description: Cloud provider management (requires admin token)
+    description: Cloud provider management (no credentials; localhost workstation)
   - name: Monitoring
     description: Health, status, metrics, and system info
   - name: Dashboard
@@ -295,8 +295,6 @@ paths:
         Switch the active model. Accepts `model` (or deprecated `profile`) field.
         Setting model to `"idle"` stops all active services.
       operationId: switchModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -321,8 +319,6 @@ paths:
       summary: Stop a service
       description: Stop a specific shared service by model name.
       operationId: stopModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -347,8 +343,6 @@ paths:
       summary: Sleep a model
       description: Put a model to sleep (suspends its process).
       operationId: sleepModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -373,8 +367,6 @@ paths:
       summary: Wake a sleeping model
       description: Resume a model that was put to sleep.
       operationId: wakeModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -400,8 +392,6 @@ paths:
       description: |
         Force all models to idle state. Stops all active services and resets GPU mode to idle.
       operationId: resetAll
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Reset result
@@ -418,8 +408,6 @@ paths:
       summary: Reconcile state
       description: Fix inconsistencies between `state.db` and actual running services.
       operationId: reconcile
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Reconcile result
@@ -436,8 +424,6 @@ paths:
       summary: Deploy a model
       description: Auto-deploy a new model by name. If already configured, performs a switch.
       operationId: deployModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -462,8 +448,6 @@ paths:
       summary: Pull a model
       description: Pull/download a model by name, optionally specifying the framework.
       operationId: pullModel
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -490,8 +474,6 @@ paths:
         Reload `models.d/*.yaml` configuration files and refresh the dashboard cache.
         Added in v5.2.0 via ConfigReloader.
       operationId: reloadConfig
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Config reloaded
@@ -512,8 +494,6 @@ paths:
       summary: List cloud providers and models
       description: Returns all configured cloud providers, their discovered models, and metadata.
       operationId: listCloudProviders
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Provider list
@@ -533,8 +513,6 @@ paths:
         
         API keys are automatically persisted to `secrets.env` (chmod 600) as `${ENV_VAR}` references.
       operationId: addCloudProvider
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -564,8 +542,6 @@ paths:
       summary: Delete a cloud provider
       description: Remove a cloud provider and all its discovered models. Persists the change to config.
       operationId: deleteCloudProvider
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -594,8 +570,6 @@ paths:
       summary: List cloud provider presets
       description: "Returns all pre-configured cloud provider presets (9 presets: 百度千帆, 火山方舟, 阿里百炼, DeepSeek, 智谱AI, Moonshot, OpenAI, Anthropic, Custom Relay)."
       operationId: listCloudPresets
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Preset list
@@ -612,8 +586,6 @@ paths:
       summary: Hot-reload cloud provider config
       description: Reload `cloud_provider.yaml` and re-discover all models. Restarts the polling thread.
       operationId: reloadCloudConfig
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Config reloaded
@@ -630,8 +602,6 @@ paths:
       summary: Manually trigger cloud discovery
       description: Trigger immediate model discovery from all enabled cloud providers.
       operationId: discoverCloudModels
-      security:
-        - AdminToken: []
       responses:
         "200":
           description: Discovery result
@@ -661,8 +631,6 @@ paths:
         reported in-band via `status: error`, never as 5xx):
         ok | ok_no_listing | rate_limited | auth_failed | model_unavailable | error
       operationId: testCloudProvider
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -695,8 +663,6 @@ paths:
         never returned — only `key_set: bool`. Same SSRF boundary and pinned
         connection as /admin/cloud/test.
       operationId: testCloudProviderStored
-      security:
-        - AdminToken: []
       requestBody:
         required: true
         content:
@@ -1075,12 +1041,6 @@ paths:
                 type: object
 
 components:
-  securitySchemes:
-    AdminToken:
-      type: apiKey
-      in: header
-      name: X-Admin-Token
-      description: Admin token for control-plane routes. Required when `IFF_ADMIN_TOKEN` is set.
 
   responses:
     BadRequest:
@@ -1091,7 +1051,7 @@ components:
             $ref: ./components/schemas.yaml#/ErrorResponse
 
     Unauthorized:
-      description: Unauthorized (missing or invalid admin token)
+      description: Unauthorized (e.g. console session missing for /admin/keys/*)
       content:
         application/json:
           schema:

@@ -2,7 +2,7 @@
 
 POST /admin/connect/apply、/admin/connect/rollback、GET /admin/connect/status
 的请求门禁与转发。文件事务全部在 platform.clients.ConnectManager（Task 1），
-本模块只做：对端/Host/Origin/token 门禁 → F7 key 校验 → 调用事务 → 错误映射。
+本模块只做：对端/Host/Origin 门禁 → F7 key 校验 → 调用事务 → 错误映射。
 
 安全裁决（计划 Task 2 + Review Focus 1/3）：
 - 门禁先于读含 key 的 body；对端只信 socket peer（threaded
@@ -10,8 +10,8 @@ POST /admin/connect/apply、/admin/connect/rollback、GET /admin/connect/status
   request.transport 注入），缺信息即拒绝，绝不读转发头。
 - Host 必须精确等于实例回环 authority（端口错 = 403）；POST 必须携带
   同源 Origin（scheme+authority 全等，非宽松后缀匹配）。
-- admin token 恒定时间比较；Connect 不继承 _admin_gate 的无 token 兼容
-  放行 — 没有配置 token 一律 401。
+- Issue #47（2026-11-25）：admin token 概念删除 — 门禁只剩对端/Host/Origin
+  浏览器安全校验，本机零凭证。
 - F7 key 校验：active_key_id(api_key) == key_id（同一 HMAC/摘要路径），
   不匹配/失效/store 缺失统一 400 invalid_key，不区分命中情况。
 - 本模块不写日志（token/key 无泄漏面）；所有响应 Cache-Control: no-store，
@@ -20,7 +20,6 @@ POST /admin/connect/apply、/admin/connect/rollback、GET /admin/connect/status
 """
 from __future__ import annotations
 
-import hmac
 import os
 from pathlib import Path
 
@@ -74,19 +73,9 @@ def _peer_host(h) -> str | None:
     return str(peer)
 
 
-def _configured_token(h) -> str:
-    configured = getattr(h, "_admin_token", "")
-    if configured:
-        return str(configured)
-    try:  # 延迟导入避免与 handler.py 循环
-        from inferfabric.proxy.handler import _ADMIN_TOKEN
-        return _ADMIN_TOKEN or ""
-    except Exception:
-        return ""
-
-
 def _gate(h, *, write: bool) -> bool:
-    """Connect 专用门禁；失败已发送 401/403 并返回 False。"""
+    """Connect 专用门禁（issue #47：凭证概念删除，仅对端/Host/Origin）；
+    失败已发送 403 并返回 False。"""
     peer = _peer_host(h)
     if peer not in ("127.0.0.1", "::1", "localhost"):
         h._send_json({"error": "untrusted peer", "code": "forbidden"},
@@ -108,16 +97,6 @@ def _gate(h, *, write: bool) -> bool:
     if not origin_ok:
         h._send_json({"error": "untrusted origin", "code": "forbidden"},
                      403, extra_headers=_NO_STORE)
-        return False
-    token = h.headers.get("X-Admin-Token", "")
-    configured = _configured_token(h)
-    if not configured or not isinstance(token, str) or \
-            not hmac.compare_digest(token, configured):
-        h._send_json(
-            {"error": "Unauthorized", "status": "unauthorized",
-             "hint": "admin token required (X-Admin-Token); configure "
-                     "IFF_ADMIN_TOKEN to enable management auth"},
-            401, extra_headers=_NO_STORE)
         return False
     return True
 

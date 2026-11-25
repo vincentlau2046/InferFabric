@@ -41,7 +41,6 @@ python3 -m inferfabric.proxy.handler          # Start proxy on :8999
 #   EDGE_PROXY_PORT=8999        Listen port
 #   EDGE_AUTO_SWITCH=1          Auto-switch model on request (default: off)
 #   EDGE_HEALTH_CHECK=60        Health check interval (seconds)
-#   IFF_ADMIN_TOKEN=<secret>    Admin route auth token
 
 # ── Benchmarks (results → bench_results/) ──
 bash benchmarks/run_all.sh
@@ -162,7 +161,6 @@ EDGE_PROXY_HOST=127.0.0.1         # Bind address
 EDGE_PROXY_PORT=8999              # Listen port (default 8999)
 EDGE_AUTO_SWITCH=0                # Auto-switch on request (1 to enable)
 EDGE_HEALTH_CHECK=60              # Health check interval (s)
-IFF_ADMIN_TOKEN=                  # Admin route auth (empty = localhost-only)
 IFF_DATA_DIR=~/.inferfabric       # Data dir (state.db, logs, secrets, cloud_provider.yaml)
 IFF_OPERATIONAL_CONFIRM=1         # Unlocks operational tests
 ```

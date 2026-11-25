@@ -13,15 +13,11 @@ set -euo pipefail
 IFF_HOST="${IFF_HOST:-127.0.0.1}"
 IFF_PORT="${IFF_PORT:-8999}"
 BASE="http://${IFF_HOST}:${IFF_PORT}"
-ADMIN_TOKEN="${IFF_ADMIN_TOKEN:-}"
-
 _curl() {
     local method="${1:-GET}" path="$2"
     shift 2
+    # issue #47：控制面零凭证 — 不再发送 admin token
     local -a args=(curl -s -X "${method}" "${BASE}${path}")
-    if [[ -n "$ADMIN_TOKEN" ]]; then
-        args+=(-H "X-Admin-Token: ${ADMIN_TOKEN}")
-    fi
     args+=(-H "Content-Type: application/json" "$@")
     "${args[@]}"
 }
@@ -64,6 +60,5 @@ else:
         echo "环境变量:"
         echo "  IFF_HOST         IFF 主机 (默认 127.0.0.1)"
         echo "  IFF_PORT         IFF 端口 (默认 8999)"
-        echo "  IFF_ADMIN_TOKEN  Admin token"
         ;;
 esac

@@ -196,7 +196,7 @@
       if (err) {
         if (err.unauthorized) {
           // 401 专用提示，不被通用错误覆盖
-          UI.toast('401：需要 admin token — 请在右上角输入后重试', 'error');
+          UI.toast('401：请求被拒绝 — 请刷新页面后重试', 'error');
           return;
         }
         if (status === 409 || (j && j.code === 'conflict')) {

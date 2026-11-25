@@ -3,7 +3,7 @@
  * 数据源：
  *   - GET  /admin/security/status           → {active,policy,enforced,key_count,keys[],password_set}
  *   - POST /admin/security/enable           {enforce}（成功响应可能含一次性明文 key）
- *   - POST /admin/security/console-password {new_password}（首次设密 — 需 X-Admin-Token）
+ *   - POST /admin/security/console-password {new_password}（首次设密 — 本机零凭证）
  *   - POST /admin/keys/login                {password}（改密第一跳 — 当前密码换会话 + CSRF）
  *   - POST /admin/keys/password             {current_password,new_password}（改密第二跳 — X-CSRF-Token）
  *
@@ -11,7 +11,7 @@
  *   - 本机零门槛边界：设置页不设登录；开关只影响推理 API 客户端与 Key 敏感操作。
  *   - 推理鉴权开/关写前 UI.confirm（开=客户端将 401；关=仅迁移宽限，key 全保留）。
  *   - Key 保护密码只保护 API Key 敏感操作（PR4 reveal 等），不是控制台登录。
- *   - 首设走 console-password（管理员凭证恒校验）；改密走会话两跳（login → password）。
+ *   - 首设走 console-password（本机零凭证）；改密走会话两跳（login → password）。
  *   - 密码值只进 login/console-password/keys-password 三个请求体 — 绝不进 GET、
  *     innerHTML、toast 文案、浏览器存储；一次性 key 明文只经 textContent + 代次守卫。
  */
@@ -57,7 +57,7 @@
           // 确认过的开关看起来「点了没反应」。no401Toast：调用方有更准的
           // 401 语义（如改密第一跳 = 当前密码错误）时自行提示
           if (unauthorized && !opts.no401Toast) {
-            UI.toast('401：需要 admin token — 请在右上角输入后重试', 'error');
+            UI.toast('401：请求被拒绝 — 请刷新页面后重试', 'error');
           }
           cb({ unauthorized: unauthorized,
                message: (j && (j.error || j.message)) || ('HTTP ' + res.status) }, j, res.status);
@@ -98,7 +98,7 @@
     if (!el) return;
     if (_loadError) {
       el.innerHTML = '<p class="if-field-hint">状态加载失败：' + escHtml(_loadError)
-        + '（401 时在右上角输入 admin token 后重试；或在本机用 CLI 管理）</p>';
+        + '（请刷新页面重试；或在本机用 CLI 管理）</p>';
       return;
     }
     if (!_status) { el.innerHTML = '<p class="if-field-hint">加载中…</p>'; return; }
@@ -159,21 +159,15 @@
     if (!el) return;
     if (_loadError) {
       el.innerHTML = '<p class="if-field-hint">状态加载失败：' + escHtml(_loadError)
-        + '（401 时在右上角输入 admin token 后重试。恢复路径：健康库在网关本机运行'
+        + '（请刷新页面重试。恢复路径：健康库在网关本机运行'
         + ' "iff keys set-password"（保留全部 API key）；仅库损坏才 "iff keys recover"）</p>';
       return;
     }
     if (!_status) { el.innerHTML = '<p class="if-field-hint">加载中…</p>'; return; }
     var html = '';
     if (!_status.password_set) {
-      // 恢复指引按库状态分流（review F7）：健康库已存在时 iff keys init 会拒绝
-      var recover = _status.active
-        ? '无凭证可在网关本机运行 "iff keys set-password"（保留全部 API key）。'
-        : '无凭证可在网关本机运行 "iff keys init"（初始化密钥库）。';
-      html += '<p class="if-field-hint">首次设置需管理员凭证（右上角 admin token）。' + recover + '</p>'
-           +  '<div class="if-grid" style="margin-top:8px">'
-           +  '<input type="password" class="if-input" id="stToken" placeholder="admin token（首次设置必填）"'
-           +  ' autocomplete="off" spellcheck="false" style="max-width:320px"></div>'
+      html += '<p class="if-field-hint">本机设置无需任何凭证（issue #47 零门槛）。'
+           +  '忘记密码可在网关本机运行 "iff keys set-password"（保留全部 API key）。</p>'
            +  '<div class="if-grid" style="margin-top:8px">'
            +  '<input type="password" class="if-input" id="stNewPw" placeholder="新密码（至少 12 字符）"'
            +  ' autocomplete="new-password" style="max-width:320px">'
@@ -238,9 +232,7 @@
   }
 
   function doConsoleSet() {
-    var tokEl = $('stToken');
     var p1El = $('stNewPw'), p2El = $('stNewPw2');
-    var tok = tokEl ? tokEl.value : '';
     var p1 = p1El ? p1El.value : '';
     var p2 = p2El ? p2El.value : '';
     if (p1 !== p2) { UI.toast('两次输入的密码不一致', 'error'); return; }
@@ -248,12 +240,9 @@
       UI.toast('密码需 12–1024 个 UTF-8 字节（约 12 个字母或 4 个汉字）', 'error');
       return;
     }
-    // 首设：管理员凭证恒校验在服务端。表单 token 仅作覆盖（review F7）—
-    // 留空时沿用右上角 adminHeaders；token 只进本请求头，不落任何存储。
-    // 401 的服务端 error 自带 iff keys init 指引 — 交由调用方提示（更准）
-    var headers = tok ? { 'X-Admin-Token': tok } : {};
+    // 首设零凭证（issue #47）：密码只进本请求体，不落任何存储。
     _fetch(URL_CONSOLE_PW, { method: 'POST', body: { new_password: p1 },
-                             headers: headers, no401Toast: true }, function (err) {
+                             no401Toast: true }, function (err) {
       if (err) { UI.toast('设置失败：' + err.message, 'error'); return; }
       UI.toast('Key 保护密码已设置', 'ok');
       loadStatus();

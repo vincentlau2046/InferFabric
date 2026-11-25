@@ -141,10 +141,12 @@ def _routes(status_body, **extra):
 class TestRender:
     def test_unset_renders_first_set_form(self, run_panel):
         out = run_panel(_routes(_STATUS_UNSET))
-        # 首设表单：管理员凭证 + 新密码 + 提交动作
+        # 首设表单：零凭证 + 新密码 + 提交动作（issue #47：无 admin token 输入）
         assert 'data-action="st-set-pw"' in out["pwHtml"]
-        assert "管理员" in out["pwHtml"]
-        assert "iff keys init" in out["pwHtml"]       # 无凭证的本机出路
+        assert "无需任何凭证" in out["pwHtml"]
+        assert "iff keys set-password" in out["pwHtml"]  # 忘记密码的恢复出路
+        assert "admin token" not in out["pwHtml"]        # 概念删除
+        assert "stToken" not in out["pwHtml"]            # 凭证输入框已移除
         # 改密表单不得出现
         assert 'data-action="st-pw-change"' not in out["pwHtml"]
 
@@ -342,27 +344,28 @@ class TestReviewFixes:
         assert "实际鉴权：未生效" not in out["html"]
 
     def test_status_401_renders_error_not_skeleton(self, run_panel):
-        # review F7：严格模式 401 → 可操作提示（非骨架/无响应）
+        # review F7 + issue #47：401 → 固定新文案（不再指向 admin token），
+        # 非骨架/无响应
         out = run_panel({"/admin/security/status": {"status": 401,
                                                     "body": {"error": "Unauthorized"}}})
-        assert any("admin token" in t["m"] and t["k"] == "error" for t in out["toasts"])
+        assert any(t["m"] == "401：请求被拒绝 — 请刷新页面后重试"
+                   and t["k"] == "error" for t in out["toasts"])
         assert "加载失败" in out["html"] and "加载失败" in out["pwHtml"]
 
-    def test_first_set_uses_header_token_when_form_empty(self, run_panel):
-        # review F7：空表单 token 不得覆盖右上角有效 token（override-only）
+    def test_first_set_adds_no_token_header(self, run_panel):
+        # issue #47：首设请求不得携带 X-Admin-Token（settings.js 自身不注入）
         out = run_panel(
             _routes(_STATUS_UNSET,
                     **{"POST /admin/security/console-password":
                        {"status": 200, "body": {"status": "ok", "provisioned": True}}}),
             actions=[{"fn": "doConsoleSet"}],
-            seeds={"stToken": "", "stNewPw": "a-long-password",
-                   "stNewPw2": "a-long-password"},
-            admin_headers={"X-Admin-Token": "hdr-tok"},
+            seeds={"stNewPw": "a-long-password", "stNewPw2": "a-long-password"},
         )
         pw = [c for c in out["calls"]
               if c["url"] == "/admin/security/console-password"]
         assert len(pw) == 1
-        assert pw[0]["headers"].get("X-Admin-Token") == "hdr-tok"
+        assert "X-Admin-Token" not in pw[0]["headers"]
+        assert pw[0]["body"] == {"new_password": "a-long-password"}
 
     def test_active_unset_guides_set_password_not_init(self, run_panel):
         # review F7：健康库已存在时 iff keys init 会拒绝 — 指引须为 set-password
