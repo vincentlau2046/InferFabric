@@ -417,7 +417,10 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
         route = ("pool:" + pool + "/cloud:" + c.provider + "/" + c.model_id) if pool \
             else ("cloud:" + c.provider + "/" + c.model_id)
         provider_cfg = pm.cloud.get_provider_config(c.provider)
-        cloud_model = pm.cloud.cloud_models.get(c.provider + "/" + c.model_id)
+        # PR2: 查表走 resolve_cloud_model —— 同时匹配注册表键与上游
+        # model_id（别名解析出的原始 id 未必是注册表键；原 raw dict get
+        # 对该形态恒 unavailable）
+        cloud_model = pm.cloud.resolve_cloud_model(c.provider, c.model_id)
         if provider_cfg is None or cloud_model is None:
             return AttemptResult(status=None, route=route,
                                  error="cloud target unavailable")
@@ -728,16 +731,22 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
             # 评审 PR#17 B1：provider 用裸名——_probe_native 云分支以
             # cand.provider 直查 get_provider_config，带 "cloud:" 前缀必
             # None → status=None → fallback 条件永不满足 → 客户端空响应。
+            # PR2: 调用名是本提供方别名时解析为上游原始 model_id —— 上游
+            # 请求用原始 ID，而非别名（spec §3）；非别名请求零变化。
+            _resolved_mid = model
+            _t = pm.cloud.alias_target(model)
+            if _t is not None and _t[0] == provider_name:
+                _resolved_mid = _t[1]
             cand = _DirectCandidate(provider=provider_name,
-                                    model_id=model, kind="cloud")
+                                    model_id=_resolved_mid, kind="cloud")
             # 直连用单候选 AttemptResult 路径：原生 → 显式不支持 → chat 兜底
             res = _probe_native(handler, pm, data, cand, pool=None,
                                 remaining=None, client_stream=client_stream)
             if (not res.ok and not res.committed and res.status is not None
                     and res.status in RESPONSES_UNSUPPORTED_STATUSES):
                 chat_data = responses_to_chat(copy.deepcopy(data))
-                chat_data["model"] = model
-                dc = _DirectCandidate(provider=provider_name, model_id=model, kind="cloud")
+                chat_data["model"] = _resolved_mid
+                dc = _DirectCandidate(provider=provider_name, model_id=_resolved_mid, kind="cloud")
                 # 评审 PR#17 N3：快照端点走 cand.route（_resolve_chat_target
                 # 只读 route["openai_base"]；_openai_base 属性无人消费，
                 # 违反池路径遵守的快照端点规则）
@@ -829,7 +838,10 @@ def handle_responses_direct(handler, pm, data, model) -> bool:
         x_app=getattr(handler, "_agent_hit", None) and handler._agent_hit.x_app or "",
         duration_ms=elapsed,
     ))
-    handler._send_json({"error": "Unknown model: " + model}, 404)
+    # PR2: 别名未激活上下文 —— 已声明别名目标不可用时 404 必须可解释
+    _explain = pm.cloud.explain_unknown(model)
+    handler._send_json({"error": "Unknown model: " + model
+                                 + (f" — {_explain}" if _explain else "")}, 404)
     return True
 
 

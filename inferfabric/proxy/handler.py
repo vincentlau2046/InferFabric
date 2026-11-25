@@ -1020,7 +1020,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             possible_cause="1. 客户端传了不存在的模型名；2. cloud_provider.yaml 缺少对应 model_id；"
                            "3. models.d/*.yaml 的 served_name 配置未覆盖此模型名",
         ))
-        self._send_json({"error": f"Unknown model: {requested_model}"}, 404)
+        self._send_json({"error": f"Unknown model: {requested_model}"
+                                  + (f" — {_explain}" if (_explain := pm.cloud.explain_unknown(requested_model or "")) else "")}, 404)
 
     def _forward_local(self, pm, data, auth_header, model_obj, original_model):
         """Forward request to a local model with rate limiting."""
@@ -1157,6 +1158,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         and logical not in existing_ids):
                     all_models.append({"id": logical, "object": "model",
                                        "owned_by": "iff-pool"})
+
+        # PR2: 显式调用别名 —— 仅列出当前可调用的（提供方启用且目标在注册表
+        # 可解析）；与本地/云/池 id 撞名的别名不重复公布。停用或撤销后目标
+        # 不可调用，别名即不宣称可用（spec §3 PR2）。
+        existing_ids = {m.get("id") for m in all_models}
+        for pname, pcfg in pm.cloud.providers.items():
+            if not pcfg.enabled:
+                continue
+            for alias_name, mid in pcfg.aliases.items():
+                if alias_name in existing_ids:
+                    continue
+                if pm.cloud.resolve_cloud_model(pname, mid) is None:
+                    continue
+                all_models.append({"id": alias_name, "object": "model",
+                                   "owned_by": "iff-alias"})
+                existing_ids.add(alias_name)
 
         if all_models:
             self._send_json({"object": "list", "data": all_models})

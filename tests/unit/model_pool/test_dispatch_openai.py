@@ -61,6 +61,11 @@ class FakeCloud:
         self.cloud_models = models or {}
         self._providers = providers or {}
 
+    @property
+    def providers(self):
+        # PR2: /v1/models 别名公布读 providers（真实 CloudDiscovery 的公共面）
+        return self._providers
+
     def get_provider_config(self, name):
         return self._providers.get(name)
 

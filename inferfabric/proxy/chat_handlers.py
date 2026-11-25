@@ -381,7 +381,10 @@ def handle_chat(handler, pm, data):
             possible_cause="1. 客户端传了不存在的模型名；2. cloud_provider.yaml 缺少对应 model_id；"
                            "3. models.d/*.ymal 的 served_name 配置未覆盖此模型名",
         ))
-        handler._send_json({"error": f"Unknown model: {model}"}, 404)
+        # PR2: 别名未激活上下文 —— 已声明别名目标不可用时 404 必须可解释
+        _explain = pm.cloud.explain_unknown(model)
+        handler._send_json({"error": f"Unknown model: {model}"
+                                     + (f" — {_explain}" if _explain else "")}, 404)
         return
 
     # Rewrite model name to upstream's served_name

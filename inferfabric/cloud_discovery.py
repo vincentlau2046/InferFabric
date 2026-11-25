@@ -687,6 +687,18 @@ class CloudDiscovery:
         if short_name in local_models or model_name in local_models:
             return "local"
         with self._models_lock:
+            # PR2: 别名命中先于短名查表 —— 别名是隔离命名空间（撞名在设置时
+            # 拒绝），显式别名必须精确解析到目标提供方。目标未激活（停用/
+            # 撤销/删除）→ 显式失败返回 None（explain_unknown 可解释），
+            # 绝不回退到本地/其他提供方/池（spec §3：不可调用的别名不宣称可用）。
+            target = self.alias_target(model_name)
+            if target is not None:
+                provider_name, mid = target
+                cfg = self._providers.get(provider_name)
+                if cfg is not None and cfg.enabled \
+                        and self.resolve_cloud_model(provider_name, mid) is not None:
+                    return f"cloud:{provider_name}"
+                return None
             # Full name (with "provider/" prefix) takes priority over short
             # name — short names are ambiguous first-wins keys when multiple
             # providers serve the same model id; an explicit prefixed request
@@ -709,6 +721,12 @@ class CloudDiscovery:
         """
         prefix = f"{provider_name}/"
         stripped = model_name[len(prefix):] if model_name.startswith(prefix) else model_name
+        # PR2: 别名识别 —— 别名绑 (provider, model_id)，调用名是本提供方的
+        # 别名时先翻译为上游 model_id 再查表；绑其他提供方的别名不翻译
+        #（不串路由）。
+        target = self.alias_target(model_name)
+        if target is not None and target[0] == provider_name:
+            model_name = target[1]
         with self._models_lock:
             for k, v in self._cloud_models.items():
                 if v.provider != provider_name:
@@ -719,6 +737,26 @@ class CloudDiscovery:
 
     def get_provider_config(self, provider_name: str) -> ProviderConfig | None:
         return self._providers.get(provider_name)
+
+    def explain_unknown(self, model_name: str) -> "str | None":
+        """未知模型名解释：别名存在但目标未激活时返回 404 上下文；否则 None。
+
+        供既有「未知模型」错误分支接线 —— 已声明的别名在目标不可用时必须
+        明确失败且可解释，绝不静默回退（spec §3 PR2）。激活别名/非别名
+        一律 None（通用 unknown 文案足够）。
+        """
+        target = self.alias_target(model_name)
+        if target is None:
+            return None
+        provider_name, mid = target
+        cfg = self._providers.get(provider_name)
+        if cfg is None:
+            return f"别名 '{model_name}' 的目标提供方 {provider_name} 已删除"
+        if not cfg.enabled:
+            return f"别名 '{model_name}' 指向 {provider_name}/{mid}，但该提供方已停用"
+        if self.resolve_cloud_model(provider_name, mid) is None:
+            return f"别名 '{model_name}' 指向 {provider_name}/{mid}，但该模型已撤销或不可路由"
+        return None
 
     def reload(self, config_path: Path | None = None):
         """热加载配置。
