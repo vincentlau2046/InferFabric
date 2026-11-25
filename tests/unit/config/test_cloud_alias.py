@@ -150,6 +150,30 @@ def test_spec_only_model_colliding_short_name_still_routable_prefixed(tmp_path):
     assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
 
 
+# ── 终审 Important：别名翻译后 stripped 残留致字面同名条目劫持 ────────
+
+def test_resolve_cloud_model_alias_not_hijacked_by_later_same_named_model(tmp_path):
+    """别名翻译后不得回落匹配本 provider 内字面同名的注册表条目。
+
+    终审发现（Important）：resolve_cloud_model 的 stripped 在别名翻译**前**
+    计算、翻译后仍参与匹配 —— 同 provider 后续出现与别名同名的模型
+    （发现/勾选/手填，validate_alias 只守设置时刻）时，第二段解析返回
+    字面同名条目，转发 model=字面名而非别名绑定的上游 id（依赖字典插入
+    序，静默错路由 — 违反 spec §3 精确选定上游）。
+    """
+    cd, _p = _mk_cd(tmp_path, {"prov-a": _provider(models=("glm-5", "bar"))})
+    cd.providers["prov-a"].aliases["foo"] = "bar"
+    # 后续该 provider 内出现字面同名模型 foo（手填 spec 路径，注册表序在 bar 之后）
+    cd.add_manual_model("prov-a", "foo")
+    # 一段路由仍走别名（别名先于短名查表）
+    assert cd.resolve_route("foo", set()) == "cloud:prov-a"
+    # 二段解析（chat 处理器以「请求名」调用）必须解析到别名绑定的上游 id
+    m = cd.resolve_cloud_model("prov-a", "foo")
+    assert m is not None and m.model_id == "bar", m
+    # 字面同名模型自身的直呼不受影响
+    assert cd.resolve_cloud_model("prov-a", "prov-a/foo").model_id == "foo"
+
+
 # ── Task 2: validate_alias + POST /admin/cloud/provider-alias ─────────
 
 import json

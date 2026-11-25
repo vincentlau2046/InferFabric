@@ -723,10 +723,14 @@ class CloudDiscovery:
         stripped = model_name[len(prefix):] if model_name.startswith(prefix) else model_name
         # PR2: 别名识别 —— 别名绑 (provider, model_id)，调用名是本提供方的
         # 别名时先翻译为上游 model_id 再查表；绑其他提供方的别名不翻译
-        #（不串路由）。
+        #（不串路由）。翻译后 stripped 同步为上游 id：stripped 是翻译前的
+        # 别名/前缀剥离值，若残留参与匹配，同 provider 后续出现与别名同名
+        # 的字面条目（发现/勾选/手填）会劫持二段解析 → 静默错路由（终审
+        # Important，82bebc1 后补）。
         target = self.alias_target(model_name)
         if target is not None and target[0] == provider_name:
             model_name = target[1]
+            stripped = model_name
         with self._models_lock:
             for k, v in self._cloud_models.items():
                 if v.provider != provider_name:
