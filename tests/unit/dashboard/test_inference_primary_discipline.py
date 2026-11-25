@@ -181,12 +181,14 @@ def test_nav_grouped_ia_and_aria_current():
     caps = [s.strip() for s in re.findall(
         r'<span class="nav-cap"[^>]*>([^<]+)</span>', html)]
     # IA v3.1（2026-11-24 用户修订，specs/console-ux-batch WS4）：监控为最常用入口
-    # 并入状态组、异常随迁，可观测组取消（4 组 9 项）
+    # 并入状态组、异常随迁，可观测组取消（4 组 10 项 — PR3 WS4 增设设置页）
     assert caps == ["状态", "推理与池", "网关策略", "接入"]
-    assert html.count('class="if-nav-item') == 9  # deploy 并入能力包页后 10→9
+    assert html.count('class="if-nav-item') == 10  # 9 + tab-settings（PR3 WS4）
     # 组顺序：推理在模型池前；监控/异常紧跟总览（状态组内）
     assert html.find("tab-inference") < html.find("tab-model-pools")
     assert 0 < html.find("tab-overview") < html.find("tab-monitor") < html.find("tab-anomaly")
+    # 设置页位于网关策略组（鉴权之后、云端之前）
+    assert 0 < html.find("tab-security") < html.find("tab-settings") < html.find("tab-cloud")
     # deploy 不再是独立 nav tab（并入能力包页 deploySection）
     assert 'data-tab="tab-deploy"' not in html
     # fallback switchTab 维护 aria-current
