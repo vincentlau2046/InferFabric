@@ -108,6 +108,9 @@ def _pm_with(mgr):
             cloud_models={},
             get_candidates=lambda name: [],
             _last_discovery=0.0,
+            # PR1 编辑契约成员（GET providers 现依赖指纹缓存与 secrets 判定）
+            config_fingerprint=lambda: "none",
+            secrets=types.SimpleNamespace(has=lambda var: False),
         ),
     )
 
