@@ -28,6 +28,49 @@ def test_store_roundtrip(tmp_path):
     assert PackStore(tmp_path / "state.json").get("llm.a").stage == "verifying"
 
 
+def test_store_roundtrip_preserves_ownership(tmp_path):
+    """issue #51 防回归：set 写出的字段集（asdict）必须能被 get 原样读回
+    （PackRecord(**d)）—— 11-21 生产崩溃正是 ownership 已落盘而运行代码
+    无该字段的版本漂移。两种形态都钉住：受管（dict）与旧记录（None）。"""
+    st = PackStore(tmp_path / "state.json")
+    st.set(rec("llm.a", ownership={"marker_version": 1, "role": "owned",
+                                   "gpu_devices": "/dev/nvidia0"}))
+    st.set(rec("llm.b"))
+    st2 = PackStore(tmp_path / "state.json")
+    owned = st2.get("llm.a")
+    assert owned.ownership == {"marker_version": 1, "role": "owned",
+                               "gpu_devices": "/dev/nvidia0"}
+    assert st2.get("llm.b").ownership is None
+
+
+def test_store_legacy_record_without_ownership_key_loads(tmp_path):
+    """issue #51：Task 3 之前落盘的记录没有 ownership 键 — 读取必须以
+    ownership=None 容纳（旧文件向后兼容，不要求迁移）。"""
+    import json
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"llm.old": {
+        "pack_id": "llm.old", "pack_version": "1.0.0", "status": "installed",
+        "stage": "installed", "error": None, "sandbox_degraded": False,
+        "installed_at": 1700000000}}))
+    r = PackStore(p).get("llm.old")
+    assert r is not None and r.status == "installed" and r.ownership is None
+
+
+def test_store_unknown_field_fails_closed_pin(tmp_path):
+    """issue #51：schema 漂移（运行代码缺字段而文件已含）= TypeError 硬失败
+    ——钉死该模式为「显式漂移告警」而非静默丢数据：宽容读取会让 set 回写
+    时丢弃未知字段。漂移的正确出路是统一部署（INF-001649 pyc 清理），
+    不是读取端吞字段。"""
+    import json
+    p = tmp_path / "state.json"
+    p.write_text(json.dumps({"llm.x": {
+        "pack_id": "llm.x", "pack_version": "1.0.0", "status": "installed",
+        "stage": "installed", "error": None, "sandbox_degraded": False,
+        "installed_at": 1700000000, "future_field": 1}}))
+    with pytest.raises(TypeError):
+        PackStore(p).get("llm.x")
+
+
 def test_store_missing_file_returns_none_and_empty(tmp_path):
     st = PackStore(tmp_path / "state.json")
     assert st.get("llm.a") is None
