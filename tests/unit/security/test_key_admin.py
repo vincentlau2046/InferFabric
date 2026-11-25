@@ -144,6 +144,35 @@ def test_password_change_wrong_current_rejected_with_recovery_hint(admin):
     assert h.status == 400
     assert '当前密码' in h.response()['error']
     assert 'iff keys set-password' in h.response()['error']
+    # review 评审修复：失败不动旧会话 — 同一会话仍可用（计划承诺，此前漏断言）
+    h2 = Handler(headers=headers, method='GET')
+    admin.handle(h2, 'list')
+    assert h2.status == 200
+
+
+def test_password_change_raced_record_rejected(admin, monkeypatch):
+    # review I6：改密竞态守卫 — 条件更新 rowcount=0 → 400（旧记录已被并发改掉）
+    stale = admin.console._record()  # 竞态窗口前读到的记录原文（A）
+    set_password(admin.store, 'concurrently-set-x')   # 并发方（CLI 路径）已改写为 B
+    # 并发写使旧会话失效 — 用 B 重新登录（被测第二跳会话本身有效）
+    h = Handler({'password': 'concurrently-set-x'})
+    admin.handle(h, 'login')
+    assert h.status == 200
+    fresh = {'Cookie': h.response_headers['Set-Cookie'].split(';')[0],
+             'X-CSRF-Token': h.response()['csrf']}
+
+    real_verify = admin.console.verify_current
+
+    def raced_verify(password):
+        real_verify(password)          # 对当前记录 B 验证通过
+        return stale                   # 却返回竞态前的旧 raw（模拟窗口交错）
+    monkeypatch.setattr(admin.console, 'verify_current', raced_verify)
+
+    h2 = Handler({'current_password': 'concurrently-set-x',
+                  'new_password': 'a-new-password-long'}, fresh)
+    admin.handle(h2, 'password')
+    assert h2.status == 400
+    assert '已变更' in h2.response()['error'] or '重试' in h2.response()['error']
 
 
 def test_password_change_rejects_short_new(admin):

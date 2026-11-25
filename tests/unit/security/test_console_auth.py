@@ -2,7 +2,8 @@ from unittest.mock import patch
 
 import pytest
 
-from inferfabric.security.console_auth import ConsoleAuth, LoginError, set_password
+from inferfabric.security.console_auth import (
+    ConsoleAuth, LoginError, password_set, set_password)
 from inferfabric.security.key_store import KeyStore
 
 
@@ -76,3 +77,19 @@ def test_password_set_reports_initialization(tmp_path):
     assert password_set(store) is False
     set_password(store, 'test-password-long')
     assert password_set(store) is True
+
+
+def test_set_password_conditional_guards(tmp_path):
+    # review I6：条件更新原语 — 竞态下后写不得静默覆盖（rowcount 守卫）
+    store = KeyStore(tmp_path / 'security.db', provision=True)
+    # expect='unset'：空库 → 成功；已有口令 → False（409 语义）
+    assert set_password(store, 'first-password-x', expect='unset') is True
+    assert set_password(store, 'second-password', expect='unset') is False
+    # expect=<raw>：精确匹配已验证记录才可写（改密竞态守卫）
+    with store._db() as db:
+        raw = db.execute('SELECT password FROM settings WHERE id=1').fetchone()[0]
+    assert isinstance(raw, str) and raw  # 当前记录原文
+    assert set_password(store, 'changed-password', expect=raw) is True
+    assert set_password(store, 'raced-password', expect=raw) is False  # 记录已变
+    assert password_set(store) is True
+    assert set_password(store, 'never-applied', expect=None) is True   # CLI 无条件路径保留

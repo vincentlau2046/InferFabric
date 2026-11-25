@@ -30,13 +30,33 @@ def _derive(data, salt):
     return hashlib.scrypt(data, salt=salt, n=16384, r=8, p=1, dklen=32)
 
 
-def set_password(store, password):
+def set_password(store, password, expect=None):
+    """Update the console password record (PR3 WS4; review I6 conditional guard).
+
+    expect=None     无条件更新（iff keys set-password CLI 既有语义）
+    expect='unset'  仅当前无口令时写入（网页首设；rowcount=0 → False → 409）
+    expect=<raw>    仅当前记录与已验证原文一致时写入（改密竞态守卫）
+
+    Returns True when applied; conditional expects return False (never raise)
+    when the guard fails, so a concurrent write can never be silently overwritten.
+    """
     data = _password_bytes(password)
     salt = secrets.token_bytes(16)
     record = json.dumps({'v': 1, 'salt': salt.hex(), 'hash': _derive(data, salt).hex()})
     with store._db() as db:
-        db.execute('UPDATE settings SET password=? WHERE id=1', (record,))
-    log.info('Console password updated; existing sessions invalidated')
+        if expect == 'unset':
+            cur = db.execute(
+                'UPDATE settings SET password=? WHERE id=1 AND (password IS NULL OR password=?)',
+                (record, ''))
+        elif expect is not None:
+            cur = db.execute(
+                'UPDATE settings SET password=? WHERE id=1 AND password=?',
+                (record, expect))
+        else:
+            cur = db.execute('UPDATE settings SET password=? WHERE id=1', (record,))
+    if expect is None:
+        log.info('Console password updated; existing sessions invalidated')
+    return expect is None or cur.rowcount == 1
 
 
 def password_set(store):
@@ -108,13 +128,16 @@ class ConsoleAuth:
     def verify_current(self, password):
         """Verify password against the current record (PR3 WS4 password change).
 
-        Raises LoginError on wrong/unset password. Touches neither the login
-        rate-limit window nor the session store.
+        Returns the raw verified record on success (the change action feeds it
+        back as the conditional-write guard — review I6). Raises LoginError on
+        wrong/unset password. Touches neither the login rate-limit window nor
+        the session store.
         """
-        valid, _ = self._match_record(password)
+        valid, raw = self._match_record(password)
         if not valid:
             log.warning('Console password verification rejected')
             raise LoginError()
+        return raw
 
     def validate(self, session, csrf, *, write):
         with self._lock:

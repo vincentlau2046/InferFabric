@@ -176,7 +176,7 @@ def _admin_gate(handler, expected_host, write=False):
     return True
 from inferfabric.proxy_manager import (
     ProxyManager, PROXY_HOST, PROXY_PORT, IFF_DATA_DIR,
-    HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL,
+    HEALTH_CHECK_INTERVAL, WATCHDOG_INTERVAL, console_origins,
 )
 from inferfabric import forwarder, __version__
 from inferfabric.proxy.chat_handlers import handle_chat, handle_ollama_native
@@ -447,6 +447,7 @@ _POST_ROUTES = {
     "/admin/keys":              _admin(lambda h, pm: key_admin.handle(h, pm, "create")),
     "/admin/keys/revoke":       _admin(lambda h, pm: key_admin.handle(h, pm, "revoke")),
     "/admin/keys/policy":       _admin(lambda h, pm: key_admin.handle(h, pm, "policy")),
+    "/admin/keys/password":     _admin(lambda h, pm: key_admin.handle(h, pm, "password")),
     "/v1/chat/completions":     lambda h, pm: h._handle_chat(pm),
     "/v1/completions":          lambda h, pm: h._handle_chat(pm),
     "/v1/messages":             lambda h, pm: h._handle_messages(pm),
@@ -2369,10 +2370,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         设置保护 API Key 敏感操作（PR4 reveal 等）的控制台口令。管理员凭证
         恒校验（X-Admin-Token vs born token）——回环下 _admin_gate 不验
-        token，故在此显式校验，杜绝本地页面无凭证驱动设密。库缺失按
-        iff keys init 语义初始化并热接 pm.auth / pm.security_admin；不置
-        policy、不建 key — 鉴权开关（/admin/security/enable）仍是用户主动
-        的独立动作。已设口令 → 409；口令 <12B → 400（先于任何落盘）。
+        token，故在此显式校验，杜绝本地页面无凭证驱动设密。
+
+        失败路径次序（fresh-context 评审 2026-11-25）：
+        - 401 token 缺/错/未配置 → 任何落盘之前；
+        - 400 体非 JSON 对象 / 口令 <12B → 任何落盘之前；
+        - 400 origins 与启动同源校验不过（非回环需显式 HTTPS）→ 任何落盘之前；
+        - SecurityAdmin 先于口令落库构建（其失败仅留一个空 provision 库，可重试）；
+        - 热接保留在役 legacy manager（enforced 态 + ConfigReloader 身份不变，
+          build_auth 自落 security.enabled 标记）；
+        - 口令条件写入（expect='unset'）：竞态下后写不得静默覆盖（rowcount=0
+          → 409）。已设口令 → 409；不置 policy、不建 key — 鉴权开关
+          （/admin/security/enable）仍是用户主动的独立动作。
         """
         token = self.headers.get("X-Admin-Token", "")
         configured = getattr(self, "_admin_token", "")
@@ -2384,6 +2393,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         data = self._read_body()
         if data is None:
+            return   # read_body 已回复（413 / JSON 语法 400）
+        if not isinstance(data, dict):
+            self._send_json({"error": "请求体需为 JSON 对象"}, 400)
             return
         new_password = data.get("new_password")
         was_active = isinstance(pm.auth, SecurityAuth)
@@ -2391,27 +2403,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             # 口令合法性先于任何落盘：拒绝的设密不创建 store
             _password_bytes(new_password)
+            # origins 与启动同源校验（含 [::1] 默认与非回环 HTTPS 强制）
+            origins = console_origins()
             store = pm.auth.store if was_active else KeyStore(db_path, provision=True)
             if password_set(store):
                 self._send_json({"error": "控制台口令已设置 — 更改请在设置页走会话改密，"
                                           "或本机运行 \"iff keys set-password\""
                                           "（保留全部 API key）"}, 409)
                 return
-            set_password(store, new_password)
+            from inferfabric.security.admin import SecurityAdmin
+            security_admin = SecurityAdmin(store, origins=origins)
             if not was_active:
-                # 与启动同源热接（build_auth 自落 security.enabled 标记）
-                pm.auth = build_auth(IFF_DATA_DIR)
-                if not isinstance(pm.auth, SecurityAuth):
+                # 与启动同源热接；build_auth 自落 security.enabled 标记。
+                # 保留在役 legacy manager：enforced 态不被静默降级，且
+                # ConfigReloader 持有的旧对象 reload 后仍作用于在役 facade。
+                auth = build_auth(IFF_DATA_DIR)
+                if not isinstance(auth, SecurityAuth):
                     self._send_json({"error": "security init failed"}, 500)
                     return
-                from inferfabric.security.admin import SecurityAdmin
-                configured_origins = os.environ.get("IFF_CONSOLE_ORIGINS", "")
-                origins = ([o.strip() for o in configured_origins.split(",") if o.strip()]
-                           if configured_origins else
-                           [f"http://127.0.0.1:{PROXY_PORT}",
-                            f"http://localhost:{PROXY_PORT}"])
-                pm.security_admin = SecurityAdmin(pm.auth.store, origins=origins)
+                pm.security_admin = security_admin
+                pm.auth = SecurityAuth(pm.auth, auth.store)
                 log.info("Security store initialized from app settings console-password")
+            else:
+                pm.security_admin = security_admin
+            # 条件写入：竞态下后写不得静默覆盖（review I6）
+            if not set_password(store, new_password, expect="unset"):
+                self._send_json({"error": "控制台口令已被并发设置 — 请刷新设置页后重试"}, 409)
+                return
             self._send_json({"status": "ok", "provisioned": not was_active},
                             extra_headers={"Cache-Control": "no-store"})
         except ValueError as e:
@@ -3656,6 +3674,21 @@ def _validate_admin_token_safety():
         )
 
 
+def bootstrap_admin_token():
+    """Born-token bootstrap shared by threaded main() and async start_async.
+
+    F7 review (PR3, 2026-11-25): the async server performed only the safety
+    check, so _ADMIN_TOKEN stayed empty there and web first-set (恒校验)
+    could never succeed even with the correct secrets.env token. Idempotent:
+    derives once per process (env override > secrets.env, writing back when
+    missing). Callers must run this BEFORE serving; never generate or persist
+    a token from a rejected request path.
+    """
+    global _ADMIN_TOKEN
+    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    return _ADMIN_TOKEN
+
+
 def _create_server(retries: int = 5, retry_delay: float = 2.0):
     """Create the HTTP server, retrying on EADDRINUSE (stale proxy holding the port).
 
@@ -3793,9 +3826,7 @@ def main():
     # subprocesses (vllm/sglang/docker) inherit the environment and would each
     # receive the control-plane secret. In-process consumers read the module
     # global; out-of-process consumers (e.g. iff remove) read secrets.env.
-    from inferfabric.proxy_manager import IFF_DATA_DIR
-    global _ADMIN_TOKEN
-    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
+    bootstrap_admin_token()
     _validate_admin_token_safety()
 
     mgr = ProxyManager()

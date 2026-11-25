@@ -26,7 +26,8 @@ def test_settings_page_is_assembled():
     assert 'data-tab="tab-settings"' in html
     assert 'id="tab-settings"' in html
     assert "settings" in dashboard.JS_MODULES
-    assert "admin/security/status" in html or "pwBody" in html
+    # settings.js 真实内联（security.js 也含 status URL — 需 settings 独有标记）
+    assert "admin/security/console-password" in html
     assert "<!-- FRAGMENT:settings -->" not in html
     assert "<!-- JS:settings -->" not in html
     assert "Fragment settings 加载失败" not in html

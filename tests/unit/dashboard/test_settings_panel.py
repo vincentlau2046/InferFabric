@@ -73,6 +73,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), {
   fetch,
   navigator: {clipboard: {writeText: async () => {}}},
   location: input.location || {protocol: 'http:', hostname: '127.0.0.1'},
+  TextEncoder: TextEncoder,
   console,
 });
 window.fireClick = (targetId, attrs) => {
@@ -84,6 +85,8 @@ window.fireClick = (targetId, attrs) => {
   assert.ok(window.tabRenderers['tab-settings'],
             'must register tabRenderers["tab-settings"]');
   await window.tabRenderers['tab-settings']();
+  // 动作前先排空初始渲染链（真实浏览器点击时状态已加载）
+  for (let i = 0; i < 500; i++) await Promise.resolve();
   for (const act of (input.actions || [])) {
     const fn = window[act.fn];
     if (typeof fn !== 'function') throw new Error('unknown action: ' + act.fn);
@@ -302,3 +305,95 @@ class TestInferenceAuthToggle:
         )
         assert len(out["confirms"]) == 1
         assert not any(c["url"] == "/admin/security/enable" for c in out["calls"])
+
+    def test_zero_keys_blocks_enable(self, run_panel):
+        # review F3 附带：库在但只剩已吊销 key → 开启前拦截（security.js 同款守卫）
+        zero_keys = {"active": True, "policy": "off", "enforced": False,
+                     "key_count": 0, "keys": [], "password_set": True}
+        out = run_panel(
+            _routes(zero_keys), actions=[{"fn": "doEnable", "args": [True]}],
+        )
+        assert not any(c["url"] == "/admin/security/enable" for c in out["calls"])
+        assert any(t["k"] == "error" for t in out["toasts"])
+
+
+class TestReviewFixes:
+    """fresh-context 评审（2026-11-25）Important 修复批次。"""
+
+    _STATUS_OFF = {"active": True, "policy": "off", "enforced": False,
+                   "key_count": 1, "keys": [], "password_set": True}
+    _STATUS_POOLS = {"active": True, "policy": "pools", "enforced": False,
+                     "key_count": 1, "keys": [], "password_set": True}
+
+    def test_off_transition_shows_enable_button(self, run_panel):
+        # review F3：all→off 后设置页必须还能再开启（此前只剩「关闭」按钮）
+        out = run_panel(_routes(self._STATUS_OFF))
+        assert 'data-action="st-enable"' in out["html"]
+        assert "开启鉴权" in out["html"]
+
+    def test_off_transition_hides_noop_disable(self, run_panel):
+        out = run_panel(_routes(self._STATUS_OFF))
+        assert 'data-action="st-disable"' not in out["html"]
+
+    def test_pools_policy_shows_partial_badge(self, run_panel):
+        # review F3：pools 且 legacy 关 → 「部分生效」，不得标「未生效」
+        out = run_panel(_routes(self._STATUS_POOLS))
+        assert "部分生效" in out["html"]
+        assert "实际鉴权：未生效" not in out["html"]
+
+    def test_status_401_renders_error_not_skeleton(self, run_panel):
+        # review F7：严格模式 401 → 可操作提示（非骨架/无响应）
+        out = run_panel({"/admin/security/status": {"status": 401,
+                                                    "body": {"error": "Unauthorized"}}})
+        assert any("admin token" in t["m"] and t["k"] == "error" for t in out["toasts"])
+        assert "加载失败" in out["html"] and "加载失败" in out["pwHtml"]
+
+    def test_first_set_uses_header_token_when_form_empty(self, run_panel):
+        # review F7：空表单 token 不得覆盖右上角有效 token（override-only）
+        out = run_panel(
+            _routes(_STATUS_UNSET,
+                    **{"POST /admin/security/console-password":
+                       {"status": 200, "body": {"status": "ok", "provisioned": True}}}),
+            actions=[{"fn": "doConsoleSet"}],
+            seeds={"stToken": "", "stNewPw": "a-long-password",
+                   "stNewPw2": "a-long-password"},
+            admin_headers={"X-Admin-Token": "hdr-tok"},
+        )
+        pw = [c for c in out["calls"]
+              if c["url"] == "/admin/security/console-password"]
+        assert len(pw) == 1
+        assert pw[0]["headers"].get("X-Admin-Token") == "hdr-tok"
+
+    def test_active_unset_guides_set_password_not_init(self, run_panel):
+        # review F7：健康库已存在时 iff keys init 会拒绝 — 指引须为 set-password
+        active_unset = {"active": True, "policy": "off", "enforced": False,
+                        "key_count": 1, "keys": [], "password_set": False}
+        out = run_panel(_routes(active_unset))
+        assert "iff keys set-password" in out["pwHtml"]
+        assert "iff keys init" not in out["pwHtml"]
+
+    def test_multibyte_password_accepted(self, run_panel):
+        # review F8：4 个汉字 = 12 UTF-8 字节，后端合法 — 前端不得按 UTF-16 误拒
+        out = run_panel(
+            _routes(_STATUS_UNSET,
+                    **{"POST /admin/security/console-password":
+                       {"status": 200, "body": {"status": "ok", "provisioned": True}}}),
+            actions=[{"fn": "doConsoleSet"}],
+            seeds={"stToken": "tok", "stNewPw": "密码密码密码密码",
+                   "stNewPw2": "密码密码密码密码"},
+        )
+        assert any(c["url"] == "/admin/security/console-password" for c in out["calls"])
+
+    def test_multibyte_change_accepted(self, run_panel):
+        out = run_panel(
+            _routes(_STATUS_SET,
+                    **{"POST /admin/keys/login": {"status": 200,
+                                                  "body": {"csrf": "t"}},
+                       "POST /admin/keys/password": {"status": 200,
+                                                     "body": {"status": "ok"}}}),
+            actions=[{"fn": "doPasswordChange"}],
+            seeds={"pwCurrent": "旧的密码旧的密码", "pwNew": "新的密码新的密码",
+                   "pwNew2": "新的密码新的密码"},
+        )
+        assert any(c["url"] == "/admin/keys/login" for c in out["calls"])
+        assert any(c["url"] == "/admin/keys/password" for c in out["calls"])
