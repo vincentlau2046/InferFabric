@@ -994,10 +994,13 @@ class TestShortNameCollisionContract:
         })
         cd = CloudDiscovery(p)
         reg = cd.discover_all()
-        # spec 不覆盖发现短键（spec 路径 :695 first-wins 既有行为）
+        # spec 不覆盖发现短键（spec 路径 first-wins 既有行为）
         assert reg["glm-5"].provider == "prov-a"
-        # spec 路径碰撞时整条跳过（含前缀键）— 既有 skip 行为，本 PR 不动 spec 路径
-        assert "prov-b/glm-5" not in reg
+        # 7.12.10：spec-only 碰撞仍注册前缀键（对齐白名单/发现路径碰撞契约 —
+        # 手填模型在限定名/别名下必须可达；验收 step 10 暴露旧「整条跳过」
+        # 让重建 provider 的手填模型静默不可达）
+        assert reg["prov-b/glm-5"].provider == "prov-b"
+        assert cd.resolve_route("prov-b/glm-5", set()) == "cloud:prov-b"
 
     def test_whitelist_bare_does_not_override_spec_short_key(self, tmp_path):
         p = tmp_path / "cloud_provider.yaml"

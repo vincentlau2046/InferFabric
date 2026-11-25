@@ -42,7 +42,8 @@ def _pm(registry):
     return V1PM(registry, active=(),
                 local_models={"qwen-small": _local_model()},
                 cloud_models={"cloud-m": _cloud_model_entry()},
-                providers={"prov": SimpleNamespace()})
+                # PR2: /v1/models 别名公布读 provider 的 enabled/aliases 契约面
+                providers={"prov": SimpleNamespace(enabled=True, aliases={})})
 
 
 def _models_data(h):

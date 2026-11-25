@@ -41,6 +41,37 @@ _SPEC_INT_KEYS = ("context_window", "max_output_tokens")
 _SPEC_FLOAT_KEYS = ("price_input", "price_output")
 _SPEC_ALL_KEYS = _CAPABILITY_KEYS + _SPEC_INT_KEYS + _SPEC_FLOAT_KEYS
 
+# PR2: 调用别名命名空间 — 与本地调用名、池逻辑名、云短名、其他别名隔离。
+# 保留前缀 fabric-（模型池命名空间）不可占用。
+_ALIAS_RE = re.compile(r"^[A-Za-z0-9._:@-]+$")
+
+
+def validate_alias(alias: str, provider: str, model_id: str, *,
+                   local_names, registry_short_names, other_aliases) -> "tuple[bool, str]":
+    """调用别名合法性校验 → (ok, 拒绝原因)。
+
+    规则（spec §3 PR2）：非空；不含 '/' 与空白；仅允许 [A-Za-z0-9._:@-]；
+    保留前缀 fabric- 拒绝；与本地名/池逻辑名（由调用方并入 local_names）、
+    任一云短名、其他别名撞名拒绝。冲突拒绝且不写入。
+    """
+    if not alias or not alias.strip():
+        return False, "别名不能为空"
+    if "/" in alias:
+        return False, f"别名不能包含 '/': {alias}"
+    if any(c.isspace() for c in alias):
+        return False, f"别名不能包含空白: {alias}"
+    if not _ALIAS_RE.match(alias):
+        return False, f"别名仅允许字母、数字与 . _ : @ -: {alias}"
+    if alias.startswith("fabric-"):
+        return False, f"保留前缀 fabric- 不可用作别名: {alias}"
+    if alias in local_names:
+        return False, f"与本地模型/池调用名冲突: {alias}"
+    if alias in registry_short_names:
+        return False, f"与云模型调用名冲突: {alias}"
+    if alias in other_aliases:
+        return False, f"与其他调用别名冲突: {alias}"
+    return True, ""
+
 
 @dataclass
 class CloudModel:
@@ -137,6 +168,9 @@ class ProviderConfig:
     preset_id: str = ""            # 来源预设 ID（可选）
     # PR1: 控制台显示名（仅供人读，非路由名；空 = 未设置）
     display_name: str = ""
+    # PR2: 显式调用别名 {调用别名: 上游 model_id} — YAML 中的显式意图，
+    # 无凭证；绑定来源身份，重启/重载/再发现均保留（发现不替用户改别名）
+    aliases: dict[str, str] = field(default_factory=dict)
     # v4.6.0: 模型能力属性手动覆盖
     model_specs: dict[str, dict] = field(default_factory=dict)
 
@@ -245,6 +279,10 @@ class CloudDiscovery:
         self._config_path: Path | None = config_path
         self._save_lock = threading.Lock()
         self._config_corrupt = False
+        # PR2: 已删除 provider 的退役别名 {provider: {alias: model_id}} —
+        # 未激活、不可路由、不在 /v1/models 列出；重建同名 provider 不读它
+        # （不自动复活），仅 provider-alias 端点显式重设时移除
+        self._retired_aliases: dict[str, dict[str, str]] = {}
         # PR1: 配置指纹缓存（文件字节 sha256 前 16 位；缺失/未配置 = "none"）
         self._config_fingerprint = "none"
         if config_path:
@@ -570,6 +608,47 @@ class CloudDiscovery:
             }
             self._candidates.pop(provider, None)
 
+    def alias_target(self, alias: str) -> "tuple[str, str] | None":
+        """显式调用别名 → (provider, 上游 model_id)；未命中返回 None。
+
+        只查内存 providers 的 aliases（save/load 后随之刷新）；retired
+        别名不参与 —— 退役即未激活，不可路由也不可调用。
+        """
+        with self._models_lock:
+            for name, cfg in self._providers.items():
+                mid = cfg.aliases.get(alias)
+                if mid:
+                    return (name, mid)
+        return None
+
+    def retire_provider_aliases(self, provider: str):
+        """删除 provider 时把其 aliases 移入 _retired_aliases（handler DELETE 调用）。
+
+        退役别名未激活、不可路由、不在 /v1/models 列出；同名 (alias,
+        model_id) 显式重设时经 unretire_alias 移除。provider 不存在时
+        no-op（drop_provider 的 KeyError 语义不受影响）。
+        """
+        with self._models_lock:
+            cfg = self._providers.get(provider)
+            if cfg is None or not cfg.aliases:
+                return
+            self._retired_aliases.setdefault(provider, {}).update(cfg.aliases)
+            cfg.aliases = {}
+
+    def unretire_alias(self, provider: str, alias: str):
+        """显式重设同名别名后从 retired 移除（provider-alias 端点调用）。
+
+        显式设置即用户确认恢复 —— 不校验 model_id 是否与退役时一致
+        （新意图覆盖旧退役条目）。provider 无退役条目时 no-op。
+        """
+        with self._models_lock:
+            slot = self._retired_aliases.get(provider)
+            if slot is None:
+                return
+            slot.pop(alias, None)
+            if not slot:
+                del self._retired_aliases[provider]
+
     def _rebuild_provider_registry(self, provider: str, cfg: ProviderConfig):
         """按 floor = (候选∩白名单) ∪ 白名单 ∪ model_specs 重建 provider 的注册表条目。
 
@@ -608,6 +687,18 @@ class CloudDiscovery:
         if short_name in local_models or model_name in local_models:
             return "local"
         with self._models_lock:
+            # PR2: 别名命中先于短名查表 —— 别名是隔离命名空间（撞名在设置时
+            # 拒绝），显式别名必须精确解析到目标提供方。目标未激活（停用/
+            # 撤销/删除）→ 显式失败返回 None（explain_unknown 可解释），
+            # 绝不回退到本地/其他提供方/池（spec §3：不可调用的别名不宣称可用）。
+            target = self.alias_target(model_name)
+            if target is not None:
+                provider_name, mid = target
+                cfg = self._providers.get(provider_name)
+                if cfg is not None and cfg.enabled \
+                        and self.resolve_cloud_model(provider_name, mid) is not None:
+                    return f"cloud:{provider_name}"
+                return None
             # Full name (with "provider/" prefix) takes priority over short
             # name — short names are ambiguous first-wins keys when multiple
             # providers serve the same model id; an explicit prefixed request
@@ -630,6 +721,16 @@ class CloudDiscovery:
         """
         prefix = f"{provider_name}/"
         stripped = model_name[len(prefix):] if model_name.startswith(prefix) else model_name
+        # PR2: 别名识别 —— 别名绑 (provider, model_id)，调用名是本提供方的
+        # 别名时先翻译为上游 model_id 再查表；绑其他提供方的别名不翻译
+        #（不串路由）。翻译后 stripped 同步为上游 id：stripped 是翻译前的
+        # 别名/前缀剥离值，若残留参与匹配，同 provider 后续出现与别名同名
+        # 的字面条目（发现/勾选/手填）会劫持二段解析 → 静默错路由（终审
+        # Important，82bebc1 后补）。
+        target = self.alias_target(model_name)
+        if target is not None and target[0] == provider_name:
+            model_name = target[1]
+            stripped = model_name
         with self._models_lock:
             for k, v in self._cloud_models.items():
                 if v.provider != provider_name:
@@ -640,6 +741,26 @@ class CloudDiscovery:
 
     def get_provider_config(self, provider_name: str) -> ProviderConfig | None:
         return self._providers.get(provider_name)
+
+    def explain_unknown(self, model_name: str) -> "str | None":
+        """未知模型名解释：别名存在但目标未激活时返回 404 上下文；否则 None。
+
+        供既有「未知模型」错误分支接线 —— 已声明的别名在目标不可用时必须
+        明确失败且可解释，绝不静默回退（spec §3 PR2）。激活别名/非别名
+        一律 None（通用 unknown 文案足够）。
+        """
+        target = self.alias_target(model_name)
+        if target is None:
+            return None
+        provider_name, mid = target
+        cfg = self._providers.get(provider_name)
+        if cfg is None:
+            return f"别名 '{model_name}' 的目标提供方 {provider_name} 已删除"
+        if not cfg.enabled:
+            return f"别名 '{model_name}' 指向 {provider_name}/{mid}，但该提供方已停用"
+        if self.resolve_cloud_model(provider_name, mid) is None:
+            return f"别名 '{model_name}' 指向 {provider_name}/{mid}，但该模型已撤销或不可路由"
+        return None
 
     def reload(self, config_path: Path | None = None):
         """热加载配置。
@@ -797,6 +918,9 @@ class CloudDiscovery:
             # PR1: 显示名（非空才写 — 保持存量 YAML 最小差异）
             if p.display_name:
                 pd["display_name"] = p.display_name
+            # PR2: 调用别名（非空才写；显式意图，无凭证，不经 ${VAR} 展开）
+            if p.aliases:
+                pd["aliases"] = dict(p.aliases)
             if p.anthropic_base:
                 pd["anthropic_base"] = p.anthropic_base
             if p.timeout and p.timeout != 60:
@@ -857,6 +981,11 @@ class CloudDiscovery:
                 if models:
                     pd["models"] = models
             result["providers"][name] = pd
+        # PR2: 退役别名顶层落盘（仅非空时写 — 未激活意图仍要留档，
+        # 供审计与显式恢复）
+        retired = {p: dict(a) for p, a in self._retired_aliases.items() if a}
+        if retired:
+            result["retired_aliases"] = retired
         return result
 
     @staticmethod
@@ -922,7 +1051,26 @@ class CloudDiscovery:
                 continue
             for mid, spec in cfg.model_specs.items():
                 if mid in merged:
-                    continue  # 已发现，跳过
+                    # 短键已被占用：本 provider 自己的条目（发现/先前的 spec
+                    # 注册）→ 完全跳过；跨 provider 短名碰撞 → 仅注册前缀键
+                    # （对齐 _register_whitelist_models 与发现路径的碰撞契约 —
+                    # spec-only 手填模型在限定名/别名下必须可达，验收 step 10）。
+                    own = merged.get(f"{name}/{mid}")
+                    if own is not None and own.provider == name:
+                        continue
+                    upstream_id = (spec or {}).get("model_id") or mid
+                    m = CloudModel(
+                        model_id=upstream_id,
+                        provider=name,
+                        openai_available=bool(cfg.openai_base),
+                        anthropic_available=bool(cfg.anthropic_base),
+                        discovered_at=0.0,  # 0 表示未实际发现，仅配置
+                    )
+                    m = self._merge_model_spec(m, cfg, spec_key=mid)
+                    merged[f"{name}/{mid}"] = m
+                    log.debug("Registered spec-only model (prefixed, short key "
+                              "taken): %s/%s (upstream %s)", name, mid, upstream_id)
+                    continue
                 # v6.6：spec 的 key 是注册表短名（routing 按 split("/")[-1] 查表），
                 # spec["model_id"] 才是上游真实模型 id —— _serialize_providers 保存时
                 # 正是 key=短名 / model_id=全名。二者不同时：注册表 key 用短名，
@@ -1020,6 +1168,22 @@ class CloudDiscovery:
                 return val or ""
             expanded = _re.sub(r"\$\{(\w+)\}", _env_replace, raw)
             cfg = yaml.safe_load(expanded)
+            # PR2: 别名条目严格校验 — 键/值都必须非空字符串。坏条目抛错
+            # 走既有 corrupt 保注册表路径（在 provider 循环之前整体校验，
+            # 不部分应用）；校验放 try 内以复用同一异常出口。
+            for _pname, _pcfg in (cfg.get("providers") or {}).items():
+                _aliases = (_pcfg or {}).get("aliases")
+                if _aliases is None:
+                    continue
+                if not isinstance(_aliases, dict):
+                    raise ValueError(
+                        f"provider '{_pname}': aliases must be a mapping")
+                for _a, _m in _aliases.items():
+                    if (not isinstance(_a, str) or not _a
+                            or not isinstance(_m, str) or not _m):
+                        raise ValueError(
+                            f"provider '{_pname}': invalid alias entry "
+                            f"{_a!r}: {_m!r} (alias 与 model_id 均须非空字符串)")
         except Exception as e:
             log.error("Failed to load cloud_provider.yaml: %s", e)
             self._config_corrupt = True
@@ -1065,8 +1229,16 @@ class CloudDiscovery:
                 key_env_var=key_env_var,
                 preset_id=pcfg.get("preset_id", ""),
                 display_name=pcfg.get("display_name", ""),
+                aliases=dict(pcfg.get("aliases") or {}),
             )
             self._providers[name] = provider
+
+        # PR2: 顶层 retired_aliases（删除 provider 时退役的别名）— 宽松解析：
+        # 非 dict 值跳过（retired 本身不可路由，坏行不值得拖垮整份配置）
+        self._retired_aliases = {
+            p: dict(a) for p, a in (cfg.get("retired_aliases") or {}).items()
+            if isinstance(a, dict)
+        }
 
         log.info("Cloud config loaded: %d providers, %d model specs",
                  len(self._providers),

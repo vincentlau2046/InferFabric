@@ -24,6 +24,8 @@ def _mgr_with_spec(spec: dict) -> CloudDiscovery:
     mgr._rebuild_provider_registry = lambda *a, **k: None
     mgr._cloud_models = {}
     mgr._models_lock = threading.Lock()
+    # PR2: _serialize_providers 顶层落盘退役别名（__init__ 字段，裸实例需手补）
+    mgr._retired_aliases = {}
     return mgr
 
 
