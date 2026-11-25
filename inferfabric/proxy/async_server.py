@@ -697,6 +697,15 @@ def start_async():
 
     # Issue #47：控制面零凭证 — 无 token 校验/引导。
 
+    # Issue #50/#56：孤儿防护 + 非生产横幅 —— 必须在任何慢启动步骤
+    # （ProxyManager/reconcile 会做健康检查）之前武装，父进程消亡
+    # 即使发生在启动挂起期间也能自退。
+    from inferfabric.parent_watch import start_parent_watch, instance_banner
+    start_parent_watch()
+    _banner = instance_banner(PROXY_PORT)
+    if _banner:
+        logging.getLogger("inferfabric").warning("%s", _banner)
+
     mgr = ProxyManager()
     shutdown_event = threading.Event()
 

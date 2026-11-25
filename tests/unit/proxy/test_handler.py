@@ -228,3 +228,21 @@ def test_admin_guard_allows_authorized(monkeypatch):
     guarded = _admin(fn)
     guarded(h, pm)
     fn.assert_called_once_with(h, pm)
+
+def test_health_route_carries_instance_identity(monkeypatch):
+    """issue #50：/health 暴露版本/端口/数据目录/孤儿防护状态 —
+    双实例并存时一眼可辨哪个是生产。"""
+    import os as _os
+    from unittest.mock import MagicMock
+    from inferfabric.proxy import handler as _handler
+    h, _ = _make_handler(monkeypatch)
+    pm = MagicMock()
+    pm.mgr.gpu_mode = "idle"
+    _handler._GET_ROUTES["/health"](h, pm)
+    payload = h._send_json.call_args[0][0]
+    assert payload["status"] == "ok"
+    assert payload["gpu_mode"] == "idle"
+    assert payload["version"] == _handler.__version__
+    assert payload["port"] == _handler.PROXY_PORT
+    assert payload["data_dir"] == str(_handler.IFF_DATA_DIR)
+    assert payload["parent_watch"] == (_os.environ.get("IFF_PARENT_WATCH") == "1")

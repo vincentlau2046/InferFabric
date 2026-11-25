@@ -296,6 +296,12 @@ def _serve_api_spec(handler, pm):
     handler._send_json(get_openapi_spec())
 
 
+def _parent_watch_armed() -> bool:
+    """issue #50：/health 报告防护线程实况（非 env 快照）。"""
+    from inferfabric.parent_watch import is_armed
+    return is_armed()
+
+
 # 逻辑模型池管理接口（admin 路由表引用；零协议转换、零出网校验）
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
@@ -306,7 +312,12 @@ from inferfabric.security.key_store import KeyStore  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
-    "/health":                  lambda h, pm: h._send_json({"status": "ok", "gpu_mode": pm.mgr.gpu_mode}),
+    "/health": lambda h, pm: h._send_json({
+        "status": "ok", "gpu_mode": pm.mgr.gpu_mode,
+        # issue #50 身份标识：版本 + 端口 + 数据目录 + 孤儿防护状态
+        "version": __version__, "port": PROXY_PORT,
+        "data_dir": str(IFF_DATA_DIR),
+        "parent_watch": _parent_watch_armed()}),
     "/status":                  lambda h, pm: h._send_json(pm.mgr.status()),
     "/models":                  lambda h, pm: h._send_json(pm.mgr.list_models()),
     "/profiles":                lambda h, pm: (log.warning("/profiles is deprecated"), h._send_json(pm.mgr.list_models()))[1],
@@ -3692,6 +3703,14 @@ def main():
     logging.getLogger("inferfabric").addHandler(fh)
 
     # Issue #47：无控制面凭证引导 — 直接进入服务初始化。
+
+    # Issue #50：验收实例孤儿防护 — IFF_PARENT_WATCH=1 时父进程消亡自退；
+    # 生产 launchd 网关不设该 env，此处为空操作。非生产端口打身份横幅。
+    from inferfabric.parent_watch import start_parent_watch, instance_banner
+    start_parent_watch()
+    banner = instance_banner(PROXY_PORT)
+    if banner:
+        logging.getLogger("inferfabric").warning("%s", banner)
 
     mgr = ProxyManager()
     shutdown_event = threading.Event()
