@@ -1,143 +1,103 @@
 """
-unit/infra/test_admin_token.py — Admin Token 安全测试
+unit/infra/test_admin_token.py — 控制面凭证概念删除（issue #47）契约
 
-测试对象: inferfabric.proxy.handler.ProxyHandler._check_admin, _validate_admin_token_safety
-覆盖范围:
-  - hmac.compare_digest 恒定时间比较（源码验证）
-  - 空 token + 非 localhost → RuntimeError（fail-fast）
-  - 空 token + localhost → 放行
-  - 正确/错误 token 集成测试
+测试对象: inferfabric.proxy.handler._admin_gate / ProxyHandler._check_admin
+新契约（2026-11-25 用户裁决：单人本机工作台零凭证）:
+  - admin token 概念整体删除：born-token/严格模式/env 变量在模块上不存在
+  - X-Admin-Token 头即使携带也被无视（回环放行，不比对）
+  - Host/Origin 浏览器安全校验保留（跨站/DNS rebinding → 403）
 """
 
-import os
-import hmac
-import importlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 
-class TestCheckAdminConstantTime:
-    """Verify the admin gate uses hmac.compare_digest.
+class TestTokenConceptRemoved:
+    """概念删除 pin：模块上不得再有 token 面。"""
 
-    F7: _check_admin delegates to _admin_gate, which owns token comparison.
-    """
+    def test_token_symbols_absent(self):
+        import inferfabric.proxy.handler as h_mod
+        for gone in ("_ADMIN_TOKEN", "_ensure_admin_token", "bootstrap_admin_token",
+                     "_validate_admin_token_safety", "_admin_auth_enabled"):
+            assert not hasattr(h_mod, gone), f"concept must be deleted: {gone}"
 
-    def test_compare_digest_usage(self):
-        """Source code must use hmac.compare_digest, not ==."""
+    def test_gate_source_has_no_token_logic(self):
         import inspect
         import inferfabric.proxy.handler as h_mod
         source = inspect.getsource(h_mod._admin_gate)
-        assert "hmac.compare_digest" in source, \
-            "_admin_gate must use hmac.compare_digest for constant-time comparison"
-        # Should NOT use bare == for token comparison
-        stripped = source.replace(" ", "")
-        assert 'token==_ADMIN_TOKEN' not in stripped and \
-               'token=="_ADMIN_TOKEN"' not in source, \
-            "_admin_gate should not use == for token comparison"
+        assert "X-Admin-Token" not in source
+        assert "IFF_ADMIN" not in source
+        assert "compare_digest" not in source
 
 
-class TestValidateAdminTokenSafety:
-    """Verify _validate_admin_token_safety enforces fail-fast.
-
-    NOTE: PROXY_HOST and _ADMIN_TOKEN are module-level constants in handler.py,
-    read from os.environ at import time. monkeypatch.setenv alone won't work
-    because the module is already cached in sys.modules. We must use
-    monkeypatch.setattr on the module attributes directly.
-    """
-
-    def test_empty_token_non_localhost_raises(self, monkeypatch):
-        """Empty token + non-localhost PROXY_HOST → RuntimeError."""
-        import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "PROXY_HOST", "0.0.0.0")
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "")
-        with pytest.raises(RuntimeError) as excinfo:
-            h_mod._validate_admin_token_safety()
-        assert "not localhost" in str(excinfo.value).lower() or \
-               "IFF_ADMIN_TOKEN" in str(excinfo.value)
-
-    def test_empty_token_localhost_ok(self, monkeypatch):
-        """Empty token + localhost PROXY_HOST → no error, just warning."""
-        import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "PROXY_HOST", "127.0.0.1")
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "")
-        h_mod._validate_admin_token_safety()  # should not raise
-
-    def test_empty_token_localhost_ipv6_ok(self, monkeypatch):
-        """Empty token + ::1 PROXY_HOST → no error."""
-        import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "PROXY_HOST", "::1")
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "")
-        h_mod._validate_admin_token_safety()
-
-    def test_empty_token_localhost_name_ok(self, monkeypatch):
-        """Empty token + 'localhost' PROXY_HOST → no error."""
-        import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "PROXY_HOST", "localhost")
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "")
-        h_mod._validate_admin_token_safety()
-
-    def test_token_set_any_host_ok(self, monkeypatch):
-        """Token set + any PROXY_HOST → no error."""
-        import inferfabric.proxy.handler as h_mod
-        monkeypatch.setattr(h_mod, "PROXY_HOST", "0.0.0.0")
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", "secret123")
-        h_mod._validate_admin_token_safety()
-
-
-class TestAdminTokenIntegration:
-    """Integration tests for _check_admin in ProxyHandler.
-
-    F7 contract: token enforcement is strict-mode-only (IFF_ADMIN_REQUIRED=1);
-    default mode stays open on loopback (zero-friction install). Wrong/missing
-    token therefore require strict mode to yield 401.
-    """
+class TestAdminGateZeroCredential:
+    """零凭证门：回环 + 任意/缺失 X-Admin-Token 一律放行。"""
 
     @staticmethod
-    def _handler(monkeypatch, h_mod, admin_token, headers, command="GET", strict=False):
-        if strict:
-            monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
-        else:
-            monkeypatch.delenv("IFF_ADMIN_REQUIRED", raising=False)
-            monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
-        monkeypatch.setattr(h_mod, "_ADMIN_TOKEN", admin_token)
+    def _handler(h_mod, headers, command="GET"):
         h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
         h.headers = dict(headers)
         h.command = command
         h._send_json = MagicMock()
         return h
 
-    def test_correct_token_accepted(self, monkeypatch):
-        """Correct token passes check."""
+    def test_no_token_loopback_passes(self, monkeypatch):
         import inferfabric.proxy.handler as h_mod
-        h = self._handler(monkeypatch, h_mod, "test-secret",
-                          {"X-Admin-Token": "test-secret"})
-        result = h._check_admin()
-        assert result is True
+        monkeypatch.delenv("IFF_ADMIN_REQUIRED", raising=False)
+        monkeypatch.delenv("MACFABRIC_ADMIN_REQUIRED", raising=False)
+        h = self._handler(h_mod, {})
+        assert h._check_admin() is True
+        h._send_json.assert_not_called()
+        # 概念删除后不再挂 _admin_token 属性
+        assert not hasattr(h, "_admin_token")
+
+    def test_arbitrary_token_header_ignored(self, monkeypatch):
+        """携带任意 X-Admin-Token（对/错/垃圾）均不影响放行 — 头已无语义。"""
+        import inferfabric.proxy.handler as h_mod
+        for tk in ("test-secret", "wrong-secret", "", "非ASCII值"):
+            h = self._handler(h_mod, {"X-Admin-Token": tk})
+            assert h._check_admin() is True, f"token={tk!r} must be ignored"
+            h._send_json.assert_not_called()
+
+    def test_strict_mode_env_is_dead(self, monkeypatch):
+        """IFF_ADMIN_REQUIRED=1 不再产生任何 401 — 严格模式概念已删除。"""
+        import inferfabric.proxy.handler as h_mod
+        monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")
+        h = self._handler(h_mod, {})
+        assert h._check_admin() is True
         h._send_json.assert_not_called()
 
-    def test_wrong_token_rejected(self, monkeypatch):
-        """Wrong token fails check with 401 (strict mode)."""
+
+class TestBrowserSecurityRetained:
+    """Host/Origin 防护保留（浏览器安全 ≠ 用户门槛）。"""
+
+    @staticmethod
+    def _handler(h_mod, headers, command="POST"):
+        h = h_mod.ProxyHandler.__new__(h_mod.ProxyHandler)
+        h.headers = dict(headers)
+        h.command = command
+        h._send_json = MagicMock()
+        return h
+
+    def test_untrusted_host_403(self):
         import inferfabric.proxy.handler as h_mod
-        h = self._handler(monkeypatch, h_mod, "test-secret",
-                          {"X-Admin-Token": "wrong-secret"}, strict=True)
-        result = h._check_admin()
-        assert result is False
-        h._send_json.assert_called_once()
+        h = self._handler(h_mod, {"Host": "evil.test"})
+        assert h._check_admin() is False
         args, _ = h._send_json.call_args
-        assert args[1] == 401
+        assert args[1] == 403 and "untrusted host" in args[0]["error"]
 
-    def test_empty_token_config_allows_all(self, monkeypatch):
-        """When _ADMIN_TOKEN is empty and strict mode is off, requests pass."""
+    def test_cross_site_origin_403(self):
         import inferfabric.proxy.handler as h_mod
-        h = self._handler(monkeypatch, h_mod, "", {})
-        result = h._check_admin()
-        assert result is True
+        h = self._handler(h_mod, {"Host": "127.0.0.1:8999",
+                                  "Origin": "http://evil.test"})
+        assert h._check_admin() is False
+        args, _ = h._send_json.call_args
+        assert args[1] == 403 and "untrusted origin" in args[0]["error"]
+
+    def test_loopback_origin_passes(self):
+        import inferfabric.proxy.handler as h_mod
+        h = self._handler(h_mod, {"Host": "127.0.0.1:8999",
+                                  "Origin": "http://127.0.0.1:8999"})
+        assert h._check_admin() is True
         h._send_json.assert_not_called()
-
-    def test_empty_header_rejected(self, monkeypatch):
-        """Missing X-Admin-Token header is rejected when token is set (strict mode)."""
-        import inferfabric.proxy.handler as h_mod
-        h = self._handler(monkeypatch, h_mod, "secret", {}, strict=True)
-        result = h._check_admin()
-        assert result is False

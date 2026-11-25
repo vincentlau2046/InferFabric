@@ -15,7 +15,7 @@
  *   - 卸载：预览失败 → toast 且不发 POST；确认框列出当前候选并明示
  *     「最终候选引用以服务端执行时重新计算为准」；执行后 409（引用变化）
  *     只报错不自动重试。提交期间防双击。
- *   - 401（严格模式缺/错 admin token）→ 明确提示，不自动重试写操作。
+ *   - 401（拒绝）→ 明确提示，不自动重试写操作。
  *   - status 仅 tab 激活时 2s 轮询；切出即停。
  */
 (function () {
@@ -79,7 +79,7 @@
       var unauthorized = res.status === 401;
       res.json().then(function (j) {
         if (unauthorized) {
-          UI.toast('401：需要 admin token — 请在右上角输入后重试', 'error');
+          UI.toast('401：请求被拒绝 — 请刷新页面后重试', 'error');
           cb({ unauthorized: true, message: (j && j.error) || 'unauthorized' }, j, res.status);
         } else if (!res.ok) {
           cb({ message: (j && (j.error || j.message)) || ('HTTP ' + res.status) }, j, res.status);

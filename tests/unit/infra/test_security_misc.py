@@ -175,87 +175,45 @@ def test_validate_cloud_test_url_allows_registered_provider():
     assert ok or any(w in msg.lower() for w in ("dns", "resolv", "provider", "host", "allow", "private")),         f"Unexpected: ok={ok}, msg={msg}"
 
 
-def test_check_admin_uses_hmac_compare_digest():
-    """D-4: the admin gate uses hmac.compare_digest (constant-time).
-
-    F7: _check_admin delegates to _admin_gate, which owns token comparison."""
+def test_check_admin_compares_no_secrets():
+    """D-4→issue #47：门内不再比较任何秘密（恒定时间比较随凭证概念删除）。"""
     import inferfabric.proxy.handler as handler_module
     import inspect
     source = inspect.getsource(handler_module._admin_gate)
-    assert "hmac.compare_digest" in source or "compare_digest" in source
+    assert "compare_digest" not in source
+    assert "X-Admin-Token" not in source
 
 
-
-def test_check_admin_no_token_open_mode():
-    """D-4: with no IFF_ADMIN_TOKEN and strict mode off, _check_admin returns True."""
-    import os
+def test_check_admin_zero_credential_open():
+    """Issue #47：零凭证 — 无任何头时 _check_admin 放行。"""
     import inferfabric.proxy.handler as handler_module
-    old_token = handler_module._ADMIN_TOKEN
-    old_required = os.environ.pop("IFF_ADMIN_REQUIRED", None)
-    handler_module._ADMIN_TOKEN = ""
-    try:
-        handler = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
-        handler.headers = {}
-        handler.command = "GET"
-        result = handler_module.ProxyHandler._check_admin(handler)
-        assert result is True
-    finally:
-        handler_module._ADMIN_TOKEN = old_token
-        _restore_admin_required(old_required)
+    handler = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
+    handler.headers = {}
+    handler.command = "GET"
+    result = handler_module.ProxyHandler._check_admin(handler)
+    assert result is True
 
 
-def test_check_admin_rejects_wrong_token():
-    """D-4: wrong token rejected; correct token accepted (strict mode)."""
-    import os
+def test_check_admin_rejects_untrusted_host():
+    """Issue #47：唯一拒绝面=Host/Origin 浏览器安全（403，无 401）。"""
+    from unittest.mock import MagicMock
     import inferfabric.proxy.handler as handler_module
-    from unittest.mock import Mock
 
-    old = handler_module._ADMIN_TOKEN
-    old_required = os.environ.pop("IFF_ADMIN_REQUIRED", None)
-    os.environ["IFF_ADMIN_REQUIRED"] = "1"
-    handler_module._ADMIN_TOKEN = "secret123"
-    try:
-        h = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
-        h.headers = {}
-        h.command = "GET"
-        h.send_response = lambda code: None
-        h.send_header = lambda k, v: None
-        h.end_headers = lambda: None
-        h.log_request = lambda code: None
-        h.requestline = "GET / HTTP/1.1"
-        h.request_version = "HTTP/1.1"
-        h.wfile = Mock()
-        h.wfile.write = lambda x: None
-        h.wfile.flush = lambda: None
-        result = handler_module.ProxyHandler._check_admin(h)
-        assert result is False
+    h = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
+    h.headers = {"Host": "evil.test"}
+    h.command = "GET"
+    h._send_json = MagicMock()
+    result = handler_module.ProxyHandler._check_admin(h)
+    assert result is False
+    h._send_json.assert_called_once()
+    assert h._send_json.call_args[0][1] == 403
 
-        h2 = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
-        h2.headers = {"X-Admin-Token": "secret123"}
-        h2.command = "GET"
-        h2.send_response = lambda code: None
-        h2.send_header = lambda k, v: None
-        h2.end_headers = lambda: None
-        h2.log_request = lambda code: None
-        h2.requestline = "GET / HTTP/1.1"
-        h2.request_version = "HTTP/1.1"
-        h2.wfile = Mock()
-        h2.wfile.write = lambda x: None
-        h2.wfile.flush = lambda: None
-        result2 = handler_module.ProxyHandler._check_admin(h2)
-        assert result2 is True
-    finally:
-        handler_module._ADMIN_TOKEN = old
-        _restore_admin_required(old_required)
-
-
-def _restore_admin_required(old_required):
-    """Restore IFF_ADMIN_REQUIRED to its pre-test state (delete if unset before)."""
-    import os
-    if old_required is None:
-        os.environ.pop("IFF_ADMIN_REQUIRED", None)
-    else:
-        os.environ["IFF_ADMIN_REQUIRED"] = old_required
+    h2 = handler_module.ProxyHandler.__new__(handler_module.ProxyHandler)
+    h2.headers = {"Host": "127.0.0.1:8999"}
+    h2.command = "GET"
+    h2._send_json = MagicMock()
+    assert handler_module.ProxyHandler._check_admin(h2) is True
+    h2._send_json.assert_not_called()
 
 def test_validate_runtime_config_rejects_bad_rate_limit():
     """D-5: bad rate_limit values are rejected."""

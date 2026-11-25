@@ -16,7 +16,6 @@ import signal
 import socket
 import logging
 import json
-import hmac
 import hashlib
 import ipaddress
 import http.server
@@ -60,70 +59,9 @@ from inferfabric.proxy import pack_handlers
 from inferfabric.proxy import deploy_wizard as dw
 from inferfabric.proxy import deploy_download as dd
 
-# Admin token for control-plane routes (/switch, /stop, /deploy, /pull, etc.)
-# If set, requests must include X-Admin-Token header matching this value.
-# If not set (default), all control routes are open (localhost-only binding is the security boundary).
-_ADMIN_TOKEN = os.environ.get("IFF_ADMIN_TOKEN", "")
-
-
-def _admin_auth_enabled():
-    """Control-plane auth flag (F7 pick): default OFF on loopback, opt-in strict mode.
-
-    First-install experience on a loopback gateway wins — API keys authenticate
-    the cloud request path and must not gate local UI usage. Explicit
-    IFF_ADMIN_REQUIRED=1 (aliases: true/yes/on, case-insensitive; legacy
-    MACFABRIC_ADMIN_REQUIRED honored for fork parity) enables strict mode;
-    explicit =0/false/no/off opts out.
-
-    Review PR#15 B1: a non-loopback bind defaults auth ON (unless explicitly
-    opted out). Born-token bootstrap means _ADMIN_TOKEN is never empty after
-    main(), which made the startup "empty token + non-loopback → refuse"
-    guard unreachable — without this default, a network-bound gateway in
-    default mode would expose the control plane unauthenticated.
-    """
-    for name in ("IFF_ADMIN_REQUIRED", "MACFABRIC_ADMIN_REQUIRED"):
-        val = os.environ.get(name, "").strip().lower()
-        if val in ("1", "true", "yes", "on"):
-            return True
-        if val in ("0", "false", "no", "off"):
-            return False
-    if PROXY_HOST not in ("127.0.0.1", "localhost", "::1"):
-        return True
-    return False
-
-
-def _ensure_admin_token(secrets_path=None):
-    """F7 born-token — deterministic provisioning of the control-plane token.
-
-    Priority: explicit IFF_ADMIN_TOKEN env (ops override) > secrets.env key
-    IFF_ADMIN_TOKEN (0600; generated and written back when missing; legacy
-    MACFABRIC_ADMIN_TOKEN entries are honored read-only for fork parity).
-    Idempotent: an existing value is returned as-is, never rotated.
-    """
-    env = os.environ.get("IFF_ADMIN_TOKEN", "")
-    if env:
-        return env
-    from pathlib import Path
-    from inferfabric.cloud_discovery import SecretsManager
-    sm = SecretsManager(Path(secrets_path) if secrets_path else None)
-    data = sm.load()
-    token = data.get("IFF_ADMIN_TOKEN") or data.get("MACFABRIC_ADMIN_TOKEN", "")
-    if not token:
-        import secrets as _secrets
-        token = _secrets.token_urlsafe(32)
-        try:
-            sm.write("IFF_ADMIN_TOKEN", token)
-        except OSError:
-            # Review PR#15 N4: read-only IFF_DATA_DIR must not crash-loop the
-            # gateway at startup. Degrade to the in-memory token (this process
-            # still enforces it); persistence resumes when the state dir is
-            # writable. Strict mode stays fail-closed via
-            # _validate_admin_token_safety (empty token → refuse to start).
-            log.warning(
-                "Could not persist born admin token to secrets.env — "
-                "continuing with an in-memory token for this process"
-            )
-    return token
+# Issue #47（2026-11-25 用户裁决）：单人本机工作台，admin token 概念整体删除。
+# 控制面不再有任何凭证要求；防浏览器跨站的 Host/Origin 校验保留（_admin_gate）。
+# API Key 敏感操作的保护由控制台会话+密码承担（security/admin.py）。
 
 
 def _host_hostname(netloc):
@@ -139,14 +77,12 @@ def _host_hostname(netloc):
 
 
 def _admin_gate(handler, expected_host, write=False):
-    """F7 unified control-plane gate (pure function; _check_admin delegates).
+    """Unified control-plane gate (issue #47: 凭证概念已删除).
 
-    Semantics: auth OFF by default on loopback (zero-friction first install);
-    ON for non-loopback binds unless IFF_ADMIN_REQUIRED is explicitly opted
-    out (review PR#15 B1). Strict mode (IFF_ADMIN_REQUIRED=1) is fail-closed —
-    no/invalid token → 401.
-    Host/Origin checks apply in BOTH modes unconditionally: they block browser
-    cross-site requests and DNS rebinding, not local usage.
+    Semantics: 本机工作台零凭证 — 不再校验任何凭证头。保留
+    Host/Origin 校验（浏览器跨站/DNS rebinding 防护，无条件生效）；
+    这属于浏览器安全边界，不是对用户设门槛。API Key 敏感操作的门槛在
+    控制台会话+密码（security/admin.py），与本门无关。
     """
     loopback = ("127.0.0.1", "localhost", "::1")
     host = handler.headers.get("Host", "")
@@ -155,17 +91,6 @@ def _admin_gate(handler, expected_host, write=False):
     origin_ok = origin is None or (
         origin in (f"http://{expected_host}", f"https://{expected_host}")
         or _host_hostname(origin.split("//")[-1].split("/")[0]) in loopback)
-    if _admin_auth_enabled():
-        token = handler.headers.get("X-Admin-Token", "")
-        configured = getattr(handler, "_admin_token", "")
-        # compare bytes (review PR#15 N3): http.server decodes headers as
-        # latin-1; a non-ASCII token string would raise TypeError inside
-        # compare_digest and hang the connection instead of 401-ing.
-        if (not configured
-                or not hmac.compare_digest(token.encode("utf-8"),
-                                           configured.encode("utf-8"))):
-            handler._send_json({"error": "Unauthorized", "status": "unauthorized"}, 401)
-            return False
     if not host_ok:
         handler._send_json({"error": "untrusted host"}, 403)
         return False
@@ -500,8 +425,8 @@ _POST_ROUTES = {
         lambda h, pm: h._handle_security_console_password(pm)),
     "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
     "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
-    # Connect（F10）：自带更严门禁（回环对端 + 精确 authority + 强制 token），
-    # 不走 _admin 的无 token 兼容放行 — 见 connect_handlers._gate。
+    # Connect（F10）：自带门禁（回环对端 + 精确 authority + 同源 Origin，
+    # 零凭证 — issue #47），不走 _admin 包装 — 见 connect_handlers._gate。
     "/admin/connect/apply":     lambda h, pm: handle_connect_apply(h, pm),
     "/admin/connect/rollback":  lambda h, pm: handle_connect_rollback(h, pm),
 }
@@ -1945,9 +1870,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ─── Admin Auth ─────────────────────────────────────────────
 
     def _check_admin(self) -> bool:
-        """Check admin token for control-plane routes (F7 unified gate).
-        Returns True if allowed, False if denied (401/403 sent)."""
-        self._admin_token = _ADMIN_TOKEN
+        """Control-plane gate for /admin routes (issue #47: 零凭证).
+
+        Host/Origin 浏览器安全校验；Returns True if allowed, False if denied
+        (403 sent)."""
         # Bracket IPv6 binds (review PR#15 N1): Host for "::1" is "[::1]:8999".
         expected = (f"[{PROXY_HOST}]:{PROXY_PORT}" if ":" in PROXY_HOST
                     else f"{PROXY_HOST}:{PROXY_PORT}")
@@ -2368,12 +2294,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def _handle_security_console_password(self, pm):
         """POST /admin/security/console-password {new_password} — 首次网页设密。
 
-        设置保护 API Key 敏感操作（PR4 reveal 等）的控制台口令。管理员凭证
-        恒校验（X-Admin-Token vs born token）——回环下 _admin_gate 不验
-        token，故在此显式校验，杜绝本地页面无凭证驱动设密。
+        设置保护 API Key 敏感操作（PR4 reveal 等）的控制台口令。
+        Issue #47（零门槛工作台）：不再校验管理员凭证 — 本机页面可直接设密；
+        Host/Origin 浏览器安全校验由 _check_admin 路由包装承担。
 
-        失败路径次序（fresh-context 评审 2026-11-25）：
-        - 401 token 缺/错/未配置 → 任何落盘之前；
+        失败路径次序（fresh-context 评审 2026-11-25；#47 后无 401 分支）：
         - 400 体非 JSON 对象 / 口令 <12B → 任何落盘之前；
         - 400 origins 与启动同源校验不过（非回环需显式 HTTPS）→ 任何落盘之前；
         - SecurityAdmin 先于口令落库构建（其失败仅留一个空 provision 库，可重试）；
@@ -2383,14 +2308,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
           → 409）。已设口令 → 409；不置 policy、不建 key — 鉴权开关
           （/admin/security/enable）仍是用户主动的独立动作。
         """
-        token = self.headers.get("X-Admin-Token", "")
-        configured = getattr(self, "_admin_token", "")
-        if (not configured
-                or not hmac.compare_digest(token.encode("utf-8"),
-                                           configured.encode("utf-8"))):
-            self._send_json({"error": "需要管理员凭证（X-Admin-Token）— 无凭证请"
-                                      "在网关本机运行 \"iff keys init\""}, 401)
-            return
         data = self._read_body()
         if data is None:
             return   # read_body 已回复（413 / JSON 语法 400）
@@ -3640,54 +3557,8 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 # ─── Main ─────────────────────────────────────────────────────────
-
-def _validate_admin_token_safety():
-    """Validate that admin token configuration is safe before starting.
-
-    F7 semantics: born-token bootstrap provisions the token before this check,
-    so an empty _ADMIN_TOKEN in strict mode (IFF_ADMIN_REQUIRED=1) is a hard
-    failure (fail-closed double guard). Default mode on loopback stays open
-    with a warning. Review PR#15 B1: on a non-loopback bind, default mode now
-    enables auth, so the retained non-loopback guard below only fires when
-    auth was *explicitly* opted out (IFF_ADMIN_REQUIRED=0) with no token —
-    exactly the operator action that must refuse to start.
-    """
-    if not _ADMIN_TOKEN:
-        if _admin_auth_enabled():
-            raise RuntimeError(
-                "Admin token is empty — control-plane must fail closed. "
-                "Born-token bootstrap should have provisioned IFF_ADMIN_TOKEN "
-                "in the state-dir secrets.env; set IFF_ADMIN_TOKEN to override."
-            )
-        if PROXY_HOST not in ("127.0.0.1", "localhost", "::1"):
-            # Upstream guard retained: network-bound deployment without a token
-            # would expose control-plane routes unauthenticated.
-            raise RuntimeError(
-                f"Admin token is empty but PROXY_HOST={PROXY_HOST!r} is not localhost. "
-                "This would expose control-plane routes without authentication. "
-                "Set IFF_ADMIN_TOKEN to a secure value or set PROXY_HOST to 127.0.0.1."
-            )
-        log.warning(
-            "Admin token is empty and admin auth is disabled — "
-            "control plane open on loopback. Set IFF_ADMIN_REQUIRED=1 "
-            "to enforce token auth."
-        )
-
-
-def bootstrap_admin_token():
-    """Born-token bootstrap shared by threaded main() and async start_async.
-
-    F7 review (PR3, 2026-11-25): the async server performed only the safety
-    check, so _ADMIN_TOKEN stayed empty there and web first-set (恒校验)
-    could never succeed even with the correct secrets.env token. Idempotent:
-    derives once per process (env override > secrets.env, writing back when
-    missing). Callers must run this BEFORE serving; never generate or persist
-    a token from a rejected request path.
-    """
-    global _ADMIN_TOKEN
-    _ADMIN_TOKEN = _ensure_admin_token(IFF_DATA_DIR / "secrets.env")
-    return _ADMIN_TOKEN
-
+# Issue #47：admin token 校验/引导（_validate_admin_token_safety /
+# bootstrap_admin_token）随凭证概念一并删除；控制面保护=Host/Origin。
 
 def _create_server(retries: int = 5, retry_delay: float = 2.0):
     """Create the HTTP server, retrying on EADDRINUSE (stale proxy holding the port).
@@ -3820,14 +3691,7 @@ def main():
     fh.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s %(message)s"))
     logging.getLogger("inferfabric").addHandler(fh)
 
-    # F7 born-token: provision the control-plane token before the safety check
-    # (0600 secrets.env under the state dir; idempotent, never rotated).
-    # Review PR#15 N2: do NOT seed os.environ with the token — engine
-    # subprocesses (vllm/sglang/docker) inherit the environment and would each
-    # receive the control-plane secret. In-process consumers read the module
-    # global; out-of-process consumers (e.g. iff remove) read secrets.env.
-    bootstrap_admin_token()
-    _validate_admin_token_safety()
+    # Issue #47：无控制面凭证引导 — 直接进入服务初始化。
 
     mgr = ProxyManager()
     shutdown_event = threading.Event()

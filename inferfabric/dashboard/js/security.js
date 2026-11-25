@@ -47,7 +47,7 @@
       var unauthorized = res.status === 401;
       res.json().then(function (j) {
         if (unauthorized) {
-          UI.toast('401：需要 admin token — 请在右上角输入后重试', 'error');
+          UI.toast('401：请求被拒绝 — 请刷新页面后重试', 'error');
           cb({ unauthorized: true, message: (j && j.error) || 'unauthorized' }, j, res.status);
         } else if (!res.ok) {
           cb({ message: (j && (j.error || j.message)) || ('HTTP ' + res.status) }, j, res.status);

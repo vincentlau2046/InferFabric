@@ -269,21 +269,6 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .if-apilink:hover { color: var(--ink); }
 
-/* admin token 输入（顶栏内嵌，subtle） */
-.if-admin-input {
-  width: 96px;
-  height: 28px;
-  padding: 0 8px;
-  font-size: var(--fs-table);
-  font-family: var(--font-mono);
-  background: var(--bg);
-  color: var(--ink);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-.if-admin-input::placeholder { color: var(--ink-3); font-family: var(--font-sans); }
-.if-admin-input:focus { outline: none; border-color: var(--accent); }
-
 /* ── 侧边栏（56px 图标导航） ──────────────────────────────────── */
 .if-sidebar {
   width: var(--nav-w);

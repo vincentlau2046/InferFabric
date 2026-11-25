@@ -585,7 +585,7 @@ python3 -m inferfabric.proxy.handler --async
 | `POST` | `/v1/embeddings` | Embedding requests |
 | `POST` | `/v1/rerank` | Reranking requests |
 
-### Control (admin: X-Admin-Token or localhost)
+### Control（本机零凭证 — issue #47 单人工作台）
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -639,7 +639,6 @@ python3 -m inferfabric.proxy.handler --async
 | `EDGE_AUTO_SWITCH` | `1` | Auto-switch on request (v6.0 默认开)。优先级：显式 env > `iff.yaml` 的 `auto_switch.enabled` > 默认开。推理 tab 网关控制卡的"自动切换"开关可即时翻转（`POST /admin/auto-switch/toggle`，免重启）并持久化到 iff.yaml；env 显式设置时 UI 提示重启后回到 env 值 |
 | `EDGE_HEALTH_CHECK` | `60` | Health check interval (seconds) |
 | `EDGE_ASYNC_WORKERS` | `32` | Async mode executor threads (PR-19) |
-| `IFF_ADMIN_TOKEN` | `""` | Admin route auth token (empty = localhost-only) |
 | `IFF_CACHE_ENABLED` | (YAML) | Override cache enabled (via env) |
 | `IFF_DATA_DIR` | `~/.inferfabric` | Data directory (state.db, logs, secrets, cloud_provider.yaml) |
 | `NOTIFY_SOCKET` | — | systemd sd_notify socket path |
@@ -704,6 +703,7 @@ bash scripts/iff-recovery.sh --full  # Nuclear: SIGKILL all + nvidia-smi -gpu-re
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| **v7.12.3** | **2026-11-25** | **issue #47 — 删除 admin token 概念（单人工作台零凭证）** — ① 控制面零凭证：`_admin_gate`/`_check_admin` 只保留 Host/Origin 浏览器安全校验，X-Admin-Token 头不再有任何语义（携带任意值均放行）；② born-token 引导整体删除（`_ensure_admin_token`/`bootstrap_admin_token`/`_validate_admin_token_safety`/`_ADMIN_TOKEN`），secrets.env 不再写入/读取 IFF_ADMIN_TOKEN；`IFF_ADMIN_TOKEN`/`IFF_ADMIN_REQUIRED`/`MACFABRIC_ADMIN_REQUIRED` 环境变量全部失效（严格模式概念删除，非回环 bind 也不再强制凭证）；③ Connect 门禁同步零凭证（对端/Host/Origin 三重校验保留，原「无 token 一律 401」废除）；④ CLI 侧 `purge_pool_candidates` 不再读取/发送 token；⑤ 前端：顶栏 admin token 输入框移除，`UI.adminHeaders()` 只带 Content-Type，6 处面板 401 文案不再提 token；设置页首设 Key 保护密码**零凭证**直接可设（原管理员凭证恒校验废除），忘记密码出路不变（`iff keys set-password`）；⑥ API Key 敏感操作的会话+CSRF+密码体系原样保留（/admin/keys/*）。门禁：新增/改写 25 例契约测试（概念删除 pin + Host/Origin 保留 pin + 零凭证 roundtrip），全量回归通过。 |
 | **v7.12.2** | **2026-11-25** | **控制台易用性批次 PR3 — 授权设置页（设置 tab + Key 保护密码）** — ① 新增「设置」nav 项（网关策略组、鉴权旁，9→10 项）；设置页 = 授权设置三卡：本机控制台零门槛边界说明（装包/部署/切模型不过密码是默认且不变的行为，不新增全站锁）+ 推理 API 鉴权卡（status 三态分立展示，开/关写前 `UI.confirm`——开=客户端将 401、关=迁移宽限且 key 全保留）+ Key 保护密码卡（仅保护 API Key 敏感操作如重看明文，**不是控制台登录**）；② `GET /admin/security/status` 增 `password_set` 字段（向后兼容）；③ `POST /admin/security/console-password` 首次网页设密 — 管理员凭证（X-Admin-Token）**恒校验**（回环零摩擦不豁免设密），库缺失按 `iff keys init` 语义初始化（不置 policy、不建 key），已设置 409、口令 <12B 400 且拒绝路径零落盘；④ `POST /admin/keys/password` 控制台会话内改密 — `ConsoleAuth.verify_current` 旧密码逐次验证（不计登录限流窗、不建会话）+ CSRF，成功后旧会话随口令记录自动失效，错旧密码 400 带「iff keys set-password（保留全部 key）」恢复指引；⑤ 一次性明文 key 回显沿用 textContent + 代次守卫（切页/Esc 即清）；密码值只进 login/console-password/keys-password 三个请求体，不进 GET/innerHTML/浏览器存储。门禁：53 例 RED→GREEN（36 实现 + 17 评审修复）；fresh-context 评审 2 critical + 7 important 全部修入（改密路由表可达性、热接保留在役 legacy 鉴权与 reloader 身份、设置页按 policy 渲染动作、async 启动 born-token 引导、origins 同源校验先于落盘、设密/改密条件写入竞态守卫、401 可感知与 token 仅覆盖、UTF-8 字节校验、JSON null 体 400）；全量 2816 passed（3 例 #44 既有失败不在改动面）。 |
 | **v7.12.1** | **2026-11-24** | **控制台易用性批次 PR2 — 组级回退路由开关（WS2）** — 模型池页每池新增「回退」开关（启用开关旁，tooltip 明示关闭后果）：① `strategy` 字段激活并严格枚举校验（`priority_failover` 默认=现行为 / `first_only` 仅第一优先级候选），未知值/类型错拒载（与 enabled 同一严格纪律，防「回退已关」静默变回「全程回退」）；② selector first_only 在确定性排序后截断尝试链（vision 软偏好仍生效，「首选」=排序后首位），决策 reason 语义不动；③ 新错误码 `fallback_disabled`（双协议 503+Retry-After，与 no_ready_target 可区分，排障明示「回退路由已关闭，首选不可用」，UX 审视 ISSUE-02）；④ `POST /admin/model-pools/strategy` CAS 字段级原子翻转（registry `_flip_pool_field` 共享路径，toggle 重构复用，无效值 400 不落半份配置）；⑤ 控制台状态面：first_only 下降级横幅不再误报（该态下「服务经回退候选提供」不存在），新增 fallback_disabled 专用横幅「回退路由已关闭 — 首选候选不可用」。升级注意：7.12.1 前控制台建池骨架写入的旧值 `strategy: priority` 由解析层自动归一化为 `priority_failover` 并告警（旧 runtime 本就忽略该字段，语义零变化）；其余未知值严格拒载。边界不变：logical gate 429 无回退。门禁：fresh-context 评审 3 important 修入；23 例 RED→GREEN + 全量 2766 passed。 |
 | **v7.12.0** | **2026-11-24** | **控制台易用性批次 PR1 — Dashboard IA v3.1** — ① 部署向导自模型池页迁入能力包页，成为主装载入口；legacy「扩展·部署」表单收进 details 折叠并标注旧版（入口层级，UX 审视 ISSUE-03）；② 导航重组：监控并入状态组（总览/监控/异常），可观测组取消——监控为最常用入口（用户裁决），异常随迁；③ wizard 打开滚动定位 / goto-deploy 深链先展开折叠 / packs-catalog 深链滚到目录（fresh-context 评审 2 important + 4 nit 修入）。批次后续：PR2 组级回退开关、PR3 设置页+控制台密码、PR4 key 重看+吊销硬删（specs/console-ux-batch/）。 |

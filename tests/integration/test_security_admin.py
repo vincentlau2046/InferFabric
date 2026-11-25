@@ -45,10 +45,10 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
     pm.response_cache = None
     pm.mgr.gpu_mode = 'idle'
     pm.new_request_id.return_value = 'security-test'
-    # F7: wrong-token 401 on /admin/keys/login is a strict-mode guarantee;
-    # default mode intentionally lets the dashboard password gate login alone.
-    monkeypatch.setenv('IFF_ADMIN_REQUIRED', '1')
-    monkeypatch.setattr(handler_module, '_ADMIN_TOKEN', 'test-admin-token')
+    # Issue #47：控制面零凭证 — 无 IFF_ADMIN_REQUIRED/_ADMIN_TOKEN 概念；
+    # /admin/keys/* 的保护=控制台会话+CSRF+密码（不是 token）。
+    monkeypatch.delenv('IFF_ADMIN_REQUIRED', raising=False)
+    monkeypatch.delenv('MACFABRIC_ADMIN_REQUIRED', raising=False)
 
     async def roundtrip(base):
         pm.security_admin = SecurityAdmin(store, origins=[base])
@@ -60,9 +60,10 @@ def test_management_roundtrip_both_servers(tmp_path, monkeypatch, mode, caplog):
                     return r.status, dict(r.headers), await r.json()
             status, _, _ = await request('GET', '/health')
             assert status == 200
+            # 零凭证：错 token 头无语义，正确密码照常登录
             status, _, _ = await request('POST', '/admin/keys/login', {'password': 'isolated-test-password'},
                                           {'X-Admin-Token': 'wrong'})
-            assert status == 401
+            assert status == 200
             status, _, _ = await request('POST', '/admin/keys/login', {'password': 'isolated-test-password'},
                                           {'Origin': 'http://evil.test'})
             assert status == 403

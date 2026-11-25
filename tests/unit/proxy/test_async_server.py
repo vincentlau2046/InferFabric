@@ -326,12 +326,11 @@ def test_chunked_request_body_supported(monkeypatch):
 # admin guard
 # ═══════════════════════════════════════════════════════════════
 
-def test_admin_guard_401_and_pass(monkeypatch):
-    monkeypatch.setenv("IFF_ADMIN_REQUIRED", "1")  # F7: token enforced in strict mode
-    monkeypatch.setattr(handler_module, "_ADMIN_TOKEN", "secret")
+def test_admin_guard_zero_credential(monkeypatch):
+    """Issue #47：async 服务器控制面零凭证 — 无头 200；不可信 Host 403。"""
 
     def stub_switch(h, pm):
-        if not h._check_admin():  # 真实 _check_admin：401 由其自身发出
+        if not h._check_admin():  # 真实 _check_admin：403 由其自身发出
             return
         h._send_json({"status": "switched"})
 
@@ -342,11 +341,12 @@ def test_admin_guard_401_and_pass(monkeypatch):
         app = aserver.build_app(_fake_pm(), ex, MagicMock())
         async with TestClient(TestServer(app)) as client:
             r1 = await client.post("/switch", json={"model": "idle"})
-            assert r1.status == 401
+            assert r1.status == 200
+            assert (await r1.json())["status"] == "switched"
+            # 浏览器安全保留：不可信 Host 仍 403
             r2 = await client.post("/switch", json={"model": "idle"},
-                                   headers={"X-Admin-Token": "secret"})
-            assert r2.status == 200
-            assert (await r2.json())["status"] == "switched"
+                                   headers={"Host": "evil.test"})
+            assert r2.status == 403
 
     _run(scenario())
     ex.shutdown(wait=True)
