@@ -1047,7 +1047,26 @@ class CloudDiscovery:
                 continue
             for mid, spec in cfg.model_specs.items():
                 if mid in merged:
-                    continue  # 已发现，跳过
+                    # 短键已被占用：本 provider 自己的条目（发现/先前的 spec
+                    # 注册）→ 完全跳过；跨 provider 短名碰撞 → 仅注册前缀键
+                    # （对齐 _register_whitelist_models 与发现路径的碰撞契约 —
+                    # spec-only 手填模型在限定名/别名下必须可达，验收 step 10）。
+                    own = merged.get(f"{name}/{mid}")
+                    if own is not None and own.provider == name:
+                        continue
+                    upstream_id = (spec or {}).get("model_id") or mid
+                    m = CloudModel(
+                        model_id=upstream_id,
+                        provider=name,
+                        openai_available=bool(cfg.openai_base),
+                        anthropic_available=bool(cfg.anthropic_base),
+                        discovered_at=0.0,  # 0 表示未实际发现，仅配置
+                    )
+                    m = self._merge_model_spec(m, cfg, spec_key=mid)
+                    merged[f"{name}/{mid}"] = m
+                    log.debug("Registered spec-only model (prefixed, short key "
+                              "taken): %s/%s (upstream %s)", name, mid, upstream_id)
+                    continue
                 # v6.6：spec 的 key 是注册表短名（routing 按 split("/")[-1] 查表），
                 # spec["model_id"] 才是上游真实模型 id —— _serialize_providers 保存时
                 # 正是 key=短名 / model_id=全名。二者不同时：注册表 key 用短名，

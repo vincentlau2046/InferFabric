@@ -117,6 +117,39 @@ def test_provider_delete_retires_aliases_no_auto_reactivate(tmp_path):
     assert "retired_aliases" not in on_disk2
 
 
+# ── Task 11 验收暴露：spec-only 短名碰撞丢前缀键 ─────────────────────
+
+def test_spec_only_model_colliding_short_name_still_routable_prefixed(tmp_path):
+    """跨 provider 短名碰撞时 spec-only 手填模型仍须注册前缀键。
+
+    验收 step 10 暴露（v6.6 遗留）：手动重建的 provider 无白名单
+    （enabled_models=[]），手填模型只进 model_specs；短键已被先注册
+    provider 占用 → spec-only 路径整体跳过（含前缀键）→ 手填模型不可
+    路由 → 指向它的别名也 404。对齐 _register_whitelist_models 的碰撞
+    契约：短键 first-wins 保持，前缀键必须注册（spec 恒可路由）。
+    """
+    cd, p = _mk_cd(tmp_path, {"prov-a": _provider()})
+    # 短键 glm-5 first-wins → prov-a
+    assert cd._cloud_models["glm-5"].provider == "prov-a"
+
+    # 重建第二个 provider：无白名单（手动 re-add 不带 enabled_models）
+    _write_yaml(p, {"providers": {
+        "prov-a": _provider(),
+        "prov-b": _provider(base="https://b.example/v1", models=()),
+    }})
+    cd.reload()
+    # 手填 glm-5 → 纯 spec-only（无候选快照、无白名单），短键被 prov-a 占用
+    cd.add_manual_model("prov-b", "glm-5")
+    assert cd._cloud_models["prov-b/glm-5"].provider == "prov-b"
+    assert cd.resolve_route("prov-b/glm-5", set()) == "cloud:prov-b"
+
+    # 验收 step 10 场景：别名指向该手填模型 → 精确路由（不串 prov-a）
+    cd.providers["prov-b"].aliases["glm-5-b"] = "glm-5"
+    assert cd.resolve_route("glm-5-b", set()) == "cloud:prov-b"
+    # 短键 first-wins 契约不变
+    assert cd.resolve_route("glm-5", set()) == "cloud:prov-a"
+
+
 # ── Task 2: validate_alias + POST /admin/cloud/provider-alias ─────────
 
 import json
