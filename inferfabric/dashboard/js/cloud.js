@@ -415,6 +415,20 @@
     enabled.forEach(function (m) { enableSet[m] = true; });
     var specs = p.model_specs || [];
 
+    // ── PR2: 调用别名 —— 行内徽标 + 复制 + 入口（仅可路由行给）──
+    var aliases = p.aliases || {};
+    var aliasByModel = {};
+    Object.keys(aliases).forEach(function (a) { aliasByModel[aliases[a]] = a; });
+    function aliasEntry(mid) {
+      var alias = aliasByModel[mid] || '';
+      var badge = alias
+        ? '<span class="cpm-alias-badge mono" title="调用别名 — 客户端 model 传此名精确命中该模型（目标不可用时不回退）">' + esc(alias) + '</span>' +
+          '<button type="button" class="btn btn-sec btn-xs" data-action="cpm-alias-copy" data-alias="' + esc(alias) + '" title="复制调用名（客户端 model 字段值）">复制</button>'
+        : '';
+      return badge +
+        '<button type="button" class="btn btn-sec btn-xs" data-action="cpm-alias" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '" title="设置/修改/移除调用别名">别名</button>';
+    }
+
     // ── 发现候选段 ──
     var candHtml = '';
     if (!p.discovery_enabled) {
@@ -439,12 +453,14 @@
             ' data-provider="' + nameAttr + '" data-model="' + esc(mid) + '"' +
             ' title="编辑模型属性（上下文 / 输出上限 / 价格 / 视觉声明）">属性</button>'
           : '';
+        var aliasBtn = rcaps[mid] ? aliasEntry(mid) : '';
         return '<label class="cpm-item" data-action="cpm-toggle" data-provider="' + nameAttr + '" data-model="' + esc(mid) + '">' +
           '<input type="checkbox" class="cpm-check" ' + (checked ? 'checked' : '') + ' aria-label="' + esc(mid) + '">' +
           '<span class="cpm-id mono">' + esc(mid) + '</span>' +
           '<span class="cpm-src">发现</span>' +
           capBtns +
           attrsBtn +
+          aliasBtn +
           chips +
         '</label>';
       }).join('');
@@ -464,6 +480,7 @@
           capChips(p.name, s.id, s.supports_vision) +
           '<span class="cpm-ops">' +
             '<button type="button" class="btn btn-sec btn-xs" data-action="cpm-attrs" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">属性</button>' +
+            aliasEntry(s.id) +
             '<button type="button" class="btn btn-danger btn-xs" data-action="cpm-remove" data-provider="' + nameAttr + '" data-model="' + esc(s.id) + '">移除</button>' +
           '</span>' +
         '</div>';
@@ -806,6 +823,119 @@
       closeAttrsModal();
       UI.toast(st.model + ' 属性已保存', 'success');
       await cloudLoadProviders();   // 保存成功回读该 provider
+    } catch (e) {
+      showErr('保存失败：' + (e.message || e) + ' — 输入已保留，可更正后重试');
+    }
+  }
+
+  /* ══ 调用别名浮窗（PR2）：设置/修改/移除，指纹 CAS ══
+   * 契约（spec §3 PR2）：别名是显式意图，修改/移除时提示旧调用名受影响；
+   * 留空提交 = 移除（幂等）；409 config_conflict → 提示刷新；
+   * alias_conflict / model_not_routable → 内联显示后端 detail；
+   * 失败保留输入，不宣称保存成功。 */
+  var _aliasModal = null;
+
+  function closeAliasModal() {
+    if (!_aliasModal) return;
+    document.removeEventListener('keydown', _aliasModal.onKey);
+    var holder = document.getElementById('cpAliasModal');
+    if (holder) holder.style.display = 'none';
+    _aliasModal = null;
+  }
+
+  function openAliasModal(providerName, mid) {
+    if (!providerName || !mid) return;
+    closeAliasModal();
+    var p = findProvider(providerName);
+    if (!p) return;
+    var current = aliasOf(p, mid);
+    var holder = document.getElementById('cpAliasModal');
+    if (!holder) {
+      holder = document.createElement('div');
+      holder.id = 'cpAliasModal';
+      document.body.appendChild(holder);
+    }
+    holder.innerHTML =
+      '<div class="if-modal-backdrop">' +
+        '<div class="if-modal" role="dialog" aria-modal="true" aria-label="调用别名">' +
+          '<div class="if-modal-title">调用别名 — ' + esc(mid) + '</div>' +
+          '<div class="if-modal-body">' +
+            '<p class="if-field-hint">客户端 model 传此别名即精确调用该模型（上游收到原始模型 ID；目标停用/撤销时明确失败，不回退）。' +
+            (current ? '旧别名 <b class="mono">' + esc(current) + '</b> 将被替换，引用它的客户端会受影响。' : '') + '</p>' +
+            '<div class="if-form-row">' +
+              '<label class="if-field-label" for="cpAliasInput">别名</label>' +
+              '<input class="if-field-input mono" id="cpAliasInput" type="text" value="' + esc(current) + '" ' +
+                'placeholder="如 glm-5-b；留空提交 = 移除别名" autocomplete="off" spellcheck="false">' +
+            '</div>' +
+            '<p class="if-field-hint" id="cpAliasErr" style="display:none"></p>' +
+          '</div>' +
+          '<div class="if-modal-actions">' +
+            '<button type="button" class="btn btn-sec" data-act="alias-cancel">取消</button>' +
+            '<button type="button" class="btn btn-pri" data-act="alias-save">保存</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    holder.style.display = '';
+    var st = { provider: providerName, model: mid, onKey: null };
+    st.onKey = function (e) { if (e.key === 'Escape') closeAliasModal(); };
+    document.addEventListener('keydown', st.onKey);
+    _aliasModal = st;
+    var backdrop = holder.querySelector('.if-modal-backdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) {
+        var act = e.target.getAttribute && e.target.getAttribute('data-act');
+        if (act === 'alias-save') saveAlias();
+        else if (act === 'alias-cancel' || e.target === backdrop) closeAliasModal();
+      });
+    }
+    var input = document.getElementById('cpAliasInput');
+    if (input) input.focus();
+  }
+
+  function aliasOf(p, mid) {
+    var aliases = p.aliases || {};
+    for (var a in aliases) { if (aliases[a] === mid) return a; }
+    return '';
+  }
+
+  async function saveAlias() {
+    var st = _aliasModal;
+    if (!st) return;
+    var errEl = document.getElementById('cpAliasErr');
+    function showErr(msg) {
+      if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    }
+    var input = document.getElementById('cpAliasInput');
+    var aliasVal = ((input && input.value) || '').trim();
+    var p = findProvider(st.provider);
+    if (!p) { showErr('提供方已不可用 — 刷新后重试'); return; }
+    try {
+      var res = await fetch('/admin/cloud/provider-alias', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: st.provider,
+          model_id: st.model,
+          alias: aliasVal,
+          expected_config_fingerprint: p.config_fingerprint || ''
+        })
+      });
+      var data = null;
+      try { data = await res.json(); } catch (_e) { data = null; }
+      if (res.status === 409 && data && data.error === 'config_conflict') {
+        showErr('配置已被其他修改更新 — 列表将刷新，请重试');
+        await cloudLoadProviders();
+        return;
+      }
+      if (!res.ok || (data && data.error)) {
+        var why = (data && (data.detail || data.error)) || ('HTTP ' + res.status);
+        showErr('保存失败：' + why + ' — 输入已保留，可更正后重试');
+        return;   // 浮窗保持打开、输入不动；不宣称保存成功
+      }
+      closeAliasModal();
+      UI.toast(aliasVal ? ('调用别名 ' + aliasVal + ' 已保存')
+                        : ('已移除 ' + st.model + ' 的调用别名'), 'success');
+      await cloudLoadProviders();   // 保存成功回读（徽标/指纹同步）
     } catch (e) {
       showErr('保存失败：' + (e.message || e) + ' — 输入已保留，可更正后重试');
     }
@@ -1384,6 +1514,20 @@
         if (ev && ev.preventDefault) ev.preventDefault();
         if (provider) openAttrsModal(provider, el.getAttribute('data-model'));
         break;
+      case 'cpm-alias':
+        // 别名按钮同在 label 内 — preventDefault 兜底，勾选态零扰动
+        if (ev && ev.preventDefault) ev.preventDefault();
+        if (provider) openAliasModal(provider, el.getAttribute('data-model'));
+        break;
+      case 'cpm-alias-copy': {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        var copyAlias = el.getAttribute('data-alias') || '';
+        if (copyAlias && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(copyAlias);
+          UI.toast('已复制调用名：' + copyAlias, 'success');
+        }
+        break;
+      }
       case 'provider-test': {
         if (!provider) return;
         var p = null;

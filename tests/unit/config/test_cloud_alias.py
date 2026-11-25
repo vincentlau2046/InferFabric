@@ -285,3 +285,12 @@ class TestProviderAliasEndpoint:
         assert sent[0][1] == 200, sent
         on_disk = yaml.safe_load(p.read_text())
         assert on_disk["retired_aliases"] == {"prov-a": {"glm-5-b": "glm-5"}}
+
+
+def test_get_providers_exposes_aliases(tmp_path):
+    """GET providers 每 provider 带 aliases（仪表盘徽标/复制数据源）。"""
+    cd, _p = _mk_cd(tmp_path, {"prov-a": _provider(aliases={"glm-5-b": "glm-5"})})
+    h, sent = _mk_handler(cd)
+    h._handle_cloud_providers(_mk_pm(cd))
+    by_name = {pr["name"]: pr for pr in sent[0][0]["providers"]}
+    assert by_name["prov-a"]["aliases"] == {"glm-5-b": "glm-5"}

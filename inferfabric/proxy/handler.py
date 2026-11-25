@@ -3420,6 +3420,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "key_env_var": cfg.key_env_var,
                     "key_env_set": env_set,
                     "display_name": cfg.display_name,
+                    # PR2: 调用别名 {别名: 上游 model_id} — 仪表盘别名徽标/
+                    # 复制调用名的数据源；不可路由的别名不在此列出不宣称可用
+                    "aliases": dict(cfg.aliases),
                     "config_fingerprint": config_fingerprint,
                     "key_source": key_source,
                     "preset_id": cfg.preset_id,
