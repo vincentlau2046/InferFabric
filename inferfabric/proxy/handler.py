@@ -8,6 +8,7 @@ Core HTTP handler with routing, dashboard, and delegation to:
 Extracted from proxy.py (v4.1 P3 split).
 """
 
+import copy
 import errno
 import re
 import sys
@@ -355,6 +356,7 @@ _GET_ROUTES = {
     "/admin/security/status":  _admin(lambda h, pm: h._handle_security_status(pm)),
     "/admin/connect/status":    lambda h, pm: handle_connect_status(h, pm),
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
+    "/admin/cloud/provider-impact": _admin(lambda h, pm: h._handle_cloud_provider_impact(pm)),
     "/admin/cloud/presets":     _admin(lambda h, pm: h._handle_cloud_presets(pm)),
     "/admin/tune/preview":      _admin(lambda h, pm: h._handle_tune_preview(pm)),
     "/admin/tune/scenarios":    _admin(lambda h, pm: h._handle_tune_scenarios(pm)),
@@ -413,6 +415,7 @@ _POST_ROUTES = {
     "/admin/cloud/providers":   _admin(lambda h, pm: h._handle_cloud_providers(pm)),
     "/admin/cloud/provider-models": _admin(lambda h, pm: h._handle_cloud_provider_models(pm)),
     "/admin/cloud/provider-test": _admin(lambda h, pm: h._handle_cloud_provider_test(pm)),
+    "/admin/cloud/provider-update": _admin(lambda h, pm: h._handle_cloud_provider_update(pm)),
     "/admin/tune":              _admin(lambda h, pm: h._handle_tune(pm)),
     # ─── Admin: Logical Model Pools ─────────────────────────────────
     # 更新用 POST（同步 server 仅路由 GET/POST；body 携带 expected_revision）
@@ -2768,7 +2771,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         return conn
 
     def _probe_cloud_endpoint(self, base_url: str, api_key: str, protocol: str,
-                              probe_model: str, resolved_ip: str) -> dict:
+                              probe_model: str, resolved_ip: str,
+                              probe_timeout: int = 15) -> dict:
         """Probe one provider base URL; classify the result.
 
         Returns {"status", "protocol", "url", "http_status", "model_count",
@@ -2837,7 +2841,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         for path_url in paths:
             path = path_url[len(base):] or "/"
             try:
-                conn = self._make_pinned_conn(host, port, resolved_ip, use_tls)
+                conn = self._make_pinned_conn(host, port, resolved_ip, use_tls,
+                                              timeout=probe_timeout)
             except Exception as e:
                 return {"status": "error", "protocol": protocol, "url": base_url,
                         "http_status": 0, "model_count": 0,
@@ -2990,13 +2995,261 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         ok = all(r["pass"] for r in results)
         self._send_json({"provider": name, "key_set": key_set, "results": results, "ok": ok})
 
+    def _handle_cloud_provider_impact(self, pm):
+        """GET /admin/cloud/provider-impact?name= — 停用/关闭提供方的影响预览。
+
+        返回 {name, models: [{model_id, pools: [...]}], routable_count}：
+        models 按 provider 归并池引用（编辑前端在关闭/换址前展示受影响面）。
+        """
+        from urllib.parse import parse_qs
+        qs = parse_qs(urlparse(self.path).query)
+        name = (qs.get("name") or [""])[0].strip()
+        if pm.cloud.providers.get(name) is None:
+            self._send_json({"error": "provider_not_found"}, status=404)
+            return
+        pools_by_model = {}
+        for pool_name, ps in pm.pool_registry.snapshot().pools.items():
+            for rc in ps.candidates:
+                cand = rc.candidate
+                if cand.kind == "cloud" and cand.provider == name:
+                    pools_by_model.setdefault(cand.model_id, set()).add(pool_name)
+        routable = sum(1 for k, m in pm.cloud.cloud_models.items()
+                       if "/" not in k and m.provider == name)
+        self._send_json({
+            "name": name,
+            "models": [{"model_id": mid, "pools": sorted(pools)}
+                       for mid, pools in sorted(pools_by_model.items())],
+            "routable_count": routable,
+        })
+
+    def _handle_cloud_provider_update(self, pm):
+        """POST /admin/cloud/provider-update — 原地编辑（指纹 CAS + 凭证门禁）。
+
+        body: {name, expected_config_fingerprint, display_name?, timeout?,
+               discovery_enabled?, discovery_interval?, include_pattern?,
+               openai_base?, anthropic_base?, api_key?, key_action?, probe_model?}
+        缺省 = 不改。key_action: keep（默认）｜replace（需 api_key 非空）｜none（置空）。
+        门禁：换域 + keep → 400 destination_key_unconfirmed（旧 Key 绝不自动发往
+        新域）；外部托管 Key 不可覆盖（external_key_managed）；api_key 或任一 base
+        变更 → 对每个仍配置 base 且 provider 启用的协议，用拟应用值发 1-token 真
+        实生成探针（公共 /models 200 不算鉴权通过；探针超时 60s）；任一失败 →
+        400 probe_failed，零写入。放行后 save_config() 成功才写 secrets.env 并
+        覆盖 env 注入残留（受管优先，出站值真实变化）。
+        失败语义：404 未知提供方；409 指纹冲突（带当前指纹供刷新重试）；
+        500 落盘失败（内存以编辑前快照回滚，env 同步还原）。
+        """
+        body = self._read_body() or {}
+        name = body.get("name") or ""
+        # ── CAS 对磁盘现算指纹（终审 C3）：缓存在两次 load/save 之间对外部
+        # 手改全盲。缓存≠磁盘先 reload 拉入外部修改，再以磁盘值判定 ——
+        # 绝不以旧内存视图覆盖磁盘上的新设置（spec §2）。
+        disk_fp = pm.cloud.disk_fingerprint()
+        if pm.cloud.config_fingerprint() != disk_fp:
+            pm.cloud.reload()
+        if (body.get("expected_config_fingerprint") or "") != disk_fp:
+            self._send_json({"error": "config_conflict",
+                             "config_fingerprint": disk_fp}, status=409)
+            return
+        cfg = pm.cloud.providers.get(name)
+        if cfg is None:
+            self._send_json({"error": "provider_not_found"}, status=404)
+            return
+
+        # ── 凭证/端点意图解析 ─────────────────────────────────────
+        key_action = (body.get("key_action") or "keep").strip()
+        new_api_key = (body.get("api_key") or "").strip()
+        if key_action not in ("keep", "replace", "none"):
+            self._send_json({"error": "invalid_key_action"}, status=400)
+            return
+        if key_action == "replace" and not new_api_key:
+            self._send_json({"error": "api_key_required",
+                             "detail": "key_action=replace 需要 api_key 非空"}, status=400)
+            return
+        if new_api_key and key_action != "replace":
+            self._send_json({"error": "api_key_required",
+                             "detail": "api_key 仅可随 key_action=replace 提交"}, status=400)
+            return
+
+        # ── 字段校验前置（终审 I2）：类型错误 400 字段级，不落进 apply 的
+        # 500 save_failed 兜底；布尔只收 JSON 布尔，拒字符串/数字 ──
+        new_timeout = new_interval = None
+        if body.get("timeout") is not None:
+            try:
+                new_timeout = int(body["timeout"])
+            except (TypeError, ValueError):
+                self._send_json({"error": "invalid_field", "field": "timeout",
+                                 "detail": "timeout 须为整数（秒）"}, status=400)
+                return
+        if body.get("discovery_interval") is not None:
+            try:
+                new_interval = int(body["discovery_interval"])
+            except (TypeError, ValueError):
+                self._send_json({"error": "invalid_field", "field": "discovery_interval",
+                                 "detail": "discovery_interval 须为整数（秒）"}, status=400)
+                return
+        for _flag in ("enabled", "discovery_enabled"):
+            if body.get(_flag) is not None and not isinstance(body[_flag], bool):
+                self._send_json({"error": "invalid_field", "field": _flag,
+                                 "detail": f"{_flag} 须为布尔值"}, status=400)
+                return
+
+        def _dest(url: str):
+            u = urlparse(url or "")
+            scheme = u.scheme or "https"
+            return (scheme, (u.hostname or "").lower(),
+                    u.port or (443 if scheme == "https" else 80))
+
+        new_openai = str(body["openai_base"]).strip() \
+            if body.get("openai_base") is not None else (cfg.openai_base or "")
+        new_anthropic = str(body["anthropic_base"]).strip() \
+            if body.get("anthropic_base") is not None else (cfg.anthropic_base or "")
+        changed_dests = []
+        changed_bases = []
+        for proto, old_b, new_b in (("openai", cfg.openai_base, new_openai),
+                                    ("anthropic", cfg.anthropic_base, new_anthropic)):
+            if new_b and new_b != (old_b or ""):
+                # I1: 任意 base 变化（含仅路径）都须探针 —— 打错路径不该静默上线
+                changed_bases.append(proto)
+            if new_b and _dest(new_b) != _dest(old_b):
+                changed_dests.append(proto)
+
+        if changed_dests and key_action == "keep":
+            # 旧 Key 绝不自动发往新域 — 换域须显式 replace 或显式 none
+            self._send_json({"error": "destination_key_unconfirmed",
+                             "protocols": changed_dests,
+                             "detail": "更换端点须显式确认凭证：key_action=replace（新 Key）或 none（无凭证）"},
+                            status=400)
+            return
+
+        if key_action == "replace" and cfg.key_env_var \
+                and not pm.cloud.secrets.has(cfg.key_env_var) \
+                and os.environ.get(cfg.key_env_var):
+            # 外部环境托管的凭证不可在管理面覆盖：env 外部值会在下轮注入覆盖，
+            # 覆写只会造成「看似成功、重启回滚」的半套状态
+            self._send_json({"error": "external_key_managed",
+                             "detail": "该 Key 由外部环境变量托管，请在环境中更换"}, status=400)
+            return
+
+        # ── 探针门禁（零变更不联网；改动先探测后落盘）─────────────
+        cred_changed = key_action == "replace" or (key_action == "none" and bool(cfg.api_key))
+        # C2: 门禁看拟应用 enabled —— 停用提供方「启用+换Key」同样必须探针；
+        # 当前已启用（即使本次请求同时停用）仍探，验证通过的新值留档待复用
+        proposed_enabled = bool(body["enabled"]) if body.get("enabled") is not None \
+            else cfg.enabled
+        probe_active = proposed_enabled or cfg.enabled
+        if (cred_changed or changed_bases) and probe_active:
+            probe_model = (body.get("probe_model") or "").strip() \
+                or (cfg.enabled_models[0] if cfg.enabled_models else "")
+            if not probe_model:
+                self._send_json({"error": "probe_target_missing",
+                                 "detail": "请传 probe_model，或先为该提供方启用至少一个模型"},
+                                status=400)
+                return
+            cur_key = cfg.api_key
+            if cur_key.startswith("${") and cur_key.endswith("}"):
+                cur_key = os.environ.get(cur_key[2:-1], "")
+            for proto in ("openai", "anthropic"):
+                new_b = new_openai if proto == "openai" else new_anthropic
+                if not new_b:
+                    continue  # 未配置该协议 → 不探
+                key_for_probe = new_api_key if key_action == "replace" \
+                    else ("" if key_action == "none" else cur_key)
+                valid, reason, safe_ips = self._validate_cloud_test_url(new_b, pm)
+                if not valid:
+                    self._send_json({"error": "probe_failed", "protocol": proto,
+                                     "detail": f"URL check failed: {reason}"}, status=400)
+                    return
+                r = self._probe_cloud_endpoint(new_b, key_for_probe, proto,
+                                               probe_model, safe_ips[0], probe_timeout=60)
+                # 放行证据 = 真实 1-token 生成（ok）或已验证鉴权（403+模型不在套餐）
+                passed = r.get("status") == "ok" or (
+                    r.get("status") == "model_unavailable" and r.get("http_status") == 403)
+                if not passed:
+                    self._send_json({"error": "probe_failed", "protocol": proto,
+                                     "detail": r.get("message", ""),
+                                     "probe_status": r.get("status")}, status=400)
+                    return
+
+        # ── 应用（全部通过才落盘；save 成功才写 secrets/env）──────
+        backup = copy.deepcopy(cfg)
+        touched_env = {}
+        env_var = cfg.key_env_var or pm.cloud._env_key_for_provider(name)
+        try:
+            if body.get("display_name") is not None:
+                cfg.display_name = str(body["display_name"])
+            if body.get("timeout") is not None:
+                cfg.timeout = new_timeout
+            if body.get("discovery_enabled") is not None:
+                cfg.discovery_enabled = body["discovery_enabled"]
+            if body.get("discovery_interval") is not None:
+                cfg.discovery_interval = new_interval
+            if body.get("include_pattern") is not None:
+                cfg.include_pattern = str(body["include_pattern"])
+            if body.get("openai_base") is not None:
+                cfg.openai_base = str(body["openai_base"]).strip()
+            if body.get("anthropic_base") is not None:
+                cfg.anthropic_base = str(body["anthropic_base"]).strip()
+            enabled_changed = False
+            if body.get("enabled") is not None:
+                new_enabled = bool(body["enabled"])
+                enabled_changed = new_enabled != cfg.enabled
+                cfg.enabled = new_enabled
+            if key_action == "replace":
+                cfg.api_key = f"${{{env_var}}}"   # YAML 只存引用，明文只进 secrets.env
+                cfg.key_env_var = env_var
+            elif key_action == "none":
+                cfg.api_key = ""
+            pm.cloud.save_config()
+            if key_action == "replace":
+                # env 覆盖 setdefault 注入残留（受管优先）— 否则「改了文件」
+                # 不等于「出站换了 Key」
+                pm.cloud.secrets.write(env_var, new_api_key)
+                touched_env[env_var] = os.environ.get(env_var)
+                os.environ[env_var] = new_api_key
+                # 内存=已解析明文（与 POST add 路径契约一致，验收发现：
+                # 引用字面量会让 forward 发出 Bearer ${VAR}）
+                cfg.api_key = new_api_key
+            if enabled_changed:
+                # 停用/启用即时生效（不触探针）：reload 按 7.9.1 严格重建
+                # floor —— disabled provider 的注册表条目即时撤销；重新启用
+                # 即时恢复 specs ∪ 白名单。旧发现任务不复活停用项目（spec §2）。
+                # 终审 C1：reload 必须在 env 覆盖之后 —— 重建对象经 ${VAR}
+                # 文本展开取 env，先 reload 会把旧 Key 展开进 live 内存，
+                # 而明文只写到被 reload 抛弃的旧对象上。
+                pm.cloud.reload()
+        except Exception as e:
+            pm.cloud.providers[name] = backup  # 内存回滚（磁盘未动）
+            for var, old in touched_env.items():
+                if old is None:
+                    os.environ.pop(var, None)
+                else:
+                    os.environ[var] = old
+            self._send_json({"error": "save_failed", "detail": str(e)}, status=500)
+            return
+        self._send_json({"status": "updated",
+                         "config_fingerprint": pm.cloud.config_fingerprint()})
+
     def _handle_cloud_providers(self, pm):
         """GET/POST/DELETE /admin/cloud/providers — 列出、添加或删除 provider。"""
         if self.command == "GET":
-            providers = []
+            # 终审 C3: GET 以磁盘现算指纹自愈 —— 缓存落后（外部手改）即
+            # reload，否则仪表盘 409 刷新流会拿回同样的陈旧指纹而死循环
+            _disk_fp = pm.cloud.disk_fingerprint()
+            if pm.cloud.config_fingerprint() != _disk_fp:
+                pm.cloud.reload()
+            config_fingerprint = pm.cloud.disk_fingerprint()  # PR1: 编辑 CAS 基础
             all_models = pm.cloud.cloud_models  # 快照一次（含短名 + provider/ 前缀双键）
+            providers = []
             for name, cfg in pm.cloud.providers.items():
                 env_set = bool(os.environ.get(cfg.key_env_var, "")) if cfg.key_env_var else False
+                # PR1: key_source 三态 — managed（secrets.env 托管）/
+                # external（仅外部环境注入）/ unset（两者皆无）
+                if cfg.key_env_var and pm.cloud.secrets.has(cfg.key_env_var):
+                    key_source = "managed"
+                elif env_set:
+                    key_source = "external"
+                else:
+                    key_source = "unset"
                 # v6.1 Phase 1: 可路由数 = 短名键计数（避免双键重复统计）
                 routable = sum(1 for k, m in all_models.items()
                                if "/" not in k and m.provider == name)
@@ -3041,6 +3294,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "model_count": routable,  # 兼容旧字段：语义对齐可路由数
                     "key_env_var": cfg.key_env_var,
                     "key_env_set": env_set,
+                    "display_name": cfg.display_name,
+                    "config_fingerprint": config_fingerprint,
+                    "key_source": key_source,
                     "preset_id": cfg.preset_id,
                 })
             # Include cloud models with capabilities (deduplicate: skip provider/ prefixed keys)

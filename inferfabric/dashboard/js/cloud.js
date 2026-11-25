@@ -313,11 +313,13 @@
           (canTest ? '' : ' disabled title="该 Provider 无 Base URL"') + '>测试</button>' +
         '<button type="button" class="btn btn-sec btn-sm" data-action="provider-discover" data-provider="' + nameAttr + '">发现</button>' +
         modelsBtn +
+        '<button type="button" class="btn btn-sec btn-sm" data-action="provider-edit" data-provider="' + nameAttr + '">编辑</button>' +
         '<button type="button" class="btn btn-danger btn-sm" data-action="provider-delete" data-provider="' + nameAttr + '">删除</button>' +
       '</div>';
     return '<tr>' +
       '<td><div class="cp-cell">' +
         '<span class="cp-name-txt">' + esc(p.name) + '</span>' +
+        (p.display_name ? '<span class="cp-sub">' + esc(p.display_name) + '</span>' : '') +
         (p.preset_id ? '<span class="cp-sub">预设 ' + esc(p.preset_id) + '</span>' : '') +
       '</div></td>' +
       '<td>' + stHtml + '</td>' +
@@ -809,6 +811,220 @@
     }
   }
 
+  /* ══ 编辑连接（PR1）：原地编辑提供方，指纹 CAS + 服务端真实探针门禁 ══
+   * 契约（spec §2）：
+   *   - 提供方 ID 不变；显示名仅展示不影响路由；
+   *   - Key 留空不改；非空 = replace；勾选「移除凭证」= none（显式无凭证）；
+   *   - key_source=external 的 Key 输入禁用并标注外部托管（不可在 UI 覆盖）；
+   *   - 换 Key/地址提交前 UI.confirm（服务端将用拟变更值发真实 1-token 探针，
+   *     通过才应用；旧 Key 绝不自动发往新域）；
+   *   - 409 config_conflict → 提示刷新；probe_failed/destination_key_unconfirmed
+   *     → 浮窗内联显示后端 detail；失败保留输入，不宣称保存成功。 */
+  var _editModal = null;
+
+  function findProvider(name) {
+    for (var i = 0; i < _providers.length; i++) {
+      if (_providers[i].name === name) return _providers[i];
+    }
+    return null;
+  }
+
+  function closeEditModal() {
+    if (!_editModal) return;
+    document.removeEventListener('keydown', _editModal.onKey);
+    var holder = document.getElementById('cpEditModal');
+    if (holder) { holder.innerHTML = ''; holder.style.display = 'none'; }
+    _editModal = null;
+  }
+
+  function openEditModal(providerName) {
+    if (!providerName) return;
+    var p = findProvider(providerName);
+    if (!p) return;
+    closeEditModal();
+    var holder = document.getElementById('cpEditModal');
+    if (!holder) {
+      holder = document.createElement('div');
+      holder.id = 'cpEditModal';
+      document.body.appendChild(holder);
+    }
+    var externalKey = p.key_source === 'external';
+    var keyOn = !!p.key_env_set;
+    var keyField =
+      '<div class="if-form-row">' +
+        '<label class="if-field-label" for="cpEdit-key">上游 API Key</label>' +
+        '<input class="if-field-input mono" id="cpEdit-key" type="password" autocomplete="new-password"' +
+          ' placeholder="留空不改"' + (externalKey ? ' disabled' : '') + '>' +
+        (externalKey
+          ? '<p class="if-field-hint">外部托管（' + esc(p.key_env_var) + '）— 不可在此覆盖，请在环境中更换</p>'
+          : (keyOn ? '<p class="if-field-hint">已设置（' + esc(p.key_env_var) + '）— 留空不改</p>' : '')) +
+        '<label class="cpm-cap"><input type="checkbox" id="cpEdit-keynone"' +
+          ((externalKey || !keyOn) ? ' disabled' : '') + '> 移除凭证（改为无 Key 访问）</label>' +
+      '</div>';
+    holder.innerHTML =
+      '<div class="if-modal-backdrop">' +
+        '<div class="if-modal" role="dialog" aria-modal="true" aria-label="编辑连接">' +
+          '<div class="if-modal-title">编辑连接 — ' + esc(p.name) + '</div>' +
+          '<div class="if-modal-body">' +
+            '<p class="if-field-hint">提供方 ID「' + esc(p.name) + '」不变；显示名仅用于展示，不影响路由。已启用模型、池引用与客户端配置不受编辑影响。</p>' +
+            '<p class="if-field-hint" id="cpEditErr" style="display:none"></p>' +
+            '<div class="if-form-row">' +
+              '<label class="if-field-label" for="cpEdit-display">显示名</label>' +
+              '<input class="if-field-input" id="cpEdit-display" type="text" value="' + esc(p.display_name || '') + '" autocomplete="off">' +
+            '</div>' +
+            keyField +
+            '<div class="if-form-row">' +
+              '<label class="if-field-label" for="cpEdit-openai">OpenAI 兼容地址</label>' +
+              '<input class="if-field-input mono" id="cpEdit-openai" type="text" value="' + esc(p.openai_base || '') + '" autocomplete="off" spellcheck="false">' +
+            '</div>' +
+            '<div class="if-form-row">' +
+              '<label class="if-field-label" for="cpEdit-anthropic">Anthropic 地址</label>' +
+              '<input class="if-field-input mono" id="cpEdit-anthropic" type="text" value="' + esc(p.anthropic_base || '') + '" autocomplete="off" spellcheck="false">' +
+            '</div>' +
+            '<label class="cpm-cap"><input type="checkbox" id="cpEdit-enabled"' + (p.enabled ? ' checked' : '') + '> 启用该提供方</label>' +
+            '<details><summary>高级（发现与超时）</summary>' +
+              '<label class="cpm-cap"><input type="checkbox" id="cpEdit-disc"' + (p.discovery_enabled ? ' checked' : '') + '> 自动发现</label>' +
+              '<div class="if-form-row">' +
+                '<label class="if-field-label" for="cpEdit-interval">发现间隔（秒）</label>' +
+                '<input class="if-field-input mono" id="cpEdit-interval" type="text" inputmode="numeric" value="' + esc(String(p.discovery_interval || 3600)) + '">' +
+              '</div>' +
+              '<div class="if-form-row">' +
+                '<label class="if-field-label" for="cpEdit-pattern">发现过滤（include_pattern）</label>' +
+                '<input class="if-field-input mono" id="cpEdit-pattern" type="text" value="' + esc(p.include_pattern || '') + '" autocomplete="off" spellcheck="false">' +
+              '</div>' +
+              '<div class="if-form-row">' +
+                '<label class="if-field-label" for="cpEdit-timeout">上游超时（秒）</label>' +
+                '<input class="if-field-input mono" id="cpEdit-timeout" type="text" inputmode="numeric" value="' + esc(String(p.timeout || 600)) + '">' +
+              '</div>' +
+            '</details>' +
+          '</div>' +
+          '<div class="if-modal-actions">' +
+            '<button type="button" class="btn btn-sec" data-act="edit-cancel">取消</button>' +
+            '<button type="button" class="btn btn-pri" data-act="edit-save">保存</button>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    holder.style.display = '';
+    var st = { provider: providerName, p: p, onKey: null };
+    st.onKey = function (e) { if (e.key === 'Escape') closeEditModal(); };
+    document.addEventListener('keydown', st.onKey);
+    _editModal = st;
+    var backdrop = holder.querySelector('.if-modal-backdrop');
+    if (backdrop) {
+      backdrop.addEventListener('click', function (e) {
+        var act = e.target.getAttribute && e.target.getAttribute('data-act');
+        if (act === 'edit-save') saveEdit();
+        else if (act === 'edit-cancel' || e.target === backdrop) closeEditModal();
+      });
+    }
+    var saveBtn = holder.querySelector('[data-act="edit-save"]');
+    if (saveBtn) saveBtn.focus();
+  }
+
+  /* 只发变更字段；凭证：留空不改 / 非空 replace / 勾选 none。非法输入抛错。 */
+  function _editDiff(p) {
+    var changes = {};
+    var disp = document.getElementById('cpEdit-display');
+    if (disp && disp.value !== (p.display_name || '')) changes.display_name = disp.value;
+    var keyEl = document.getElementById('cpEdit-key');
+    var noneEl = document.getElementById('cpEdit-keynone');
+    if (noneEl && noneEl.checked) {
+      changes.key_action = 'none';
+    } else if (keyEl && !keyEl.disabled && keyEl.value.trim() !== '') {
+      changes.key_action = 'replace';
+      changes.api_key = keyEl.value.trim();
+    }
+    var oai = document.getElementById('cpEdit-openai');
+    if (oai && oai.value.trim() !== (p.openai_base || '')) changes.openai_base = oai.value.trim();
+    var ant = document.getElementById('cpEdit-anthropic');
+    if (ant && ant.value.trim() !== (p.anthropic_base || '')) changes.anthropic_base = ant.value.trim();
+    var en = document.getElementById('cpEdit-enabled');
+    if (en && !!en.checked !== !!p.enabled) changes.enabled = !!en.checked;
+    var disc = document.getElementById('cpEdit-disc');
+    if (disc && !!disc.checked !== !!p.discovery_enabled) changes.discovery_enabled = !!disc.checked;
+    var iv = document.getElementById('cpEdit-interval');
+    if (iv && iv.value.trim() !== String(p.discovery_interval || 3600)) {
+      var n = Number(iv.value.trim());
+      if (!Number.isInteger(n) || n <= 0) throw new Error('发现间隔：请输入正整数');
+      changes.discovery_interval = n;
+    }
+    var pat = document.getElementById('cpEdit-pattern');
+    if (pat && pat.value !== (p.include_pattern || '')) changes.include_pattern = pat.value;
+    var to = document.getElementById('cpEdit-timeout');
+    if (to && to.value.trim() !== String(p.timeout || 600)) {
+      var t = Number(to.value.trim());
+      if (!Number.isInteger(t) || t <= 0) throw new Error('上游超时：请输入正整数');
+      changes.timeout = t;
+    }
+    return changes;
+  }
+
+  async function saveEdit() {
+    var st = _editModal;
+    if (!st) return;
+    var errEl = document.getElementById('cpEditErr');
+    function showErr(msg) {
+      if (errEl) { errEl.textContent = msg; errEl.style.display = ''; }
+    }
+    var changes;
+    try {
+      changes = _editDiff(st.p);
+    } catch (e) {
+      showErr(e.message || String(e));
+      return;
+    }
+    if (!changes || !Object.keys(changes).length) {
+      closeEditModal();
+      UI.toast('无变更 — 未发送请求', 'info');
+      return;
+    }
+    var touchesConn = !!(changes.api_key || changes.key_action === 'none' ||
+                          changes.openai_base !== undefined || changes.anthropic_base !== undefined);
+    var doSend = async function () {
+      changes.name = st.provider;
+      changes.expected_config_fingerprint = st.p.config_fingerprint || '';
+      try {
+        var res = await fetch('/admin/cloud/provider-update', {
+          method: 'POST',
+          headers: UI.adminHeaders(),
+          body: JSON.stringify(changes),
+        });
+        var d = null;
+        try { d = await res.json(); } catch (_) {}
+        if (res.status === 409 || (d && d.error === 'config_conflict')) {
+          showErr('配置已被外部修改（手改 YAML 或另一处编辑）— 请关闭后刷新列表重试');
+          await cloudLoadProviders();   // 背景刷新，供下次编辑取新指纹
+          return;
+        }
+        if (d && (d.error === 'probe_failed' || d.error === 'destination_key_unconfirmed' ||
+                  d.error === 'external_key_managed' || d.error === 'probe_target_missing' ||
+                  d.error === 'api_key_required')) {
+          showErr((d.detail || d.error) + ' — 输入已保留，可更正后重试');
+          return;   // 浮窗保持打开、输入不动；不宣称保存成功
+        }
+        if (!res.ok || !d || d.error) {
+          showErr('保存失败：' + ((d && (d.detail || d.error)) || ('HTTP ' + res.status)) +
+                  ' — 输入已保留，可更正后重试');
+          return;
+        }
+        closeEditModal();
+        UI.toast('Provider ' + st.provider + ' 已更新', 'success');
+        await cloudLoadProviders();
+      } catch (e) {
+        showErr('保存失败：' + (e.message || e) + ' — 输入已保留，可更正后重试');
+      }
+    };
+    if (touchesConn) {
+      UI.confirm({
+        title: '应用连接变更',
+        body: '将用拟变更的值向上游发起真实生成探针（验证鉴权），通过后立即应用。旧凭证不会发送到新地址。',
+        onOk: doSend,
+      });
+    } else {
+      await doSend();
+    }
+  }
+
   /* ── 可路由模型列表（策展后 = 注册表；行内来源徽标） ── */
   function cloudRenderModels(data) {
     var models = (data && data.models) || [];
@@ -1216,6 +1432,9 @@
         }
         break;
       }
+      case 'provider-edit':
+        if (provider) openEditModal(provider);
+        break;
       case 'provider-delete':
         if (provider) window.doCloudDelete(provider);
         break;

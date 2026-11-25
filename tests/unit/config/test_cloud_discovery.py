@@ -18,7 +18,7 @@ import time
 import pytest
 import yaml
 
-from inferfabric.cloud_discovery import CloudDiscovery, CloudModel, ProviderConfig
+from inferfabric.cloud_discovery import CloudDiscovery, CloudModel, ProviderConfig, SecretsManager
 
 
 def _write_yaml(path: Path, data: dict):
@@ -1221,3 +1221,74 @@ class TestPublishReconciliation:
         # 发布时按当前 per-model floor 对账 — 不复活已取消勾选的模型
         assert "glm-5" not in reg and "prov-a/glm-5" not in reg
         assert cd.resolve_route("glm-5", set()) is None
+
+
+# ── PR1 Task 1: 配置指纹 / display_name / key_source ──────────────
+
+class TestProviderEditFields:
+    """原地编辑三接口（brief: test_display_name_roundtrip_yaml /
+    test_config_fingerprint_changes_on_save / test_key_source_external_vs_managed）"""
+
+    def test_display_name_roundtrip_yaml(self, tmp_path):
+        p = tmp_path / "cloud.yaml"
+        _write_yaml(p, {"providers": {
+            "prov-a": {"openai_base": "http://a", "display_name": "Alpha 云"},
+            "prov-b": {"openai_base": "http://b"},
+        }})
+        cd = CloudDiscovery(p)
+        assert cd.providers["prov-a"].display_name == "Alpha 云"
+        assert cd.providers["prov-b"].display_name == ""  # 未设置 = 默认空
+        # save → reload 后仍在（roundtrip）
+        cd.save_config()
+        cd2 = CloudDiscovery(p)
+        assert cd2.providers["prov-a"].display_name == "Alpha 云"
+
+    def test_config_fingerprint_changes_on_save(self, tmp_path):
+        p = tmp_path / "cloud.yaml"
+        _write_yaml(p, {"providers": {"prov-a": {"openai_base": "http://a"}}})
+        cd = CloudDiscovery(p)
+        fp1 = cd.config_fingerprint()
+        assert fp1 != "none" and len(fp1) == 16
+        # 相同内容 → 指纹稳定（另一实例读同一文件）
+        assert CloudDiscovery(p).config_fingerprint() == fp1
+        # 修改 + 保存 → 指纹变化，且缓存值已随 save 刷新
+        cd.providers["prov-a"].timeout = 120
+        cd.save_config()
+        fp2 = cd.config_fingerprint()
+        assert fp2 != fp1 and len(fp2) == 16
+        assert CloudDiscovery(p).config_fingerprint() == fp2
+        # 文件缺失 → "none"
+        assert CloudDiscovery(tmp_path / "absent.yaml").config_fingerprint() == "none"
+
+    def test_key_source_external_vs_managed(self, tmp_path, monkeypatch):
+        p = tmp_path / "cloud.yaml"
+        _write_yaml(p, {"providers": {
+            "prov-a": {"openai_base": "http://a", "key_env_var": "IFF_TEST_KS_A"},
+            "prov-b": {"openai_base": "http://b", "key_env_var": "IFF_TEST_KS_B"},
+            "prov-c": {"openai_base": "http://c", "key_env_var": "IFF_TEST_KS_C"},
+        }})
+        sm = SecretsManager(tmp_path / "secrets.env")
+        sm.write("IFF_TEST_KS_A", "sk-managed-value")
+        monkeypatch.setenv("IFF_TEST_KS_B", "sk-external-value")
+        for v in ("IFF_TEST_KS_A", "IFF_TEST_KS_C"):
+            monkeypatch.delenv(v, raising=False)
+        # managed：secrets.env 有该 var；external：仅 os.environ 有；unset：两者皆无
+        assert sm.has("IFF_TEST_KS_A") is True
+        assert sm.has("IFF_TEST_KS_B") is False
+        assert sm.has("IFF_TEST_KS_C") is False
+        assert sm.has("IFF_TEST_KS_MISSING") is False
+
+    def test_load_resolves_key_reference_from_env(self, tmp_path, monkeypatch):
+        """重启/重载后内存 api_key = 已解析明文（_load_config 文本级 ${VAR}
+        展开）——与 POST add 路径契约一致，forward/探针/发现不发字面量 ${VAR}；
+        显式 key_env_var 保留（凭证来源标注）。"""
+        monkeypatch.setenv("IFF_TEST_RES_KEY", "sk-resolved-value")
+        p = tmp_path / "cloud.yaml"
+        _write_yaml(p, {"providers": {
+            "prov-a": {"openai_base": "http://a", "api_key": "${IFF_TEST_RES_KEY}",
+                       "key_env_var": "IFF_TEST_RES_KEY"},
+        }})
+        cd = CloudDiscovery(p)
+        cfg = cd.providers["prov-a"]
+        assert cfg.api_key == "sk-resolved-value", cfg.api_key
+        assert cfg.key_env_var == "IFF_TEST_RES_KEY"

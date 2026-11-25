@@ -22,6 +22,9 @@ set -euo pipefail
 PORT="${IFF_ACCEPTANCE_PORT:-8990}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$REPO/.venv/bin/python"
+# 可移植回退：Mac 用 .venv；无 venv 的环境（如 Ubuntu）回退系统 python3，
+# 否则验收网关直接起不来（v7.12.9 PR1 双端验收实测）
+[ -x "$PY" ] || PY="$(command -v python3)"
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/iff-acceptance.XXXXXX")"
 mkdir -p "$WORKDIR/home"
 
