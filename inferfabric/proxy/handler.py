@@ -375,6 +375,7 @@ def _serve_api_spec(handler, pm):
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
 from inferfabric.security.auth_facade import SecurityAuth, build_auth  # noqa: E402
+from inferfabric.security.console_auth import password_set  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
@@ -2247,10 +2248,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     for k in auth.store.list_keys()]
             self._send_json({"active": True, "policy": policy, "enforced": enforced,
                              "key_count": sum(1 for k in keys if not k["revoked"]),
+                             "password_set": password_set(auth.store),
                              "keys": keys})
         else:
             self._send_json({"active": False, "policy": None, "enforced": auth.enabled,
-                             "key_count": 0, "keys": []})
+                             "key_count": 0, "password_set": False, "keys": []})
 
     def _handle_security_create_key(self, pm):
         """POST /admin/security/keys {name?} — 新建 API key（明文仅本次回显一次）。"""

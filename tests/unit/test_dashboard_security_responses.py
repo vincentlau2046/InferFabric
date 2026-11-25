@@ -145,3 +145,30 @@ def test_revoke_drops_key_count(env):
     h = _FakeHandler(None)
     proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
     assert h.last[0]["key_count"] == 1
+
+
+# ── status password_set 三态（PR3 WS4：设置页 Key 保护密码卡） ────
+
+def test_status_reports_password_set_field(env):
+    from inferfabric.security.console_auth import set_password
+
+    # 未初始化库（legacy auth）→ 恒 False，且不得 500
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["password_set"] is False
+
+    # 已初始化库、无口令（enable 不建口令）→ False
+    proxy_handler.ProxyHandler._handle_security_enable(
+        _FakeHandler({"enforce": True, "key_name": "qa"}), env.pm)
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["active"] is True and data["password_set"] is False
+
+    # 已设口令 → True
+    set_password(env.pm.auth.store, "a-console-password")
+    h = _FakeHandler(None)
+    proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["password_set"] is True
