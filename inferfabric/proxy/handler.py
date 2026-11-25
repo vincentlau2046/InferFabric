@@ -375,7 +375,9 @@ def _serve_api_spec(handler, pm):
 from inferfabric.model_pool import admin as mp_admin  # noqa: E402
 from inferfabric.security import admin as key_admin  # noqa: E402
 from inferfabric.security.auth_facade import SecurityAuth, build_auth  # noqa: E402
-from inferfabric.security.console_auth import password_set  # noqa: E402
+from inferfabric.security.console_auth import (  # noqa: E402
+    _password_bytes, password_set, set_password)
+from inferfabric.security.key_store import KeyStore  # noqa: E402
 
 _GET_ROUTES = {
     "/":                        lambda h, pm: h._serve_dashboard(pm),
@@ -493,6 +495,8 @@ _POST_ROUTES = {
     "/admin/packs/download":        _admin(lambda h, pm: h._handle_pack_download(pm)),
     "/admin/packs/policy":          _admin(lambda h, pm: h._handle_pack_policy_post(pm)),
     "/admin/security/enable":       _admin(lambda h, pm: h._handle_security_enable(pm)),
+    "/admin/security/console-password": _admin(
+        lambda h, pm: h._handle_security_console_password(pm)),
     "/admin/security/keys":         _admin(lambda h, pm: h._handle_security_create_key(pm)),
     "/admin/security/keys/revoke":  _admin(lambda h, pm: h._handle_security_revoke_key(pm)),
     # Connect（F10）：自带更严门禁（回环对端 + 精确 authority + 强制 token），
@@ -2359,6 +2363,62 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except (OSError, ValueError, sqlite3.Error) as e:
             log.error("security enable failed: %s", e)
             self._send_json({"error": f"security toggle failed: {e}"}, 500)
+
+    def _handle_security_console_password(self, pm):
+        """POST /admin/security/console-password {new_password} — 首次网页设密。
+
+        设置保护 API Key 敏感操作（PR4 reveal 等）的控制台口令。管理员凭证
+        恒校验（X-Admin-Token vs born token）——回环下 _admin_gate 不验
+        token，故在此显式校验，杜绝本地页面无凭证驱动设密。库缺失按
+        iff keys init 语义初始化并热接 pm.auth / pm.security_admin；不置
+        policy、不建 key — 鉴权开关（/admin/security/enable）仍是用户主动
+        的独立动作。已设口令 → 409；口令 <12B → 400（先于任何落盘）。
+        """
+        token = self.headers.get("X-Admin-Token", "")
+        configured = getattr(self, "_admin_token", "")
+        if (not configured
+                or not hmac.compare_digest(token.encode("utf-8"),
+                                           configured.encode("utf-8"))):
+            self._send_json({"error": "需要管理员凭证（X-Admin-Token）— 无凭证请"
+                                      "在网关本机运行 \"iff keys init\""}, 401)
+            return
+        data = self._read_body()
+        if data is None:
+            return
+        new_password = data.get("new_password")
+        was_active = isinstance(pm.auth, SecurityAuth)
+        db_path = IFF_DATA_DIR / "security.db"
+        try:
+            # 口令合法性先于任何落盘：拒绝的设密不创建 store
+            _password_bytes(new_password)
+            store = pm.auth.store if was_active else KeyStore(db_path, provision=True)
+            if password_set(store):
+                self._send_json({"error": "控制台口令已设置 — 更改请在设置页走会话改密，"
+                                          "或本机运行 \"iff keys set-password\""
+                                          "（保留全部 API key）"}, 409)
+                return
+            set_password(store, new_password)
+            if not was_active:
+                # 与启动同源热接（build_auth 自落 security.enabled 标记）
+                pm.auth = build_auth(IFF_DATA_DIR)
+                if not isinstance(pm.auth, SecurityAuth):
+                    self._send_json({"error": "security init failed"}, 500)
+                    return
+                from inferfabric.security.admin import SecurityAdmin
+                configured_origins = os.environ.get("IFF_CONSOLE_ORIGINS", "")
+                origins = ([o.strip() for o in configured_origins.split(",") if o.strip()]
+                           if configured_origins else
+                           [f"http://127.0.0.1:{PROXY_PORT}",
+                            f"http://localhost:{PROXY_PORT}"])
+                pm.security_admin = SecurityAdmin(pm.auth.store, origins=origins)
+                log.info("Security store initialized from app settings console-password")
+            self._send_json({"status": "ok", "provisioned": not was_active},
+                            extra_headers={"Cache-Control": "no-store"})
+        except ValueError as e:
+            self._send_json({"error": str(e)}, 400)
+        except (OSError, sqlite3.Error) as e:
+            log.error("console password set failed: %s", e)
+            self._send_json({"error": f"security store unavailable: {e}"}, 503)
 
     def _handle_switch(self, pm):
         data = self._read_body()

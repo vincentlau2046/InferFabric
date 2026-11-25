@@ -13,6 +13,7 @@ import pytest
 from inferfabric.proxy import handler as proxy_handler
 from inferfabric.proxy.auth import AuthManager
 from inferfabric.security.auth_facade import build_auth
+from inferfabric.security.console_auth import password_set
 
 
 class _FakeHandler:
@@ -172,3 +173,97 @@ def test_status_reports_password_set_field(env):
     proxy_handler.ProxyHandler._handle_security_status(h, env.pm)
     data, status, _ = h.last
     assert status == 200 and data["password_set"] is True
+
+
+# ── 首次网页设密（PR3 WS4：管理员凭证恒校验 + iff keys init 语义） ──
+
+class _TokenHandler(_FakeHandler):
+    """带请求头与已注入管理凭证的 fake（真实分发中 _check_admin 设 _admin_token）。"""
+
+    def __init__(self, body, token, headers=None):
+        super().__init__(body)
+        self.headers = {"Host": "127.0.0.1:8999", **(headers or {})}
+        self._admin_token = token
+
+
+_TOKEN_OK = {"X-Admin-Token": "secret-token"}
+
+
+def test_console_password_missing_token_rejected_and_no_store(env):
+    # Review Focus 1：拒绝的首次设密不得落任何盘
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token")
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 401
+    assert "iff keys init" in data["error"]
+    assert not (env.tmp / "security.db").exists()
+    assert not (env.tmp / "security.enabled").exists()
+
+
+def test_console_password_wrong_token_rejected_and_no_store(env):
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers={"X-Admin-Token": "nope"})
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 401 and "iff keys init" in data["error"]
+    assert not (env.tmp / "security.db").exists()
+    assert not (env.tmp / "security.enabled").exists()
+
+
+def test_console_password_unconfigured_token_rejected(env):
+    h = _TokenHandler({"new_password": "a-console-password"}, token="")
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    assert h.last[1] == 401
+    assert not (env.tmp / "security.db").exists()
+
+
+def test_console_password_first_set_provisions_store_without_policy_or_keys(env):
+    from inferfabric.security.auth_facade import SecurityAuth
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, headers = h.last
+    assert status == 200 and data == {"status": "ok", "provisioned": True}
+    assert headers.get("Cache-Control") == "no-store"
+    assert (env.tmp / "security.db").exists()
+    assert (env.tmp / "security.enabled").exists()
+    assert isinstance(env.pm.auth, SecurityAuth)
+    assert env.pm.security_admin is not None
+    assert env.pm.auth.store.get_policy() == "off"   # 不置 policy — enable 是用户的独立动作
+    assert env.pm.auth.store.list_keys() == []       # 不建 key
+    assert password_set(env.pm.auth.store) is True
+    assert b"a-console-password" not in (env.tmp / "security.db").read_bytes()
+
+
+def test_console_password_second_set_conflicts(env):
+    proxy_handler.ProxyHandler._handle_security_console_password(
+        _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK), env.pm)
+    h = _TokenHandler({"new_password": "another-long-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 409 and "已设置" in data["error"]
+
+
+def test_console_password_rejects_short(env):
+    h = _TokenHandler({"new_password": "short"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 400
+    assert not (env.tmp / "security.db").exists()   # 口令校验先于任何落盘
+
+
+def test_console_password_existing_store_without_password(env):
+    proxy_handler.ProxyHandler._handle_security_enable(
+        _FakeHandler({"enforce": True, "key_name": "qa"}), env.pm)
+    policy_before = env.pm.auth.store.get_policy()
+    h = _TokenHandler({"new_password": "a-console-password"}, token="secret-token",
+                      headers=_TOKEN_OK)
+    proxy_handler.ProxyHandler._handle_security_console_password(h, env.pm)
+    data, status, _ = h.last
+    assert status == 200 and data["provisioned"] is False
+    assert password_set(env.pm.auth.store) is True
+    assert env.pm.auth.store.get_policy() == policy_before   # enable 的 policy 不被动
+    assert env.pm.security_admin is not None
