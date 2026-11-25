@@ -37,6 +37,9 @@ VALID_KINDS = {"local", "cloud"}
 VALID_FEATURES = {"tools", "stream", "vision", "structured"}
 VALID_PROTOCOLS = {"openai", "anthropic"}
 VALID_LOCATIONS = {"local", "cloud"}
+# WS2（2026-11-24）：组级回退路由策略 — priority_failover=按序回退（现行为）；
+# first_only=仅第一优先级候选，其故障即该组不可用
+VALID_STRATEGIES = ("priority_failover", "first_only")
 
 # 新写入范围（PLAN-2026-11-15 v2 Task 6 技术建议，非用户裁决）：
 # max_attempts 1..10，deadline_ms 1000..300000。磁盘存量超界容忍载入
@@ -256,6 +259,23 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
                                    f"pool '{name}'", issues)
     if allow_cross is None or enabled is None or accept_declared is None:
         return None
+    # WS2（2026-11-24）：组级回退路由策略 — 枚举严格校验。存量未知值必须
+    # 拒载而非静默容忍：容忍会让「回退已关」悄悄变回「全程回退」，路由
+    # 语义反转且无人察觉（与 enabled/protocol 同一严格纪律）
+    strategy = raw.get("strategy", "priority_failover")
+    if strategy == "priority":
+        # 存量别名（#45 评审 R1）：7.12.1 前控制台建池骨架写入的旧值；
+        # 旧 runtime 完全忽略 strategy（实际语义即 priority_failover），
+        # 归一化而非拒载——否则存量 model_pools.yaml 升级后整份拒载
+        #（重启后全部 fabric-* 404）。仅此一个精确 token，其余未知值仍拒载。
+        log.warning("pool '%s': legacy strategy 'priority' normalized to "
+                    "'priority_failover'", name)
+        strategy = "priority_failover"
+    if strategy not in VALID_STRATEGIES:
+        issues.append(
+            f"pool '{name}': strategy must be one of {sorted(VALID_STRATEGIES)}, "
+            f"got {strategy!r}")
+        return None
     if allow_cross and not ({"local", "cloud"} <= set(allowed_locations)):
         issues.append(
             f"pool '{name}': allow_cross_location=true requires allowed_locations "
@@ -291,7 +311,7 @@ def _parse_pool(name: str, raw: dict, issues: list[str],
     return PoolConfig(
         name=name,
         enabled=enabled,
-        strategy=str(raw.get("strategy", "priority_failover")),
+        strategy=strategy,
         allowed_locations=allowed_locations,
         accept_declared=accept_declared,
         allow_cross_location=allow_cross,

@@ -284,10 +284,33 @@ class PoolRegistry:
             ValueError: 翻转后整份配置违反静态校验。
             RevisionConflict: expected_revision 过期。
         """
+        return self._flip_pool_field(
+            pool_name, expected_revision,
+            lambda pools: pools[pool_name].__setitem__("enabled", bool(enabled)))
+
+    def flip_pool_strategy(self, pool_name: str, strategy: str,
+                           expected_revision: int) -> RegistrySnapshot:
+        """服务端原子翻转单池回退策略（WS2，2026-11-24）。
+
+        与 flip_pool_enabled 同一 CAS/字段级路径；strategy 合法性由整份
+        重解析兜底（无效值 → ValueError，磁盘不落半份配置）。
+
+        Raises:
+            KeyError / ValueError / RevisionConflict: 同 flip_pool_enabled。
+        """
+        return self._flip_pool_field(
+            pool_name, expected_revision,
+            lambda pools: pools[pool_name].__setitem__("strategy", str(strategy)))
+
+    def _flip_pool_field(self, pool_name: str, expected_revision: int,
+                         apply) -> RegistrySnapshot:
+        """CAS → 字段级修改 → 整份重解析 → 原子写盘 → 发布（共享路径）。
+
+        CAS 先于存在性检查：池被外部删除时，过期 revision 必须报冲突
+        （409）而非 404 — 否则调用方会基于陈旧状态误判「池不存在」。
+        """
         import copy
         with self._lock:
-            # CAS 先于存在性检查：池被外部删除时，过期 revision 必须报冲突
-            # （409）而非 404 — 否则调用方会基于陈旧状态误判「池不存在」
             current = self._snapshot.revision
             if expected_revision != current:
                 raise RevisionConflict(
@@ -296,7 +319,7 @@ class PoolRegistry:
             pools = (raw or {}).get("pools") or {}
             if not isinstance(pools, dict) or pool_name not in pools:
                 raise KeyError(pool_name)
-            pools[pool_name]["enabled"] = bool(enabled)
+            apply(pools)
             new_revision = current + 1
             raw.pop("revision", None)
             parsed, issues = load_pools_dict(raw, current_revision=new_revision)

@@ -656,3 +656,71 @@ class TestLatencyEventsEndpoints:
         mp_admin.handle_get_model_pools_events(h2, bare)
         assert h1.sent[-1][0] == 200 and h1.sent[-1][1] == {"pools": {}}
         assert h2.sent[-1][0] == 200 and h2.sent[-1][1] == {"pools": {}}
+
+
+class TestStrategyEndpoint:
+    """POST /admin/model-pools/strategy — 组级回退路由开关（WS2，2026-11-24）。
+
+    与 toggle 同一 CAS/字段级修改路径：基于原始结构改 strategy 一字段，
+    悬空候选与未回传字段不丢失；无效值走整份重解析 → 400 invalid_config
+    （磁盘不落半份配置）。
+    """
+
+    def test_strategy_success_flips_and_increments(self, pm, tmp_path):
+        h = AdminHandler(body={"pool": "flash", "strategy": "first_only",
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+
+        status, body = h.sent[-1]
+        assert status == 200
+        assert body == {"status": "updated", "revision": 2,
+                        "pool": "flash", "strategy": "first_only"}
+        assert pm.pool_registry.snapshot().pools["flash"].pool.strategy == "first_only"
+        # 落盘同步
+        yaml_text = (tmp_path / "model_pools.yaml").read_text(encoding="utf-8")
+        assert "strategy: first_only" in yaml_text
+
+    def test_strategy_flip_back_preserves_other_fields(self, pm):
+        h = AdminHandler(body={"pool": "flash", "strategy": "priority_failover",
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+        assert h.sent[-1][0] == 200
+        snap = pm.pool_registry.snapshot()
+        pool = snap.pools["flash"].pool
+        assert pool.strategy == "priority_failover"
+        assert pool.enabled is True                    # 其余配置原样
+        assert pool.max_attempts == 2
+        assert [c.candidate.id for c in snap.pools["flash"].candidates] == ["loc", "cld"]
+
+    def test_strategy_invalid_value_400(self, pm):
+        h = AdminHandler(body={"pool": "flash", "strategy": "random_walk",
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+        status, body = h.sent[-1]
+        assert status == 400
+        assert body["status"] == "invalid_config"
+        # 拒绝后配置原样（内存与磁盘都不落）
+        assert pm.pool_registry.snapshot().pools["flash"].pool.strategy == "priority_failover"
+
+    def test_strategy_stale_revision_409(self, pm):
+        h = AdminHandler(body={"pool": "flash", "strategy": "first_only",
+                               "expected_revision": 0})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+        status, body = h.sent[-1]
+        assert status == 409
+        assert body["status"] == "revision_conflict"
+        assert pm.pool_registry.snapshot().pools["flash"].pool.strategy == "priority_failover"
+
+    def test_strategy_unknown_pool_404(self, pm):
+        h = AdminHandler(body={"pool": "nope", "strategy": "first_only",
+                               "expected_revision": 1})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+        status, body = h.sent[-1]
+        assert status == 404
+        assert body["status"] == "unknown_pool"
+
+    def test_strategy_missing_fields_400(self, pm):
+        h = AdminHandler(body={"pool": "flash"})
+        mp_admin.handle_post_model_pools_strategy(h, pm)
+        assert h.sent[-1][0] == 400
+        assert pm.pool_registry.snapshot().revision == 1  # 未变更
