@@ -24,7 +24,13 @@ import yaml
 import urllib.request
 import urllib.error
 
+from inferfabric.egress import NO_PROXY_OPENER
+
 log = logging.getLogger("inferfabric.cloud_discovery")
+
+# 同 forwarder.py：provider 发现请求禁止走环境系统代理（一次性快照、代理
+# 客户端退出后全量 ECONNREFUSED），一律直连。
+urlopen = NO_PROXY_OPENER.open
 
 # 发现请求显式 User-Agent：urllib 默认 "Python-urllib/3.x" 会被 Cloudflare
 # 返回 403 error code 1010（浏览器签名封禁）→ 候选列表恒为空。
@@ -1268,7 +1274,7 @@ class CloudDiscovery:
         req.add_header("Content-Type", "application/json")
 
         try:
-            with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
+            with urlopen(req, timeout=cfg.timeout) as resp:
                 body = _json.loads(resp.read().decode('utf-8')) or {}
         except urllib.error.HTTPError as e:
             log.warning("Provider %s returned HTTP %d", cfg.name, e.code)

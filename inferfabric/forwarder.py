@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import HTTPConnection
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from urllib.error import HTTPError as _HTTPError
 
 from inferfabric.config import (
@@ -22,8 +22,12 @@ from inferfabric.config import (
     should_retry_on_status,
 )
 from inferfabric import outbound_credentials
+from inferfabric.egress import NO_PROXY_OPENER
 from inferfabric.proxy.sse_buffer import SSELineBuffer, first_token_ttft_cb
 from inferfabric.proxy.usage import normalize_usage
+
+# Keep this transport injectable without changing Python's global opener (#78).
+urlopen = NO_PROXY_OPENER.open
 
 # 云端转发显式 User-Agent：urllib 默认的 "Python-urllib/3.x" 会被
 # Cloudflare 判为封禁签名 → 403 error code 1010（实测：不带头/curl UA/自定义 UA 均 200）。

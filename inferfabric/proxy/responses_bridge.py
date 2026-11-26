@@ -22,10 +22,11 @@ import json
 import logging
 import time
 import uuid
-from urllib.request import Request, urlopen
+from urllib.request import Request
 from urllib.error import HTTPError as _HTTPError
 
 from inferfabric import forwarder
+from inferfabric.egress import NO_PROXY_OPENER
 from inferfabric.model_pool.dispatch import (
     _ensure_cloud_discovered,
     _error_summary,
@@ -49,6 +50,10 @@ from inferfabric.agent_registry import request_protocol
 from inferfabric.proxy.request_logger import RequestLog
 
 log = logging.getLogger("inferfabric.proxy.responses")
+
+# 同 forwarder.py：云端 Responses 桥接出网禁止走环境系统代理（一次性快照、
+# 代理客户端退出后全量 ECONNREFUSED）。重绑定保持调用点与 patch 缝不变。
+urlopen = NO_PROXY_OPENER.open
 
 # 上游明确"没有这个能力"的状态集 — 仅这些触发翻译兜底（用户裁决：
 # 只有明确返回失败不支持才兜底；其余状态交既有动作表/错误信封）。

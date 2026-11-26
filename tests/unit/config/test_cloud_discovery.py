@@ -372,7 +372,7 @@ class TestSpecAliasAndDiscoveryUA:
             captured["ua"] = req.get_header("User-agent")
             return _Resp()
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        monkeypatch.setattr(cdm, "urlopen", _fake_urlopen)
         cd = CloudDiscovery(tmp_path / "none.yaml")
         cfg = ProviderConfig(
             name="tathr",
@@ -409,7 +409,7 @@ class TestDiscoverProviderFailureContract:
         def _fake_urlopen(req, timeout=None):
             raise urllib.error.URLError("timed out")
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        monkeypatch.setattr(cdm, "urlopen", _fake_urlopen)
         cd = CloudDiscovery(tmp_path / "none.yaml")
         assert cd._discover_provider(self._cfg()) is None
 
@@ -421,7 +421,7 @@ class TestDiscoverProviderFailureContract:
             raise urllib.error.HTTPError(
                 req.full_url, 500, "Internal Server Error", None, None)
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        monkeypatch.setattr(cdm, "urlopen", _fake_urlopen)
         cd = CloudDiscovery(tmp_path / "none.yaml")
         assert cd._discover_provider(self._cfg()) is None
 
@@ -439,7 +439,7 @@ class TestDiscoverProviderFailureContract:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
         cd = CloudDiscovery(tmp_path / "none.yaml")
         # 无法解析 ≠ 上游 0 模型 — 同样视为抓取失败
@@ -458,7 +458,7 @@ class TestDiscoverProviderFailureContract:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
         cd = CloudDiscovery(tmp_path / "none.yaml")
         result = cd._discover_provider(self._cfg())
@@ -504,7 +504,7 @@ class TestFetchFailureFloor:
         def _fake_urlopen(req, timeout=None):
             raise urllib.error.URLError("the handshake operation timed out")
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen", _fake_urlopen)
+        monkeypatch.setattr(cdm, "urlopen", _fake_urlopen)
 
     def test_fetch_failure_retains_whitelist_models(self, tmp_path, mock_server, monkeypatch):
         cd = self._write_cfg(tmp_path, mock_server)
@@ -592,7 +592,7 @@ class TestShrunkenFetchFloor:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
 
     def test_whitelist_model_absent_from_successful_fetch_stays_routable(
@@ -870,7 +870,7 @@ class TestCloudReloadReconciliation:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
         p = tmp_path / "cloud_provider.yaml"
         _write_yaml(p, {
@@ -931,7 +931,7 @@ class TestShortNameCollisionContract:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
         p = tmp_path / "cloud_provider.yaml"
         _write_yaml(p, {
@@ -974,7 +974,7 @@ class TestShortNameCollisionContract:
             def __exit__(self, *args):
                 return False
 
-        monkeypatch.setattr(cdm.urllib.request, "urlopen",
+        monkeypatch.setattr(cdm, "urlopen",
                             lambda req, timeout=None: _Resp())
         p = tmp_path / "cloud_provider.yaml"
         _write_yaml(p, {
