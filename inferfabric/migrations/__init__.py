@@ -44,3 +44,7 @@ IFFDB.register_migration(10, "request_log", "honestize_and_x_app")
 # v011: device_power_samples（DeviceTelemetry T4 平台中立功耗序列）
 from inferfabric.migrations import v011_device_power_samples
 IFFDB.register_migration(11, "request_log", "device_power_samples")
+
+# v012: request_log.cost/metadata 补迁移（v002 事后补列，老库无 ALTER → flush 全量失败）
+from inferfabric.migrations import v012_add_cost_metadata
+IFFDB.register_migration(12, "request_log", "add_cost_metadata")
