@@ -615,17 +615,20 @@ class TestManagedNInferLaunch:
         assert "gpu_devices" in result["message"]
         assert calls["run"] == []
 
-    def test_legacy_ninfer_launch_unchanged(self, monkeypatch, tmp_path):
-        """managed=None：legacy 发布 0.0.0.0（-p port:8080）+ --gpus all，
-        无包域缓存挂载 —— 现网行为零变化。"""
+    def test_legacy_ninfer_publish_loopback(self, monkeypatch, tmp_path):
+        """managed=None：legacy 与 managed 同契约，发布 127.0.0.1
+        （issue #64：引擎端口不得对非 loopback 网卡开放）+ --gpus all，
+        无包域缓存挂载。"""
         pm = _make_pm(tmp_path)
         cfg = _make_cfg()
         calls = self._patch(monkeypatch)
         result = pm.start_ninfer(cfg, container_name="iff-ninfer-qwen38")
         assert result["status"] == "healthy"
         cmd = calls["run"][0]
-        assert cmd[cmd.index("-p") + 1] == f"{cfg.port}:8080"
+        assert cmd[cmd.index("-p") + 1] == f"127.0.0.1:{cfg.port}:8080"
         assert cmd[cmd.index("--gpus") + 1] == "all"
+        mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+        assert all(not m.endswith(":/workspace/cache") for m in mounts)
         mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
         assert all(not m.endswith(":/workspace/cache") for m in mounts)
 

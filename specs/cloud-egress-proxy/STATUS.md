@@ -51,3 +51,14 @@ macOS 系统代理退出后，已运行网关可能继续使用 `urllib` 默认 
 Mac 端主评审 + fresh-context 对抗交叉，全程只读：**无 Critical、无代码级阻塞，
 verdict「With fixes」**。机制语义比对（= 默认 handler 链去掉 ProxyHandler，其余
 逐项一致）、四例 GREEN、全量 2933 passed、旧代码必 RED 实证均在评审会话留存。
+
+## 后续裁决（2026-11-26，用户）
+
+- **方案 B（发版门禁补强）随 v7.12.12 落地**：`scripts/iff-post-restart-check.sh`
+  重启后金丝雀（/health 版本一致 + 模型注册表非空 + 重启窗口内云端 discovery
+  成功行 + 可选 `IFF_SMOKE_KEY_FILE` 微云请求；journalctl / 日志文件双源），
+  与 constitution 新增「测试/出站卫生」「重启门禁」两条。
+- **方案 C（显式出站代理开关）用户裁定为伪诉求，关闭**：出站恒直连为终态设计，
+  I-2 Phase 2 五条兼容条件不再推进；I-1 残留点维持现状（本机出网、代理失效时
+  哑到重启，已知可接受）。若未来出现必须经代理出网的部署环境，重新立项评审。
+

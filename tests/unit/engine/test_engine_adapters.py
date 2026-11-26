@@ -355,12 +355,13 @@ class TestVLLMConfigDockerCmd:
         assert cmd[idx + 1] == "vllm-custom"
 
     def test_build_docker_cmd_structure_gpus_port_image(self):
-        """基础结构：docker run --rm --gpus all -p port:port --entrypoint vllm + 默认镜像。"""
+        """基础结构：docker run --rm --gpus all -p 127.0.0.1:port:port（#64 loopback
+        发布）--entrypoint vllm + 默认镜像。"""
         cfg = self._make_cfg(port=8000)
         cmd = cfg.build_docker_cmd("vllm-t")
         assert cmd[:3] == ["docker", "run", "--rm"]
         assert "--gpus" in cmd and cmd[cmd.index("--gpus") + 1] == "all"
-        assert "-p" in cmd and cmd[cmd.index("-p") + 1] == "8000:8000"
+        assert "-p" in cmd and cmd[cmd.index("-p") + 1] == "127.0.0.1:8000:8000"
         assert "--entrypoint" in cmd and cmd[cmd.index("--entrypoint") + 1] == "vllm"
         assert "vllm/vllm-openai:v0.24.0" in cmd  # 默认镜像
 
