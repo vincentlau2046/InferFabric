@@ -308,10 +308,10 @@ class NInferProcessManager(BaseProcessManager):
         weight_path = Path(cfg.weight_path).expanduser()
         weight_dir = str(weight_path.parent)
 
-        # Task 4 受管策略：loopback 发布 / 设备白名单；legacy 原样
+        # 受管策略：设备白名单；发布一律 loopback（issue #64：引擎端口
+        # 不得对非 loopback 网卡开放，legacy 与 managed 同契约）
         gpus_arg = f"device={devices}" if managed is not None else "all"
-        publish_arg = (f"127.0.0.1:{cfg.port}:8080" if managed is not None
-                       else f"{cfg.port}:8080")
+        publish_arg = f"127.0.0.1:{cfg.port}:8080"
 
         cmd = [
             "docker", "run", "-d", "--gpus", gpus_arg, "--rm",

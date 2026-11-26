@@ -103,8 +103,13 @@ class VLLMConfig:
     extra_env: dict[str, str] = field(default_factory=dict)  # inject into subprocess env
     docker_image: str = "vllm/vllm-openai:v0.24.0"  # vLLM 0.24 pinned (CLAUDE.md: do not upgrade)
 
-    def build_cmd(self) -> list[str]:
-        """Build vLLM command. JSON args stay as single elements."""
+    def build_cmd(self, host: str = "127.0.0.1") -> list[str]:
+        """Build vLLM command. JSON args stay as single elements.
+
+        host 默认 127.0.0.1（conda 路径直接在宿主网监听，引擎无
+        --api-key，只许 loopback —— issue #64）；docker 路径经
+        build_docker_cmd 显式传 0.0.0.0（容器 netns 内绑定）。
+        """
         model_path = MODEL_BASE / self.model_dir
         flags = [
             "vllm", "serve", str(model_path),
@@ -114,7 +119,7 @@ class VLLMConfig:
             "--max-num-seqs", str(self.max_num_seqs),
             "--kv-cache-dtype", self.kv_cache_dtype,
             "--port", str(self.port),
-            "--host", "0.0.0.0",
+            "--host", host,
         ]
         if self.kv_offloading_size is not None:
             flags.extend([
@@ -140,7 +145,9 @@ class VLLMConfig:
         model_path = MODEL_BASE / self.model_dir
         # build_cmd() → ["vllm", "serve", path, ...]; --entrypoint vllm supplies
         # the binary, so drop the leading "vllm" and keep "serve" + args.
-        container_cmd = self.build_cmd()[1:]
+        # 容器 netns 内必须绑 0.0.0.0（docker 端口转发才可达）；安全性由
+        # 发布前缀 127.0.0.1 保证（issue #64）。
+        container_cmd = self.build_cmd(host="0.0.0.0")[1:]
 
         docker_flags = [
             "docker", "run", "--rm",
@@ -151,7 +158,7 @@ class VLLMConfig:
             "--ipc=host",
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
-            "-p", f"{self.port}:{self.port}",
+            "-p", f"127.0.0.1:{self.port}:{self.port}",
             # 权重目录只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
             "-v", f"{model_path}:{model_path}:ro",
             "-v", f"{MODEL_BASE}:/models:ro",
@@ -215,15 +222,19 @@ class SGLangConfig:
     def health_url(self) -> str:
         return f"http://localhost:{self.port}/health"
 
-    def build_cmd(self) -> list[str]:
-        """Build SGLang serve command with structured fields + extra_flags."""
+    def build_cmd(self, host: str = "127.0.0.1") -> list[str]:
+        """Build SGLang serve command with structured fields + extra_flags.
+
+        host 默认 127.0.0.1（引擎无 --api-key，只许 loopback —— issue #64）；
+        docker 路径经 build_docker_cmd 显式传 0.0.0.0（容器 netns 内绑定）。
+        """
         model_path = MODEL_BASE / self.model_dir
         flags = [
             "sglang", "serve", str(model_path),
             "--served-model-name", self.served_name,
             "--mem-fraction-static", str(self.mem_fraction),
             "--port", str(self.port),
-            "--host", "0.0.0.0",
+            "--host", host,
             "--tp-size", "1",
         ]
         if self.max_running_requests:
@@ -252,7 +263,9 @@ class SGLangConfig:
         """
         import shlex
         model_path = MODEL_BASE / self.model_dir
-        container_cmd = self.build_cmd()
+        # 容器 netns 内必须绑 0.0.0.0（docker 端口转发才可达）；安全性由
+        # 发布前缀 127.0.0.1 保证（issue #64）。
+        container_cmd = self.build_cmd(host="0.0.0.0")
         docker_flags = [
             "docker", "run", "--rm",
             # 管理标签（issue #3 L3b）：网关所启容器一律可辨 →
@@ -262,7 +275,7 @@ class SGLangConfig:
             "--ipc=host",
             "--ulimit", "memlock=-1",
             "--ulimit", "stack=67108864",
-            "-p", f"{self.port}:{self.port}",
+            "-p", f"127.0.0.1:{self.port}:{self.port}",
             # 权重目录只读挂载（issue #3 隔离硬化）：容器不得写宿主权重
             "-v", f"{model_path}:{model_path}:ro",
             "-v", f"{MODEL_BASE}:/models:ro",
