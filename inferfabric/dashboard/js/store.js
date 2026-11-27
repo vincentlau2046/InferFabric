@@ -234,9 +234,12 @@ class StateStore {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
   }
 
-  /* ── Tab Management ── */
-  switchTab(tabId) {
-    if (this._switchLocked) return;
+  /* ── Tab Management ──
+   * A1（2026-11-27）：路由与持久化唯一归 router.js；store 只保留 DOM 应用
+   * （applyTab）与兼容入口（switchTab）。迁移表唯一在 router.js LEGACY_TAB_ROUTE。 */
+
+  /** DOM 应用：唯一挂载路径（router.applyRoute 经此切页；不查锁、不持久化）。 */
+  applyTab(tabId) {
     // Deactivate all tabs
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.if-nav-item').forEach(t => { t.classList.remove('active'); t.removeAttribute('aria-current'); });
@@ -245,23 +248,29 @@ class StateStore {
     if (target) target.classList.add('active');
     const btn = document.querySelector(`.if-nav-item[data-tab="${tabId}"]`);
     if (btn) { btn.classList.add('active'); btn.setAttribute('aria-current', 'page'); }
-    // Store + notify
+    // Notify renderers
     this._tabActive = tabId;
     this.set('tab_active', tabId);
-    // Save to localStorage
-    try { localStorage.setItem('iff_active_tab', tabId); } catch(e) {}
+  }
+
+  /** 兼容入口（nav onclick/旧调用）：锁检查后交 router 导航；router 缺失时降级直切。 */
+  switchTab(tabId) {
+    if (this._switchLocked) return;
+    const r = (window.ifRouter && typeof window.ifRouter.routeForTab === 'function')
+      ? window.ifRouter.routeForTab(tabId) : null;
+    if (r && typeof window.ifRouter.navigate === 'function') {
+      window.ifRouter.navigate(r.view, r.sub);
+      return;
+    }
+    this.applyTab(tabId);   // router 未载入的降级路径（不持久化）
   }
 
   restoreTab() {
+    // 恢复与旧键迁移的唯一实现在 router.js boot（含 tab-deploy→config/packs）；
+    // 此处仅 router 未载入时兜底，不持有迁移表。
     try {
-      let saved = localStorage.getItem('iff_active_tab');
-      // 旧版遗留 tab 迁移：部署已并入能力包页（2026-11-20），否则全 tab 失活
-      const LEGACY_TAB_MAP = { 'tab-deploy': 'tab-packs' };
-      if (saved && LEGACY_TAB_MAP[saved]) {
-        saved = LEGACY_TAB_MAP[saved];
-        try { localStorage.setItem('iff_active_tab', saved); } catch(e) {}
-      }
-      // Restore last active tab (anomaly is a regular nav item in v2, no longer hidden)
+      if (window.ifRouter) return;
+      const saved = localStorage.getItem('iff_active_tab');
       if (saved) this.switchTab(saved);
     } catch(e) {}
   }
@@ -287,8 +296,8 @@ window.tabRenderers = {};
 // Render on state changes (batched)
 store.on('gpu_mode', () => store._scheduleRender());
 
-// Expose switchTab globally (replaces legacy monolith version)
-window.switchTab = window.switchTab || ((tabId) => store.switchTab(tabId));
+// Expose switchTab globally (single source: this store entry; routing lives in router.js)
+window.switchTab = (tabId) => store.switchTab(tabId);
 
 /* ── 顶栏 / 外壳绑定（订阅式，R2） ──────────────────────────── */
 

@@ -61,10 +61,10 @@ def test_icon_symbols_present():
 
 
 def test_js_modules_list():
-    """__init__.py 必须用显式 JS_MODULES 列表。"""
+    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store）。"""
     import inferfabric.dashboard as dash
     assert getattr(dash, "JS_MODULES", None) == [
-        "ui", "store", "charts", "overview", "inference",
+        "ui", "store", "router", "charts", "overview", "inference",
         "monitor", "deploy", "cloud", "model-pools", "anomaly",
         "packs", "security", "settings", "connect", "wizard",
     ]

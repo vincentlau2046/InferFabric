@@ -191,13 +191,16 @@ def test_nav_grouped_ia_and_aria_current():
     assert 0 < html.find("tab-security") < html.find("tab-settings") < html.find("tab-cloud")
     # deploy 不再是独立 nav tab（并入能力包页 deploySection）
     assert 'data-tab="tab-deploy"' not in html
-    # fallback switchTab 维护 aria-current
-    assert 'setAttribute(\'aria-current\', \'page\')' in html
+    # fallback switchTab 维护 aria-current —— A1（2026-11-27）起 DOM 应用唯一在
+    # store.js applyTab，nav onclick 经 store.switchTab → router.navigate
+    store = STORE_JS.read_text(encoding="utf-8")
+    assert "aria-current" in store
+    assert "setAttribute('aria-current', 'page')" in store
+    assert "removeAttribute('aria-current')" in store
+    # 旧 localStorage 'tab-deploy' 迁移到 'tab-packs'（否则全 tab 失活）；
+    # A1 起迁移表唯一在 router.js LEGACY_TAB_ROUTE（store.restoreTab 仅兜底）
+    router = (ROOT / "inferfabric" / "dashboard" / "js" / "router.js").read_text(encoding="utf-8")
+    assert "'tab-deploy'" in router and "'tab-packs'" in router
 
     packs = (ROOT / "inferfabric" / "dashboard" / "fragments" / "packs.html").read_text(encoding="utf-8")
     assert 'id="deploySection"' in packs
-    # 旧 localStorage 'tab-deploy' 迁移到 'tab-packs'（否则全 tab 失活）
-    store = STORE_JS.read_text(encoding="utf-8")
-    assert "aria-current" in store
-    assert "removeAttribute('aria-current')" in store
-    assert "'tab-deploy'" in store and "'tab-packs'" in store

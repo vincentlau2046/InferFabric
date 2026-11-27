@@ -16,7 +16,9 @@ _cached_html: str | None = None
 
 # Dashboard v2 JS 模块加载顺序（缺失文件 graceful 跳过 + warning）。
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
-JS_MODULES = ["ui", "store", "charts", "overview", "inference",
+# A1（2026-11-27）：router 紧随 store —— 路由/恢复/旧键迁移唯一实现在 router.js，
+# store.switchTab 仅为兼容入口；router 载入即 boot（hash 优先）。
+JS_MODULES = ["ui", "store", "router", "charts", "overview", "inference",
               "monitor", "deploy", "cloud", "model-pools", "anomaly",
               "packs", "security", "settings", "connect", "wizard"]
 # 注意：deploy.js 仍在 JS_MODULES（部署表单已并入能力包页 deploySection，
