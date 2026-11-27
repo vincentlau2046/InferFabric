@@ -17,5 +17,5 @@
 - Mac 全量 @ bc34fba：2963 passed / 3 failed（信号类环境抖动同款，隔离复跑全绿）；双端签收已回填 PR #81/#82
 - 流程偏差记录：6a790d1 与 bc34fba 直推 main 未走 PR（vince-pc 收尾会话）
   - 原因分析：① 收尾会话将 cross-review 跟进与 release commit 视为 #81 的收尾动作而非新工作；② headless 写 run 白名单授了无 ref 限制的 `git push:*`——权限层拦下服务重启（正确）却未拦 push main（缺口）；③ 「内容小 = 流程可省」的判断偏差
-  - 防复发（建议落入 steering/dual-machine-collaboration.md，待批准）：main 直推禁止——合并后跟进（含 docs/test/版本行）一律走 PR；headless 写 run 的 push 白名单必须限定 PR 分支 refspec（如 `Bash(git push origin fix/*:*)`），永不授全量 `git push:*`
-- 跟进项：金丝雀脚本 check 2（/v1/models）单发存在异步 discovery 竞态 → 建议改与 check 3 同款轮询（12×10s）；本轮以 FAIL→查因→重跑 PASS 闭环
+  - 防复发（已落入 steering/dual-machine-collaboration.md §3，2026-11-27 用户批准）：main 直推禁止——合并后跟进（含 docs/test/版本行）一律走 PR；headless 写 run 的 push 白名单必须限定 PR 分支 refspec（如 `Bash(git push origin fix/*:*)`），永不授全量 `git push:*`
+- 跟进项：金丝雀脚本 check 2（/v1/models）单发存在异步 discovery 竞态 → 已落地轮询化（2026-11-27，12×5s；本轮以 FAIL→查因→重跑 PASS 闭环）

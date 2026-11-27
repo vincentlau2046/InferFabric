@@ -3,7 +3,8 @@
 #
 # 用途：生产网关重启后立即执行；全部检查 PASS 才算上线完成，不 PASS 不离场。
 #   1) /health 状态 ok 且版本与预期一致（默认读本地 inferfabric 包版本，或 --version 显式给）
-#   2) /v1/models 注册表非空
+#   2) /v1/models 注册表非空（轮询至多 60s——注册表与云端 discovery 异步加载，
+#      实测约 8s 完成；单发查询会竞态误报，2026-11-27 上线实测后修复）
 #   3) 重启窗口内出现云端 discovery 成功行（#78 事故类别：网关活着、云端出站已死，
 #      仅查 /health 查不出来——discovery 走的就是修复后的出站链路）
 #   4) 可选：IFF_SMOKE_KEY_FILE 指向含可调用 key 的文件时，发一条 1-token fabric-lite
@@ -49,9 +50,15 @@ fi
 [ "$ver" = "$EXPECTED" ] || fail "版本不一致：网关 ${ver} ≠ 预期 ${EXPECTED}（部署未生效？）"
 ok "/health ok，版本 ${ver}"
 
-# ── 2. /v1/models ──
-models=$(cget "${BASE}/v1/models")
-printf '%s' "$models" | grep -q '"id"' || fail "/v1/models 空——注册表未加载：$(printf '%s' "$models" | head -c 200)"
+# ── 2. /v1/models（轮询 12×5s：注册表与云端 discovery 异步加载，实测约 8s
+#      完成；单发查询与 discovery 竞态会误报 FAIL——2026-11-27 上线实测后修复）──
+models=""
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  models=$(cget "${BASE}/v1/models")
+  printf '%s' "$models" | grep -q '"id"' && break
+  [ "$i" -lt 12 ] && sleep 5
+done
+printf '%s' "$models" | grep -q '"id"' || fail "/v1/models 空（已轮询 60s）——注册表未加载：$(printf '%s' "$models" | head -c 200)"
 ok "模型注册表非空"
 
 # ── 3. discovery 成功行（重启窗口内）──

@@ -32,6 +32,10 @@
 ## 3. 集成与分支卫生
 
 - 一切进 main 走 PR（docs 也走 PR，成本就是自己点 merge，换来历史干净、对端可见）；
+- **main 直推禁止（2026-11-27 用户裁决，#84 收尾复盘）**：合并后跟进（含 docs / test /
+  版本行）一律走 PR，「内容小」不构成直推理由；headless 写 run 的 `git push` 白名单必须
+  限定 PR 分支 refspec（如 `Bash(git push origin fix/*:*)`），永不授全量 `git push:*`
+  （实例：vince-pc 收口会话权限层拦下服务重启，却漏过 push main）；
 - 合并即删远端分支；存量 `pick/*` 与已合并分支做一次清理归档；
 - commit message 沿用 conventional commits（feat/fix/docs/chore + scope）；
 - **版本迭代（2026-11-24 用户裁定）**：patch 位（`0.0.x` 的 x）由任一端 Claude 自主升级，**每轮修改迭代一个 patch**（合并前自升 + README 版本历史表加行）；minor / major 须经用户裁决。版本位置：`inferfabric/__init__.py` + README 版本历史表。
