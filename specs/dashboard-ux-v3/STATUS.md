@@ -1,9 +1,6 @@
 # STATUS — dashboard-ux-v3
 
-- **阶段**：设计草案 + 样机已落盘；builder check 已完成（3 项裁决记入 design.md：读侧 API 扩展边界、缓存命中口径、dark on-accent 方案；协议列取消）。二轮评审改模型页分层；**三轮评审（2026-11-27）：模型池独立为导航项「路由」，导航 5→6**（推翻二轮"池置顶于模型页"）；模型页只留本地/云端清单与在池提示。等待用户复看样机后定稿。
-- **样机验收方式**：浏览器打开 `specs/dashboard-ux-v3/preview.html`（本会话 Artifact 托管发布不可用：会话为 ANTHROPIC_AUTH_TOKEN 认证，非 claude.ai 登录）。
-- **裁决链**：2026-11-27 用户四项裁决（范围=结构重构·保栈；IA=5 区任务导向；视觉=暖浅色微调；不满=层级/深度/页面/观感/聚类全项）。推翻 console-ux-batch WS4 十项导航与 v2-console 六 TAB 定位，详见 design.md 开头。
-- **产物**：`design.md`（设计）、`preview.html`（可点击样机，示例数据）。
-- **下一步**：样机验收 → 按 design.md §6 分期 A–F 出 PR 计划（superpowers:writing-plans）→ sandbox-first 实施。
-- **提交管理**：本 spec 经 **PR #83**（`spec/dashboard-ux-v3` 分支）提交。**实施由对端 `iff-main-imp` session 承接**：checkout 该分支/合并后的 main，先读本文件与 `design.md`，以 `preview.html` 为验收基准，按 §6 A–F 分期在 sandbox-first 流程下实施。
-- **未开始**：任何生产代码改动。
+- **阶段（2026-11-27）**：用户批准设计及样机定稿，**PR #83 已合并**（`03cabb1`）。三轮裁决：模型池独立为「路由」，最终导航为六区；模型页保留本地/云端清单与在池提示。
+- **产物**：[设计](design.md)、[可点击样机](preview.html)（示例数据）、[A–F 实施计划](../../docs/superpowers/plans/2026-11-27-dashboard-ux-v3-impl.md)（待审）。
+- **下一步**：计划经用户确认后，由 `iff-main-imp` 从最新 main 发起 Phase A Draft PR，完成双端开工握手，再 sandbox-first 实施。B1 的额外读侧文件仍待裁决；未经批准不扩大定稿范围。
+- **未开始**：A–F 任何生产代码、运行验收或部署。
