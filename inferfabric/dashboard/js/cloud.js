@@ -54,6 +54,36 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  // #73: 复制调用名 —— writeText 的 promise 结果必须消费（成功/失败 toast
+  // 由结果驱动，旧形态先 toast 成功再丢弃 promise）；clipboard API 不可用
+  // （局域网 http 非安全上下文）走 execCommand 回退，仍失败给失败提示。
+  function legacyCopyText(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(
+        function () { return true; },
+        function () { return legacyCopyText(text); });
+    }
+    return Promise.resolve(legacyCopyText(text));
+  }
+
   var _presets = [];          // 预设缓存（GET /admin/cloud/presets）
   var _selectedPreset = null; // 当前选中预设
   var _providers = [];        // provider 缓存（行内 测试 需查 openai_base）
@@ -1522,10 +1552,11 @@
       case 'cpm-alias-copy': {
         if (ev && ev.preventDefault) ev.preventDefault();
         var copyAlias = el.getAttribute('data-alias') || '';
-        if (copyAlias && navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(copyAlias);
-          UI.toast('已复制调用名：' + copyAlias, 'success');
-        }
+        if (!copyAlias) break;
+        copyTextToClipboard(copyAlias).then(function (ok) {
+          if (ok) UI.toast('已复制调用名：' + copyAlias, 'success');
+          else UI.toast('复制失败，请手动复制：' + copyAlias, 'error');
+        });
         break;
       }
       case 'provider-test': {

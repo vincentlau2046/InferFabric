@@ -108,6 +108,8 @@ def _pm_with(mgr):
         cloud=types.SimpleNamespace(
             providers=mgr._providers,
             cloud_models={},
+            # #72: GET providers 的 caps/count 改走 routable_entries
+            routable_entries=lambda name: {},
             get_candidates=lambda name: [],
             _last_discovery=0.0,
             # PR1 编辑契约成员（GET providers 现依赖指纹缓存与 secrets 判定；

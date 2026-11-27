@@ -1163,10 +1163,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # 可解析）；与本地/云/池 id 撞名的别名不重复公布。停用或撤销后目标
         # 不可调用，别名即不宣称可用（spec §3 PR2）。
         existing_ids = {m.get("id") for m in all_models}
-        for pname, pcfg in pm.cloud.providers.items():
+        # #70: 读侧快照 —— 别名写线程整体重绑，providers/aliases 迭代取
+        # list() 防 dict-mutation-during-iteration（旧原地变异会 500）
+        for pname, pcfg in list(pm.cloud.providers.items()):
             if not pcfg.enabled:
                 continue
-            for alias_name, mid in pcfg.aliases.items():
+            for alias_name, mid in list(pcfg.aliases.items()):
                 if alias_name in existing_ids:
                     continue
                 if pm.cloud.resolve_cloud_model(pname, mid) is None:
@@ -3299,6 +3301,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if mgr is not None:
                 local_names = {m.served_name for m in mgr._models.values()
                                if getattr(m, "served_name", None)}
+                # #68: find_model_by_served_name 第二段按 name 匹配（先于
+                # resolve_route）—— 本地模型 name 同样占用调用名命名空间，
+                # 仅并 served_name 会漏掉「name ≠ served_name」的模型
+                local_names |= {m.name for m in mgr._models.values()
+                                if getattr(m, "name", None)}
             pool_reg = getattr(pm, "pool_registry", None)
             if pool_reg is not None:
                 try:
@@ -3308,11 +3315,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             registry_short_names = {k for k in pm.cloud.cloud_models
                                     if "/" not in k}
             other_aliases = set()
-            for pname, pc in pm.cloud.providers.items():
-                for a, mid in pc.aliases.items():
+            # #70: 读侧快照 —— providers / aliases 可能被并发写线程重绑
+            for pname, pc in list(pm.cloud.providers.items()):
+                for a, mid in list(pc.aliases.items()):
                     if pname == name and a == alias and mid == model_id:
                         continue  # 幂等重设不与自己撞
                     other_aliases.add(a)
+            # #67: 退役名并入撞名集合 —— 跨 provider 抢设已删除提供方的
+            # 别名拒绝；同 provider 显式重设放行（unretire 语义）。
+            for rp, rslot in pm.cloud._retired_aliases.items():
+                if rp != name:
+                    other_aliases |= set(rslot)
             ok, why = validate_alias(alias, name, model_id,
                                      local_names=local_names,
                                      registry_short_names=registry_short_names,
@@ -3324,29 +3337,39 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             backup_aliases = dict(cfg.aliases)
             backup_retired = {p: dict(v)
                               for p, v in pm.cloud._retired_aliases.items()}
-            # 同行旧别名让位（每行至多一个）；显式重设即确认恢复退役条目
-            for a, mid in list(cfg.aliases.items()):
-                if mid == model_id and a != alias:
-                    del cfg.aliases[a]
-            cfg.aliases[alias] = model_id
-            pm.cloud.unretire_alias(name, alias)
+            # #70: 写侧持 _models_lock（RLock，可重入）+ 整体重绑 —— 读侧
+            # 迭代中换绑原子，dict-mutation-during-iteration 从根上消除。
+            with pm.cloud._models_lock:
+                new_aliases = dict(cfg.aliases)
+                # 同行旧别名让位（每行至多一个）；显式重设即确认恢复退役条目
+                for a, mid in list(new_aliases.items()):
+                    if mid == model_id and a != alias:
+                        del new_aliases[a]
+                new_aliases[alias] = model_id
+                cfg.aliases = new_aliases
+                pm.cloud.unretire_alias(name, alias)
             action = "updated"
         else:
             # ── 移除：按 (provider, model_id) 行清别名（幂等）──
             backup_aliases = dict(cfg.aliases)
             backup_retired = {p: dict(v)
                               for p, v in pm.cloud._retired_aliases.items()}
-            removed = [a for a, mid in cfg.aliases.items() if mid == model_id]
-            for a in removed:
-                del cfg.aliases[a]
+            with pm.cloud._models_lock:
+                removed = [a for a, mid in cfg.aliases.items()
+                           if mid == model_id]
+                if removed:
+                    drop = set(removed)
+                    cfg.aliases = {a: mid for a, mid in cfg.aliases.items()
+                                   if a not in drop}
             action = "removed" if removed else "not_set"
 
         try:
             pm.cloud.save_config()
         except Exception as e:
-            cfg.aliases.clear()
-            cfg.aliases.update(backup_aliases)
-            pm.cloud._retired_aliases = backup_retired
+            # #70: 回滚同样整体重绑（原地 clear+update 有同样的并发窗口）
+            with pm.cloud._models_lock:
+                cfg.aliases = backup_aliases
+                pm.cloud._retired_aliases = backup_retired
             log.error("Failed to persist alias change: %s", e)
             self._send_json({"error": "save_failed", "detail": str(e)}, status=500)
             return
@@ -3363,9 +3386,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if pm.cloud.config_fingerprint() != _disk_fp:
                 pm.cloud.reload()
             config_fingerprint = pm.cloud.disk_fingerprint()  # PR1: 编辑 CAS 基础
-            all_models = pm.cloud.cloud_models  # 快照一次（含短名 + provider/ 前缀双键）
             providers = []
-            for name, cfg in pm.cloud.providers.items():
+            # #70: providers 迭代快照（并发 add/delete provider 时防 RuntimeError）
+            for name, cfg in list(pm.cloud.providers.items()):
                 env_set = bool(os.environ.get(cfg.key_env_var, "")) if cfg.key_env_var else False
                 # PR1: key_source 三态 — managed（secrets.env 托管）/
                 # external（仅外部环境注入）/ unset（两者皆无）
@@ -3375,9 +3398,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     key_source = "external"
                 else:
                     key_source = "unset"
-                # v6.1 Phase 1: 可路由数 = 短名键计数（避免双键重复统计）
-                routable = sum(1 for k, m in all_models.items()
-                               if "/" not in k and m.provider == name)
+                # v6.1 Phase 1: 可路由数 = provider 内 id 去重（#72：仅看短键
+                # 会把前缀键-only 的 provider 与带 / 的 model_id 整类漏计）
+                _routables = pm.cloud.routable_entries(name)
+                routable = len(_routables)
                 providers.append({
                     "name": name,
                     "enabled": cfg.enabled,
@@ -3412,8 +3436,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "routable_caps": {
                         k: {"supports_vision": m.supports_vision,
                             "supports_tools": m.supports_tools}
-                        for k, m in all_models.items()
-                        if "/" not in k and m.provider == name
+                        for k, m in _routables.items()
                     },
                     "routable_count": routable,
                     "model_count": routable,  # 兼容旧字段：语义对齐可路由数
@@ -3453,6 +3476,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         elif self.command == "DELETE":
             data = self._read_body()
             name = (data or {}).get("name", "")
+            # #71: drop 前快照（retire 会原地搬走 cfg.aliases，必须先拍）——
+            # save 失败逆序恢复，否则 provider 从内存消失且不可逆
+            _snap_cfg = pm.cloud.get_provider_config(name)
+            _snap_aliases = dict(_snap_cfg.aliases) if _snap_cfg else {}
+            with pm.cloud._models_lock:
+                _snap_entries = {k: m for k, m in pm.cloud._cloud_models.items()
+                                 if m.provider == name}
+                _snap_cands = list(pm.cloud._candidates.get(name) or [])
+                _snap_retired = {p: dict(v)
+                                 for p, v in pm.cloud._retired_aliases.items()}
             # PR2: 删除前退役别名 → 顶层 retired_aliases（未激活、不自动复活；
             # provider 不存在时 no-op，不改变 drop 的 KeyError 语义）
             pm.cloud.retire_provider_aliases(name)
@@ -3463,12 +3496,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log.error("Failed to drop provider '%s': %s", name, e)
+                if _snap_cfg is not None:
+                    pm.cloud.restore_provider(name, _snap_cfg, _snap_aliases,
+                                              _snap_entries, _snap_cands,
+                                              _snap_retired)
                 self._send_json({"error": f"Failed to delete provider: {e}"}, 500)
                 return
             try:
                 pm.cloud.save_config()
             except Exception as e:
                 log.error("Failed to persist provider deletion: %s", e)
+                if _snap_cfg is not None:
+                    pm.cloud.restore_provider(name, _snap_cfg, _snap_aliases,
+                                              _snap_entries, _snap_cands,
+                                              _snap_retired)
                 self._send_json({"error": "Failed to save config", "detail": str(e)}, 500)
                 return
             self._send_json({"status": "deleted", "provider": name})

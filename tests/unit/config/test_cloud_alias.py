@@ -311,6 +311,20 @@ class TestProviderAliasEndpoint:
         assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
         assert cd.alias_target("fast-pool") is None
 
+    def test_alias_conflict_with_local_model_name_not_served(self, tmp_path):
+        """#68: find_model_by_served_name 第二段按 name 匹配 —— 本地模型的
+        name（非 served_name）同样占用调用名命名空间，撞名须拒绝。"""
+        cd, _p = self._cd(tmp_path)
+
+        class _M:
+            served_name = "Qwen3-27B"
+            name = "qwen-chat"
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "qwen-chat",
+                               "expected_config_fingerprint": cd.disk_fingerprint()},
+                          models={"m": _M()})
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+
     def test_alias_set_unretires_deleted_pair(self, tmp_path):
         """重建同名 provider 后端点显式重设 → 激活且 retired 清空。"""
         cd, p = self._cd(tmp_path)
@@ -333,6 +347,34 @@ class TestProviderAliasEndpoint:
         assert cd.alias_target("glm-5-b") == ("prov-a", "glm-5")
         assert cd._retired_aliases == {}
 
+    def test_provider_delete_save_failure_rolls_back(self, tmp_path):
+        """#71: DELETE 落盘失败 → 逆序恢复（provider 仍可路由、别名仍激活、
+        retired 未变、注册表条目原样）—— 此前 drop 已生效且不可逆。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"al-x": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        })
+        retired_before = {p: dict(v) for p, v in cd._retired_aliases.items()}
+        entries_before = dict(cd.cloud_models)
+        h, sent = _mk_handler(cd, command="DELETE",
+                              body=json.dumps({"name": "prov-a"}).encode())
+        real_save = cd.save_config
+
+        def _boom():
+            raise OSError("disk full")
+
+        cd.save_config = _boom
+        try:
+            h._handle_cloud_providers(_mk_pm(cd))
+        finally:
+            cd.save_config = real_save
+        assert sent[0][1] == 500, sent
+        assert "prov-a" in cd.providers, "provider 必须回插"
+        assert cd.alias_target("al-x") == ("prov-a", "glm-5"), "别名必须仍激活"
+        assert cd._retired_aliases == retired_before, "retired 表必须还原"
+        assert dict(cd.cloud_models) == entries_before, "注册表条目必须还原"
+
     def test_provider_delete_endpoint_retires_aliases(self, tmp_path):
         """DELETE /admin/cloud/providers 调 retire_provider_aliases（Task 1 接线）。"""
         cd, p = self._cd(tmp_path, aliases={"glm-5-b": "glm-5"})
@@ -351,3 +393,171 @@ def test_get_providers_exposes_aliases(tmp_path):
     h._handle_cloud_providers(_mk_pm(cd))
     by_name = {pr["name"]: pr for pr in sent[0][0]["providers"]}
     assert by_name["prov-a"]["aliases"] == {"glm-5-b": "glm-5"}
+
+
+class TestRetiredAliasSemantics:
+    """#67 — 已退役别名绝不回退（先于 local/短名判定）、可解释、撞名集合含退役名。"""
+
+    def _cd_two(self, tmp_path, extra_models_a=None):
+        a = {"openai_base": "http://a", "enabled_models": ["glm-5"]}
+        if extra_models_a:
+            a["models"] = extra_models_a
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": a,
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"shared-alias": "glm-5"}},
+        })
+        return cd
+
+    def test_retired_alias_never_falls_back_to_local(self, tmp_path):
+        """删除承诺字面语义：退役名命中 → None，先于本地模型判定。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        assert cd.resolve_route("shared-alias", {"shared-alias"}) is None
+
+    def test_retired_alias_never_falls_back_to_other_provider(self, tmp_path):
+        """他 provider 之后注册同名短名 —— 退役名不回退到他 provider。"""
+        cd = self._cd_two(tmp_path, extra_models_a={"shared-alias": {}})
+        cd.retire_provider_aliases("prov-b")
+        assert cd.resolve_route("shared-alias", set()) is None
+
+    def test_explain_unknown_reports_deleted_provider(self, tmp_path):
+        """既有「目标提供方已删除」分支由此可达（此前 alias_target 未命中恒 None）。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        msg = cd.explain_unknown("shared-alias")
+        assert msg is not None and "已删除" in msg and "prov-b" in msg
+
+    def test_retired_alias_owner_helper(self, tmp_path):
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        assert cd.retired_alias_owner("shared-alias") == "prov-b"
+        assert cd.retired_alias_owner("nope") is None
+
+
+class TestRetiredAliasEndpointConflicts:
+    """#67 — validate_alias 调用点并入退役名（同 provider 显式重设除外）。"""
+
+    def _cd_two(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"shared-alias": "glm-5"}},
+        })
+        return cd
+
+    def test_cross_provider_grab_of_retired_name_rejected(self, tmp_path):
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        sent = TestProviderAliasEndpoint()._post(
+            cd, {"provider": "prov-a", "model_id": "glm-5",
+                 "alias": "shared-alias",
+                 "expected_config_fingerprint": cd.disk_fingerprint()})
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+        assert cd.alias_target("shared-alias") is None
+
+    def test_same_provider_reset_of_retired_allowed(self, tmp_path):
+        """同 provider 显式重设退役名放行（unretire 语义），retired 清空。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        sent = TestProviderAliasEndpoint()._post(
+            cd, {"provider": "prov-b", "model_id": "glm-5",
+                 "alias": "shared-alias",
+                 "expected_config_fingerprint": cd.disk_fingerprint()})
+        assert sent[0][1] == 200, sent
+        assert cd.alias_target("shared-alias") == ("prov-b", "glm-5")
+        assert cd._retired_aliases.get("prov-b", {}) == {}
+
+
+class TestLoadPathAliasValidation:
+    """#69 — 加载路径复用 validate_alias 全规则；违规走 corrupt 全有或全无；
+    同 provider 重声明退役别名 = 显式重设（unretire）。"""
+
+    def test_cross_provider_duplicate_alias_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"dup": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"dup": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+        assert cd.providers == {}, "全有或全无：不部分应用"
+
+    def test_bad_alias_shape_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"has/slash": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_alias_shadowing_registry_short_name_corrupt(self, tmp_path):
+        """别名与注册表短名（enabled_models ∪ model_specs 键）撞名 → corrupt。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"glm-5": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_alias_shadowing_other_provider_spec_key_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"k3": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": [],
+                       "models": {"k3": {"model_id": "kimi/k3"}}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_same_provider_redeclare_retired_unretires(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"old-name": "glm-5"}},
+        }, retired={"prov-a": {"old-name": "glm-5"}})
+        assert cd._config_corrupt is False
+        assert cd.alias_target("old-name") == ("prov-a", "glm-5")
+        assert cd._retired_aliases == {}, "同 provider 重声明 = 显式重设，retired 清空"
+
+    def test_cross_provider_grab_of_retired_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"old-name": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        }, retired={"prov-b": {"old-name": "glm-5"}})
+        assert cd._config_corrupt is True
+
+
+class TestRoutableCountAndCaps:
+    """#72 — routable_caps/count 按 provider 内 id 归一：仅有前缀键的
+    provider 与带 / 的 model_id 不再漏计；双键去重。"""
+
+    def _get(self, cd):
+        h, sent = _mk_handler(cd)
+        h._handle_cloud_providers(_mk_pm(cd))
+        return {pr["name"]: pr for pr in sent[0][0]["providers"]}
+
+    def test_prefixed_key_only_provider_counted(self, tmp_path):
+        """跨 provider 同短名碰撞 → B 只有前缀键：B 行 count=1 且 caps 含该模型
+        （此前 "/" not in k 过滤把 B 整类漏计为 0）。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        })
+        rows = self._get(cd)
+        assert rows["prov-b"]["routable_count"] == 1, rows["prov-b"]
+        assert "glm-5" in rows["prov-b"]["routable_caps"]
+
+    def test_slash_bearing_model_id_counted(self, tmp_path):
+        """model_id 带 /（org/x）：短键与前缀键都含 / —— 此前整类漏计。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-b": {"openai_base": "http://b",
+                       "models": {"org/x": {"model_id": "org/x", "name": "X"}}},
+        })
+        rows = self._get(cd)
+        assert rows["prov-b"]["routable_count"] == 1, rows["prov-b"]
+        assert "org/x" in rows["prov-b"]["routable_caps"]
+
+    def test_no_double_count_dual_keys(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+        })
+        rows = self._get(cd)
+        assert rows["prov-a"]["routable_count"] == 1

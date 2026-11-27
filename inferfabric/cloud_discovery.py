@@ -614,6 +614,25 @@ class CloudDiscovery:
             }
             self._candidates.pop(provider, None)
 
+    def restore_provider(self, name: str, cfg: "ProviderConfig",
+                         aliases: dict, entries: dict, candidates: list,
+                         retired: dict):
+        """#71: DELETE 落盘失败时逆序恢复 drop 前状态。
+
+        cfg 回插 _providers、aliases 重绑回 cfg、注册表条目回插（并集重绑，
+        保留 drop 后其他 provider 的新条目）、候选回插、退役表整体重绑回
+        快照。调用方传 drop 前快照；本方法持锁整体重绑。
+        """
+        with self._models_lock:
+            self._providers[name] = cfg
+            cfg.aliases = dict(aliases)
+            self._cloud_models = {**self._cloud_models, **entries}
+            if candidates:
+                self._candidates[name] = list(candidates)
+            else:
+                self._candidates.pop(name, None)
+            self._retired_aliases = {p: dict(v) for p, v in retired.items()}
+
     def alias_target(self, alias: str) -> "tuple[str, str] | None":
         """显式调用别名 → (provider, 上游 model_id)；未命中返回 None。
 
@@ -655,6 +674,15 @@ class CloudDiscovery:
             if not slot:
                 del self._retired_aliases[provider]
 
+    def retired_alias_owner(self, alias: str) -> "str | None":
+        """别名退役归属提供方（#67）：alias 在任一退役表中即返回该 provider
+        名，否则 None。锁内读。"""
+        with self._models_lock:
+            for provider, slot in self._retired_aliases.items():
+                if alias in slot:
+                    return provider
+        return None
+
     def _rebuild_provider_registry(self, provider: str, cfg: ProviderConfig):
         """按 floor = (候选∩白名单) ∪ 白名单 ∪ model_specs 重建 provider 的注册表条目。
 
@@ -682,13 +710,35 @@ class CloudDiscovery:
         #    （其他 provider 的条目未被清除，short-key first-wins 跳过不受影响）
         self._register_whitelist_models(self._cloud_models, old=old)
 
+    def routable_entries(self, provider: str) -> "dict[str, CloudModel]":
+        """该 provider 的可路由条目，键 = provider 内 id（#72）。
+
+        注册表双键（短名 + provider/ 前缀）与带 / 的 model_id 短键统一
+        归一到 provider 内 id 去重 —— 此前 `" /" not in k` 过滤把带 /
+        的 model_id（如 org/x）整类漏计，且跨 provider 短名碰撞时仅有
+        前缀键的 provider 被计为 0。
+        """
+        prefix = provider + "/"
+        out: dict[str, CloudModel] = {}
+        with self._models_lock:
+            for k, m in self._cloud_models.items():
+                if m.provider != provider:
+                    continue
+                internal = k[len(prefix):] if k.startswith(prefix) else k
+                out.setdefault(internal, m)
+        return out
+
     def _routable_count(self, provider: str) -> int:
-        """该 provider 可路由模型数（短名 key 计数，避免双键重复）。"""
-        return sum(1 for k, v in self._cloud_models.items()
-                   if "/" not in k and v.provider == provider)
+        """该 provider 可路由模型数（provider 内 id 去重，#72 口径）。"""
+        return len(self.routable_entries(provider))
 
     def resolve_route(self, model_name: str, local_models: set[str]) -> Optional[str]:
         """路由决策：给定模型名，返回 "local" / "cloud:<provider>" / None。"""
+        # #67: 已退役别名先于一切回退判定 —— 删除承诺字面语义「绝不回退到
+        # 本地/另一 provider/池」。命中退役名即显式 None（explain_unknown
+        # 给删除语义）。别名命名空间不含 "/"，model_name 即调用名形态。
+        if self.retired_alias_owner(model_name) is not None:
+            return None
         short_name = model_name.split("/")[-1] if "/" in model_name else model_name
         if short_name in local_models or model_name in local_models:
             return "local"
@@ -757,6 +807,10 @@ class CloudDiscovery:
         """
         target = self.alias_target(model_name)
         if target is None:
+            # #67: 退役别名（提供方已删除）——既有「已删除」分支由此可达
+            owner = self.retired_alias_owner(model_name)
+            if owner is not None:
+                return f"别名 '{model_name}' 的目标提供方 {owner} 已删除"
             return None
         provider_name, mid = target
         cfg = self._providers.get(provider_name)
@@ -1177,8 +1231,19 @@ class CloudDiscovery:
             # PR2: 别名条目严格校验 — 键/值都必须非空字符串。坏条目抛错
             # 走既有 corrupt 保注册表路径（在 provider 循环之前整体校验，
             # 不部分应用）；校验放 try 内以复用同一异常出口。
+            # #69: 非空之上复用 validate_alias 全规则（命名/保留前缀/撞名）
+            # —— 端点设置路径有校验而加载路径没有 = 手改 YAML 绕过全部
+            # 不变量。加载路径撞名集合（无 mgr，取配置可推导集）：全部
+            # provider 的 enabled_models ∪ model_specs 键（注册表短名来源）
+            # + 其他 provider 的别名 + 退役名（跨 provider 抢声明拒绝；
+            # 同 provider 重声明 = 显式重设，见下方 unretire）。
+            _alias_rows = []       # (provider, alias, model_id)
+            _all_spec_ids = set()  # 注册表短名的配置可推导集
             for _pname, _pcfg in (cfg.get("providers") or {}).items():
-                _aliases = (_pcfg or {}).get("aliases")
+                _pcfg = _pcfg or {}
+                _all_spec_ids |= set(_pcfg.get("enabled_models") or [])
+                _all_spec_ids |= set(_pcfg.get("models") or {})
+                _aliases = _pcfg.get("aliases")
                 if _aliases is None:
                     continue
                 if not isinstance(_aliases, dict):
@@ -1190,6 +1255,21 @@ class CloudDiscovery:
                         raise ValueError(
                             f"provider '{_pname}': invalid alias entry "
                             f"{_a!r}: {_m!r} (alias 与 model_id 均须非空字符串)")
+                    _alias_rows.append((_pname, _a, _m))
+            _retired_raw = cfg.get("retired_aliases") or {}
+            for _pname, _a, _m in _alias_rows:
+                _others = {a2 for (p2, a2, _m2) in _alias_rows if p2 != _pname}
+                _others |= {a2 for p2, slot in _retired_raw.items()
+                            if isinstance(slot, dict) and p2 != _pname
+                            for a2 in slot}
+                _ok, _why = validate_alias(
+                    _a, _pname, _m,
+                    local_names=set(),
+                    registry_short_names=_all_spec_ids,
+                    other_aliases=_others)
+                if not _ok:
+                    raise ValueError(
+                        f"provider '{_pname}': alias '{_a}' 校验失败: {_why}")
         except Exception as e:
             log.error("Failed to load cloud_provider.yaml: %s", e)
             self._config_corrupt = True
@@ -1240,10 +1320,17 @@ class CloudDiscovery:
             self._providers[name] = provider
 
         # PR2: 顶层 retired_aliases（删除 provider 时退役的别名）— 宽松解析：
-        # 非 dict 值跳过（retired 本身不可路由，坏行不值得拖垮整份配置）
+        # 非 dict 值跳过（retired 本身不可路由，坏行不值得拖垮整份配置）。
+        # #69: 同 provider 重声明的退役别名 = 显式重设 → 摘除（对齐端点
+        # unretire 语义）；跨 provider 抢声明已在加载校验中 corrupt。
+        _redeclared = {(p, a) for (p, a, _m) in _alias_rows}
         self._retired_aliases = {
-            p: dict(a) for p, a in (cfg.get("retired_aliases") or {}).items()
-            if isinstance(a, dict)
+            p: {a: mid for a, mid in dict(slot).items() if (p, a) not in _redeclared}
+            for p, slot in (cfg.get("retired_aliases") or {}).items()
+            if isinstance(slot, dict)
+        }
+        self._retired_aliases = {
+            p: s for p, s in self._retired_aliases.items() if s
         }
 
         log.info("Cloud config loaded: %d providers, %d model specs",
