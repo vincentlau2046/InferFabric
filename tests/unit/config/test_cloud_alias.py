@@ -439,3 +439,59 @@ class TestRetiredAliasEndpointConflicts:
         assert sent[0][1] == 200, sent
         assert cd.alias_target("shared-alias") == ("prov-b", "glm-5")
         assert cd._retired_aliases.get("prov-b", {}) == {}
+
+
+class TestLoadPathAliasValidation:
+    """#69 — 加载路径复用 validate_alias 全规则；违规走 corrupt 全有或全无；
+    同 provider 重声明退役别名 = 显式重设（unretire）。"""
+
+    def test_cross_provider_duplicate_alias_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"dup": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"dup": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+        assert cd.providers == {}, "全有或全无：不部分应用"
+
+    def test_bad_alias_shape_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"has/slash": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_alias_shadowing_registry_short_name_corrupt(self, tmp_path):
+        """别名与注册表短名（enabled_models ∪ model_specs 键）撞名 → corrupt。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"glm-5": "glm-5"}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_alias_shadowing_other_provider_spec_key_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"k3": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": [],
+                       "models": {"k3": {"model_id": "kimi/k3"}}},
+        })
+        assert cd._config_corrupt is True
+
+    def test_same_provider_redeclare_retired_unretires(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"old-name": "glm-5"}},
+        }, retired={"prov-a": {"old-name": "glm-5"}})
+        assert cd._config_corrupt is False
+        assert cd.alias_target("old-name") == ("prov-a", "glm-5")
+        assert cd._retired_aliases == {}, "同 provider 重声明 = 显式重设，retired 清空"
+
+    def test_cross_provider_grab_of_retired_corrupt(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"old-name": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        }, retired={"prov-b": {"old-name": "glm-5"}})
+        assert cd._config_corrupt is True

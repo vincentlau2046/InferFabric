@@ -1195,8 +1195,19 @@ class CloudDiscovery:
             # PR2: 别名条目严格校验 — 键/值都必须非空字符串。坏条目抛错
             # 走既有 corrupt 保注册表路径（在 provider 循环之前整体校验，
             # 不部分应用）；校验放 try 内以复用同一异常出口。
+            # #69: 非空之上复用 validate_alias 全规则（命名/保留前缀/撞名）
+            # —— 端点设置路径有校验而加载路径没有 = 手改 YAML 绕过全部
+            # 不变量。加载路径撞名集合（无 mgr，取配置可推导集）：全部
+            # provider 的 enabled_models ∪ model_specs 键（注册表短名来源）
+            # + 其他 provider 的别名 + 退役名（跨 provider 抢声明拒绝；
+            # 同 provider 重声明 = 显式重设，见下方 unretire）。
+            _alias_rows = []       # (provider, alias, model_id)
+            _all_spec_ids = set()  # 注册表短名的配置可推导集
             for _pname, _pcfg in (cfg.get("providers") or {}).items():
-                _aliases = (_pcfg or {}).get("aliases")
+                _pcfg = _pcfg or {}
+                _all_spec_ids |= set(_pcfg.get("enabled_models") or [])
+                _all_spec_ids |= set(_pcfg.get("models") or {})
+                _aliases = _pcfg.get("aliases")
                 if _aliases is None:
                     continue
                 if not isinstance(_aliases, dict):
@@ -1208,6 +1219,21 @@ class CloudDiscovery:
                         raise ValueError(
                             f"provider '{_pname}': invalid alias entry "
                             f"{_a!r}: {_m!r} (alias 与 model_id 均须非空字符串)")
+                    _alias_rows.append((_pname, _a, _m))
+            _retired_raw = cfg.get("retired_aliases") or {}
+            for _pname, _a, _m in _alias_rows:
+                _others = {a2 for (p2, a2, _m2) in _alias_rows if p2 != _pname}
+                _others |= {a2 for p2, slot in _retired_raw.items()
+                            if isinstance(slot, dict) and p2 != _pname
+                            for a2 in slot}
+                _ok, _why = validate_alias(
+                    _a, _pname, _m,
+                    local_names=set(),
+                    registry_short_names=_all_spec_ids,
+                    other_aliases=_others)
+                if not _ok:
+                    raise ValueError(
+                        f"provider '{_pname}': alias '{_a}' 校验失败: {_why}")
         except Exception as e:
             log.error("Failed to load cloud_provider.yaml: %s", e)
             self._config_corrupt = True
@@ -1258,10 +1284,17 @@ class CloudDiscovery:
             self._providers[name] = provider
 
         # PR2: 顶层 retired_aliases（删除 provider 时退役的别名）— 宽松解析：
-        # 非 dict 值跳过（retired 本身不可路由，坏行不值得拖垮整份配置）
+        # 非 dict 值跳过（retired 本身不可路由，坏行不值得拖垮整份配置）。
+        # #69: 同 provider 重声明的退役别名 = 显式重设 → 摘除（对齐端点
+        # unretire 语义）；跨 provider 抢声明已在加载校验中 corrupt。
+        _redeclared = {(p, a) for (p, a, _m) in _alias_rows}
         self._retired_aliases = {
-            p: dict(a) for p, a in (cfg.get("retired_aliases") or {}).items()
-            if isinstance(a, dict)
+            p: {a: mid for a, mid in dict(slot).items() if (p, a) not in _redeclared}
+            for p, slot in (cfg.get("retired_aliases") or {}).items()
+            if isinstance(slot, dict)
+        }
+        self._retired_aliases = {
+            p: s for p, s in self._retired_aliases.items() if s
         }
 
         log.info("Cloud config loaded: %d providers, %d model specs",
