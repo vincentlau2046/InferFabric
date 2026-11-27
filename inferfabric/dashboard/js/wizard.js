@@ -30,7 +30,7 @@
   var URL_INSTALL = '/admin/packs/install';
   var URL_AUTOSTART = '/admin/models/set-autostart';
   var URL_LOCAL_MODELS = '/local-models';
-  var POLL_MS = 1500;
+  var POLL_MS = 2000;
   var SEARCH_DEBOUNCE = 300;
 
   var CAP_LABELS = { llm: '对话 / 文本', embedding: '向量 / 嵌入',
@@ -429,7 +429,9 @@
   /* 切出能力包 tab：停轮询 + 重置在途态（Review Focus 5；2026-11-24 随迁移改守卫） */
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab !== 'tab-packs') {
+      var on = (store && typeof store.isGroupActive === 'function')
+        ? store.isGroupActive('tab-packs') : (tab === 'tab-packs');
+      if (!on) {
         stopPoll();
         if (_open) resetWizard();
         _open = false;

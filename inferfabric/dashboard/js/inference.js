@@ -371,13 +371,19 @@
 
   /* ── 订阅：snapshot 到达时刷新（仅推理页可见时） ── */
   function isInferenceActive() {
+    // A2：视图组合判断（模型页 = 本内容组）；store 无该能力时退回旧 DOM 判断
+    if (store && typeof store.isGroupActive === 'function') {
+      return store.isGroupActive('tab-inference');
+    }
     var el = $('tab-inference');
     return !!(el && el.classList.contains('active'));
   }
 
   store.on('sync_meta', function () { if (isInferenceActive()) renderInference(); });
   store.on('tab_active', function (tab) {
-    if (tab === 'tab-inference') renderInference();
+    var on = (store && typeof store.isGroupActive === 'function')
+      ? store.isGroupActive('tab-inference') : (tab === 'tab-inference');
+    if (on) renderInference();
   });
 
   /* ── 模型操作：switch / stop / sleep / wake ── */

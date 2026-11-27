@@ -242,7 +242,9 @@
 
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab === 'tab-connect') loadStatus();   // 进入页面只读状态
+      var on = (store && typeof store.isGroupActive === 'function')
+        ? store.isGroupActive('tab-connect') : (tab === 'tab-connect');
+      if (on) loadStatus();                       // 进入页面只读状态
       else closeModal();                          // 切页不留一次性输入
     });
   }

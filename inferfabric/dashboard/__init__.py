@@ -14,6 +14,15 @@ log = logging.getLogger("inferfabric.dashboard")
 _DASHBOARD_DIR = Path(__file__).parent
 _cached_html: str | None = None
 
+# Dashboard UX v3 六区 fragment 装配顺序（A2，2026-11-27）：
+# - 前六项 = 六区壳，被 base.html 直接引用；其后为嵌套子 fragment。
+# - 替换顺序契约：父级先于子级（config → cloud/security/connect/packs/settings；
+#   packs → wizard；requests → anomaly），嵌套占位符随父级落入 base 后按序替换。
+# - 缺失文件 graceful 降级（warning + 占位提示），不残留占位符。
+FRAGMENTS = ["status", "requests", "usage", "routing", "models", "config",
+             "anomaly", "cloud", "security", "settings", "connect",
+             "packs", "wizard"]
+
 # Dashboard v2 JS 模块加载顺序（缺失文件 graceful 跳过 + warning）。
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
 # A1（2026-11-27）：router 紧随 store —— 路由/恢复/旧键迁移唯一实现在 router.js，
@@ -32,12 +41,8 @@ def get_html() -> str:
         return _cached_html
     try:
         base = (_DASHBOARD_DIR / "base.html").read_text(encoding="utf-8")
-        # 替换 fragment 占位符
-        for frag_name in ("overview", "inference", "monitor", "cloud",
-                          "model-pools", "anomaly", "packs", "wizard",
-                          "security", "settings", "connect"):
-            # wizard 排在 packs 之后：其占位符位于 packs.html 内部
-            # （向导卡挂能力包 tab，2026-11-24 自模型池页迁入），替换按序生效
+        # 替换 fragment 占位符（六区壳 + 嵌套子 fragment，按 FRAGMENTS 顺序）
+        for frag_name in FRAGMENTS:
             frag_path = _DASHBOARD_DIR / "fragments" / f"{frag_name}.html"
             try:
                 frag = frag_path.read_text(encoding="utf-8")

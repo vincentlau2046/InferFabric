@@ -2704,7 +2704,7 @@ class TestSingleFormRender:
 
     def test_fragment_contains_modal_container(self):
         frag = (ROOT / "inferfabric" / "dashboard" / "fragments"
-                / "model-pools.html").read_text(encoding="utf-8")
+                / "routing.html").read_text(encoding="utf-8")
         assert 'id="mpModal"' in frag   # 接入片段模态容器（doMpSnippet 复制钮）
 
     def test_render_unconfigured_four_cards_no_wizard(self, run_panel):

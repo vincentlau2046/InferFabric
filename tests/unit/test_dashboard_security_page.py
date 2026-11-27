@@ -23,7 +23,7 @@ def _src(name: str) -> str:
 
 def test_security_page_is_assembled():
     html = dashboard.get_html()
-    assert 'data-tab="tab-security"' in html
+    assert 'data-sub="auth"' in html   # A2：鉴权 = 配置区子页（临时入口）
     assert 'id="tab-security"' in html
     assert "security" in dashboard.JS_MODULES
     assert "admin/security/status" in html

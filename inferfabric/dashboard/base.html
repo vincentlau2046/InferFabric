@@ -171,44 +171,26 @@
   </div>
 
   <div class="if-body">
-    <!-- ══ 侧边栏（56px 图标导航） ══ -->
+    <!-- ══ 侧边栏（200px 文字导航，UX v3 六区；2026-11-27 三轮裁决） ══ -->
     <aside class="if-sidebar">
-      <!-- IA v3.1：4 组导航（2026-11-20 五组裁决 → 2026-11-24 用户修订：监控为最常用
-           入口并入状态组，异常随迁；见 specs/console-ux-batch/spec.md WS4） -->
       <nav class="if-nav">
-        <span class="nav-cap" aria-hidden="true">状态</span>
-        <button class="if-nav-item active" data-tab="tab-overview" onclick="switchTab('tab-overview')" title="总览" aria-current="page">
-          <svg><use href="#s-chart"/></svg><span>总览</span>
+        <button class="if-nav-item active" data-tab="tab-status" onclick="switchTab('tab-status')" title="状态" aria-current="page">
+          <svg><use href="#s-chart"/></svg><span>状态</span>
         </button>
-        <button class="if-nav-item" data-tab="tab-monitor" onclick="switchTab('tab-monitor')" title="监控">
-          <svg><use href="#s-gpu"/></svg><span>监控</span>
+        <button class="if-nav-item" data-tab="tab-requests" onclick="switchTab('tab-requests')" title="请求">
+          <svg><use href="#s-message"/></svg><span>请求</span>
         </button>
-        <button class="if-nav-item" data-tab="tab-anomaly" onclick="switchTab('tab-anomaly')" title="异常">
-          <svg><use href="#s-alert"/></svg><span>异常</span>
+        <button class="if-nav-item" data-tab="tab-usage" onclick="switchTab('tab-usage')" title="用量">
+          <svg><use href="#s-bolt"/></svg><span>用量</span>
         </button>
-        <span class="nav-cap" aria-hidden="true">推理与池</span>
-        <button class="if-nav-item" data-tab="tab-inference" onclick="switchTab('tab-inference')" title="推理">
-          <svg><use href="#s-cube"/></svg><span>推理</span>
+        <button class="if-nav-item" data-tab="tab-routing" onclick="switchTab('tab-routing')" title="路由">
+          <svg><use href="#s-swap"/></svg><span>路由</span>
         </button>
-        <button class="if-nav-item" data-tab="tab-model-pools" onclick="switchTab('tab-model-pools')" title="模型池">
-          <svg><use href="#s-database"/></svg><span>模型池</span>
+        <button class="if-nav-item" data-tab="tab-models" onclick="switchTab('tab-models')" title="模型">
+          <svg><use href="#s-cube"/></svg><span>模型</span>
         </button>
-        <span class="nav-cap" aria-hidden="true">网关策略</span>
-        <button class="if-nav-item" data-tab="tab-packs" onclick="switchTab('tab-packs')" title="能力包">
-          <svg><use href="#s-download"/></svg><span>能力包</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-security" onclick="switchTab('tab-security')" title="鉴权">
-          <svg><use href="#s-key"/></svg><span>鉴权</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-settings" onclick="switchTab('tab-settings')" title="设置">
-          <svg><use href="#s-gear"/></svg><span>设置</span>
-        </button>
-        <button class="if-nav-item" data-tab="tab-cloud" onclick="switchTab('tab-cloud')" title="云端">
-          <svg><use href="#s-cloud"/></svg><span>云端</span>
-        </button>
-        <span class="nav-cap" aria-hidden="true">接入</span>
-        <button class="if-nav-item" data-tab="tab-connect" onclick="switchTab('tab-connect')" title="接入">
-          <svg><use href="#s-swap"/></svg><span>接入</span>
+        <button class="if-nav-item" data-tab="tab-config" onclick="switchTab('tab-config')" title="配置">
+          <svg><use href="#s-gear"/></svg><span>配置</span>
         </button>
       </nav>
       <div class="if-foot">
@@ -250,17 +232,13 @@
           </div>
         </div>
 
-        <!-- Tab 内容（fragment 拼装） -->
-        <!-- FRAGMENT:overview -->
-        <!-- FRAGMENT:inference -->
-        <!-- FRAGMENT:monitor -->
-        <!-- FRAGMENT:cloud -->
-        <!-- FRAGMENT:model-pools -->
-        <!-- FRAGMENT:anomaly -->
-        <!-- FRAGMENT:packs -->
-        <!-- FRAGMENT:security -->
-        <!-- FRAGMENT:settings -->
-        <!-- FRAGMENT:connect -->
+        <!-- Tab 内容（fragment 拼装；UX v3 六区壳，子 fragment 嵌套装配） -->
+        <!-- FRAGMENT:status -->
+        <!-- FRAGMENT:requests -->
+        <!-- FRAGMENT:usage -->
+        <!-- FRAGMENT:routing -->
+        <!-- FRAGMENT:models -->
+        <!-- FRAGMENT:config -->
 
       </div>
     </main>

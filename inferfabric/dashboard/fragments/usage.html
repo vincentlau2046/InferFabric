@@ -1,12 +1,10 @@
-<div class="tab-content" id="tab-monitor">
-
-  <!-- Row 1: GPU 曲线卡 (col 8) + 五联 KPI (col 4) -->
+<div class="tab-content" id="tab-usage">
+  <!-- 用量页壳（UX v3 A2）：原监控页用量图卡整体平移；
+       功耗/电费双轴图为临时内容，D 期电费 KPI 接通后撤除（避免中间版本丢电费入口）。 -->
   <div class="if-grid">
 
-    <!-- 功耗 / 电费：单图双轴（柱=平均功耗 W 左轴，折线=累计电量/电费 度=元 右轴）。
-         小时=近24h每小时桶 / 天=近30天每日桶 / 周=近90天每周桶（月整体弃用）；
-         后端 60s 采样 + 5min TTL。 -->
-    <div class="col-8">
+    <!-- 功耗 / 电费：单图双轴（临时驻留，D 撤除） -->
+    <div class="col-12">
       <div class="if-card">
         <div class="if-card-hdr">
           <span class="if-card-title">功耗 / 电费</span>
@@ -30,36 +28,9 @@
       </div>
     </div>
 
-    <!-- 五联 KPI：KV Cache / Seq Length / TPOT / TTFT / Throughput -->
-    <div class="col-4">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">引擎指标</span>
-          <span class="if-card-sub" id="monKpiModel"></span>
-        </div>
-        <div class="if-card-body" id="monKpis">
-          <div class="skeleton">
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
   </div>
 
-  <!-- Row 2: Token 用量 — v6.4 左右双卡（取代旧「单卡上下堆叠 + 费用概览卡」）：
-       Row 2a = col-12 共享粒度控制条（data-seg=gran，分钟/小时/天/周四档驱动
-       左右双卡同粒度联动；与下方延迟趋势行的 latwin/latq 控制条同语法）。
-       Row 2b = col-6×2 双卡，每卡双轴图（{dualAxis:true} 受权例外，与
-       功耗/电费卡同构——流速↔存量积分对）：
-         柱（左轴 tokens）= 每桶 Prompt/Completion 堆叠
-         折线（右轴）= 窗口起点累积：本地 = 累计 token 量（自己的 GPU 免费跑，
-           量有意义）；云端 = 累计费用 ¥（桶 cost 由 /api/token-curve 按价格表
-           逐请求算，未配价模型计 0——按量付费，钱才是要看的量）
-       费用概览卡整体删除（滚动 24h 无参考价值，2026-09-25 用户拍板）：
-       云端费用改由本卡右轴「累计费用 ¥」折线覆盖（随粒度：小时=24h/天=30d/周=90d）。 -->
+  <!-- Token 用量：共享粒度控制条（data-seg=gran）驱动左右双卡 -->
   <div class="if-grid">
     <div class="col-12">
       <div class="if-card">
@@ -116,8 +87,7 @@
 
   </div>
 
-  <!-- Row 2.5: 客户端 Agent 用量 — col-12 单卡（图左表右，布局 A；v6.5）。
-       图源 GET /api/agent-stats（30s 节流）；未识别可一键认领落盘。 -->
+  <!-- 客户端 / Agent 用量：图左表右（v6.5） -->
   <div class="if-grid">
     <div class="col-12">
       <div class="if-card">
@@ -160,10 +130,7 @@
     </div>
   </div>
 
-  <!-- Row 3: 模型延迟趋势 — 时间轴 × 逐模型分色折线（v6.0 取代模型条形双卡）。
-       两张小倍数卡（左 TTFT / 右 TPOT）各单 y 轴（量纲差 ~2 数量级，禁双 y 轴）。
-       共享控制条：窗口 分钟/小时/天（latwin，数据仅 30d 不做周）+ 分位 P50/P50+P95
-       （latq）+ 模型 chip 选择器。 -->
+  <!-- 模型延迟趋势：共享控制条（latwin/latq）+ TTFT/TPOT 双卡 -->
   <div class="if-grid">
     <div class="col-12">
       <div class="if-card">
@@ -215,44 +182,6 @@
         </div>
       </div>
     </div>
-  </div>
-
-  <!-- Row 4: 请求日志表 (col 8) + 切换历史表 (col 4) -->
-  <div class="if-grid">
-
-    <!-- 请求日志表（13px 紧凑） -->
-    <div class="col-8">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">请求日志</span>
-          <span class="if-card-sub" id="monLogTs"></span>
-        </div>
-        <div class="if-card-body" id="monLogTable">
-          <div class="skeleton">
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 切换历史表（13px 紧凑） -->
-    <div class="col-4">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">切换历史</span>
-        </div>
-        <div class="if-card-body" id="monHistTable">
-          <div class="skeleton">
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-            <div class="skeleton-row"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
   </div>
 
 </div>

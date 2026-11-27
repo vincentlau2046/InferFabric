@@ -17,13 +17,13 @@ ROUTER_JS = ROOT / "inferfabric" / "dashboard" / "js" / "router.js"
 STORE_JS = ROOT / "inferfabric" / "dashboard" / "js" / "store.js"
 
 _VALID_VIEWS = ("status", "requests", "usage", "routing", "models", "config")
-# view → 默认 DOM tab（A1 过渡期沿用旧 tab id；A2 换新壳后由装配层对齐）
+# A2（2026-11-27）：路由 → 六区壳（映射收敛为恒等；子页由 store data-sub 显隐承担）
 _VIEW_DEFAULT_TAB = {
-    "status": "tab-overview",
-    "requests": "tab-monitor",
+    "status": "tab-status",
+    "requests": "tab-requests",
     "usage": "tab-usage",
-    "routing": "tab-model-pools",
-    "models": "tab-inference",
+    "routing": "tab-routing",
+    "models": "tab-models",
     "config": "tab-config",
 }
 # 旧 localStorage iff_active_tab → 新路由（含 2026-11-20 tab-deploy→packs 前置迁移）
@@ -40,22 +40,8 @@ _TAB_ROUTE_MAP = {
     "tab-settings": ("config", "sys"),
     "tab-cloud": ("config", "cloud"),
 }
-# view+sub → 旧 DOM tab（A1 过渡期 router 借此驱动既有装配）
-_ROUTE_TAB_MAP = {
-    ("status", None): "tab-overview",
-    ("requests", None): "tab-monitor",
-    ("requests", "anomalies"): "tab-anomaly",
-    ("requests", "switches"): "tab-monitor",
-    ("usage", None): "tab-usage",
-    ("routing", None): "tab-model-pools",
-    ("models", None): "tab-inference",
-    ("config", None): "tab-config",
-    ("config", "packs"): "tab-packs",
-    ("config", "auth"): "tab-security",
-    ("config", "connect"): "tab-connect",
-    ("config", "sys"): "tab-settings",
-    ("config", "cloud"): "tab-cloud",
-}
+# view+sub → 六区壳（恒等映射：同一 view 的所有子页共用壳）
+_ROUTE_TAB_MAP = {k: f"tab-{k[0]}" for k in _TAB_ROUTE_MAP.values()}
 
 _HARNESS = r"""
 const assert = require('node:assert/strict');
@@ -187,10 +173,13 @@ def test_route_tab_roundtrip(run_router):
     assert out["routeForTab"] == {"view": "routing", "sub": None}
     out = run_router({"call": {"routeForTab": "tab-deploy"}})
     assert out["routeForTab"] == {"view": "config", "sub": "packs"}
+    # A2：子页共享六区壳（恒等映射）；新 nav 壳 id（tab-<view>）直接可路由
     out = run_router({"call": {"tabForRoute": {"view": "requests", "sub": "anomalies"}}})
-    assert out["tabForRoute"] == "tab-anomaly"
+    assert out["tabForRoute"] == "tab-requests"
     out = run_router({"call": {"tabForRoute": {"view": "requests", "sub": None}}})
-    assert out["tabForRoute"] == "tab-monitor"
+    assert out["tabForRoute"] == "tab-requests"
+    out = run_router({"call": {"routeForTab": "tab-routing"}})
+    assert out["routeForTab"] == {"view": "routing", "sub": None}
 
 
 # ── 2. 启动解析：hash 优先 → iff_view → 旧键迁移 → status ──
@@ -198,20 +187,20 @@ def test_route_tab_roundtrip(run_router):
 def test_boot_hash_wins_over_storage(run_router):
     out = run_router({"hash": "#/models", "store": {},
                       "storage": {"data": {"iff_view": "usage"}}})
-    assert out["applied"] == ["tab-inference"]
+    assert out["applied"] == ["tab-models"]
     assert out["finalHash"] == "#/models"
 
 
 def test_boot_hash_params_preserved(run_router):
     out = run_router({"hash": "#/requests/switches?model=a", "store": {}})
-    assert out["applied"] == ["tab-monitor"]
+    assert out["applied"] == ["tab-requests"]
     assert out["finalHash"] == "#/requests/switches?model=a"
 
 
 def test_boot_restores_iff_view(run_router):
     out = run_router({"store": {},
                       "storage": {"data": {"iff_view": "requests/anomalies"}}})
-    assert out["applied"] == ["tab-anomaly"]
+    assert out["applied"] == ["tab-requests"]
     assert out["iff_view"] == "requests/anomalies"
     assert out["finalHash"] == "#/requests/anomalies"
 
@@ -228,7 +217,7 @@ def test_boot_migrates_legacy_active_tab_and_removes_old_key(run_router):
 
 def test_boot_defaults_to_status(run_router):
     out = run_router({"store": {}})
-    assert out["applied"] == ["tab-overview"]
+    assert out["applied"] == ["tab-status"]
     assert out["finalHash"] == "#/status"
 
 
@@ -236,26 +225,26 @@ def test_boot_defaults_to_status(run_router):
 
 def test_boot_invalid_stored_view_falls_back_to_status(run_router):
     out = run_router({"store": {}, "storage": {"data": {"iff_view": "bogus/zzz"}}})
-    assert out["applied"] == ["tab-overview"]
+    assert out["applied"] == ["tab-status"]
     assert out["finalHash"] == "#/status"
 
 
 def test_boot_invalid_sub_dropped_to_view_default(run_router):
     out = run_router({"store": {}, "storage": {"data": {"iff_view": "requests/bogus"}}})
-    assert out["applied"] == ["tab-monitor"]
+    assert out["applied"] == ["tab-requests"]
     assert out["finalHash"] == "#/requests"
 
 
 def test_boot_storage_unavailable_never_throws(run_router):
     out = run_router({"store": {}, "storage": {"throwOn": "get"}})
-    assert out["applied"] == ["tab-overview"]
+    assert out["applied"] == ["tab-status"]
     out = run_router({"store": {}, "storage": {"throwOn": "set"}})
-    assert out["applied"] == ["tab-overview"]
+    assert out["applied"] == ["tab-status"]
 
 
 def test_boot_hash_unknown_view_falls_back(run_router):
     out = run_router({"store": {}, "hash": "#/nope"})
-    assert out["applied"] == ["tab-overview"]
+    assert out["applied"] == ["tab-status"]
     assert out["finalHash"] == "#/status"
 
 
@@ -267,9 +256,9 @@ def test_navigate_updates_hash_and_persists_view(run_router):
     assert out["navigateResult"] is True
     assert out["finalHash"] == "#/requests/anomalies"
     assert out["iff_view"] == "requests/anomalies"
-    # boot 先应用默认区（tab-overview）；navigate 后目标 tab 恰好再应用一次
+    # boot 先应用默认区（tab-status）；navigate 后目标壳恰好再应用一次
     # （显式应用与浏览器随后派发的 hashchange 由幂等去重合并，无双渲染）
-    assert out["applied"] == ["tab-overview", "tab-anomaly"]
+    assert out["applied"] == ["tab-status", "tab-requests"]
 
 
 def test_navigate_locked_is_refused(run_router):
@@ -301,7 +290,7 @@ def test_hashchange_applies_and_does_not_loop(run_router):
                                                "#/status"]}})
     # 每次合法 hashchange 恰好应用一次目标 tab（boot 先应用 status 一次），无循环放大
     assert out["applyCounts"] == [2, 3, 4]
-    assert out["applied"] == ["tab-overview", "tab-monitor", "tab-anomaly", "tab-overview"]
+    assert out["applied"] == ["tab-status", "tab-requests", "tab-requests", "tab-status"]
 
 
 def test_navigate_params_never_persisted(run_router):
@@ -362,11 +351,11 @@ function makeEl(attrs) {
 }
 
 const panels = {
-  'tab-overview': makeEl(), 'tab-monitor': makeEl(), 'tab-anomaly': makeEl(),
+  'tab-status': makeEl(), 'tab-requests': makeEl(), 'tab-usage': makeEl(),
 };
-const btnOverview = makeEl({ 'data-tab': 'tab-overview' });
-const btnAnomaly = makeEl({ 'data-tab': 'tab-anomaly' });
-const navButtons = [btnOverview, btnAnomaly];
+const btnStatus = makeEl({ 'data-tab': 'tab-status' });
+const btnRequests = makeEl({ 'data-tab': 'tab-requests' });
+const navButtons = [btnStatus, btnRequests];
 const els = {
   'modeBadge': makeEl(), 'syncMeta': makeEl(), 'navVer': makeEl(),
   'apiErrorBanner': makeEl(), 'switchOverlay': makeEl(), 'switchOverlayMsg': makeEl(),
@@ -444,13 +433,13 @@ def test_store_switch_tab_routes_through_hash(run_store_router):
     out = run_store_router({"tab": "tab-anomaly"})
     assert out["hash"] == "#/requests/anomalies"
     assert out["iff_view"] == "requests/anomalies"
-    assert out["tab_active"] == "tab-anomaly"
-    assert out["activePanels"] == ["tab-anomaly"]
-    assert out["navCurrent"] == ["tab-anomaly"]
+    assert out["tab_active"] == "tab-requests"
+    assert out["activePanels"] == ["tab-requests"]
+    assert out["navCurrent"] == ["tab-requests"]
 
 
 def test_store_switch_tab_locked_is_refused(run_store_router):
     out = run_store_router({"tab": "tab-anomaly", "locked": True})
     assert out["hash"] == "#/status"          # boot 默认地址，未因点击而变
-    assert out["activePanels"] == ["tab-overview"]
+    assert out["activePanels"] == ["tab-status"]
     assert out["iff_view"] == "status"

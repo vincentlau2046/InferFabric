@@ -43,21 +43,14 @@
     'tab-cloud': { view: 'config', sub: 'cloud' },
   };
 
-  /* 路由 → 旧 DOM tab（A1 过渡期驱动既有装配；A2 收敛） */
+  /* 路由 → 六区壳 DOM（A2：映射收敛为恒等；子页由 store.applyTab 的 data-sub 显隐承担） */
   var ROUTE_TAB = {
-    'status': 'tab-overview',
-    'requests': 'tab-monitor',
-    'requests/anomalies': 'tab-anomaly',
-    'requests/switches': 'tab-monitor',
+    'status': 'tab-status',
+    'requests': 'tab-requests',
     'usage': 'tab-usage',
-    'routing': 'tab-model-pools',
-    'models': 'tab-inference',
+    'routing': 'tab-routing',
+    'models': 'tab-models',
     'config': 'tab-config',
-    'config/packs': 'tab-packs',
-    'config/auth': 'tab-security',
-    'config/connect': 'tab-connect',
-    'config/sys': 'tab-settings',
-    'config/cloud': 'tab-cloud',
   };
 
   /* ── 纯函数：hash ⇄ route ── */
@@ -101,16 +94,16 @@
   }
 
   function routeForTab(tabId) {
+    // A2：六区壳 id（tab-<view>）直接映射；其余走旧 tab 迁移表
+    if (typeof tabId === 'string' && tabId.indexOf('tab-') === 0) {
+      var v = tabId.slice(4);
+      if (VIEWS.indexOf(v) >= 0) return { view: v, sub: null };
+    }
     var r = LEGACY_TAB_ROUTE[tabId];
     return r ? { view: r.view, sub: r.sub } : null;
   }
 
   function tabForRoute(view, sub) {
-    if (sub !== null && sub !== undefined &&
-        SUBS[view] && SUBS[view].indexOf(sub) >= 0 &&
-        ROUTE_TAB[view + '/' + sub]) {
-      return ROUTE_TAB[view + '/' + sub];
-    }
     return ROUTE_TAB[view] || null;
   }
 
@@ -174,6 +167,9 @@
     var tab = tabForRoute(route.view, route.sub);
     persistRoute(route);
     try {
+      if (window.store && typeof window.store.setActiveView === 'function') {
+        window.store.setActiveView(route.view, route.sub);      // 视图组合先于 DOM 应用
+      }
       if (tab && window.store && typeof window.store.applyTab === 'function') {
         window.store.applyTab(tab);
       }

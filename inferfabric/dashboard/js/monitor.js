@@ -94,6 +94,11 @@
   }
 
   function isMonitorActive() {
+    // A2：monitor 内容组分布在 请求/用量/模型 三视图（VIEW_GROUPS），
+    // 以 store 视图组合判断；store 无该能力时退回旧 DOM 判断。
+    if (store && typeof store.isGroupActive === 'function') {
+      return store.isGroupActive('tab-monitor');
+    }
     var el = $('tab-monitor');
     return !!(el && el.classList.contains('active'));
   }
@@ -1297,9 +1302,9 @@
     if (isMonitorActive()) renderMonitor();
   });
 
-  store.on('tab_active', function (tab) {
-    if (tab === 'tab-monitor') {
-      // 切到 monitor tab：立即渲染（charts 可能需要 init）
+  store.on('tab_active', function () {
+    if (store.isGroupActive && store.isGroupActive('tab-monitor')) {
+      // 进入含 monitor 内容组的视图：立即渲染（charts 可能需要 init）
       renderMonitor();
       // 延迟卡 + 功耗卡：TTL 缓存命中即时画 / 过期触发 fetch 落地后重绘
       renderLatencyCards();
@@ -1309,12 +1314,12 @@
     }
   });
 
-  /* ── 事件委托：窗口/粒度切换（display filter，不触达服务端） ── */
-  var tabEl = $('tab-monitor');
-  if (tabEl) {
-    tabEl.addEventListener('click', function (ev) {
+  /* ── 事件委托：窗口/粒度切换（display filter，不触达服务端） ──
+   * A2：monitor 控件分布在用量/模型等视图壳内，委托范围提升为 document
+   * （.mon-seg-btn 全站唯一来源仍是本模块）。 */
+  document.addEventListener('click', function (ev) {
       var btn = ev.target.closest('.mon-seg-btn');
-      if (btn && tabEl.contains(btn)) {
+      if (btn) {
         var seg = btn.closest('.mon-seg');
         if (seg) {
           var segType = seg.getAttribute('data-seg');
@@ -1357,7 +1362,7 @@
       }
       // chip（不在 .mon-seg 内）
       var chip = ev.target.closest('.mon-lat-chip');
-      if (chip && tabEl.contains(chip)) {
+      if (chip) {
         var m = chip.getAttribute('data-model');
         var latData = getLatSeries(_latWin) || {};
         if (!_latSel) _latSel = _latSelected((latData.series || {}));
@@ -1367,8 +1372,7 @@
         renderLatencyCards();
         return;
       }
-    });
-  }
+  });
 
   /* ── 客户端 Agent 卡：粒度/范围 seg + 管理开关 + claim/删除事件 ── */
   document.querySelectorAll('[data-seg="aggran"] .mon-seg-btn').forEach(function (b) {

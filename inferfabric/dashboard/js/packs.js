@@ -32,7 +32,7 @@
   var URL_PREVIEW = '/admin/packs/uninstall-preview';
   var URL_UNINSTALL = '/admin/packs/uninstall';
   var URL_POLICY = '/admin/packs/policy';
-  var POLL_MS = 2000;
+  var POLL_MS = 3000;
   var RESERVE_MIN = 1024, RESERVE_MAX = 65536;   // POLICY_MEM_RANGE
 
   /* 阶段标签：与 packs/installer.py INSTALL_STAGES + failed 一一对应 */
@@ -369,7 +369,9 @@
   };
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab === 'tab-packs') {
+      var on = (store && typeof store.isGroupActive === 'function')
+        ? store.isGroupActive('tab-packs') : (tab === 'tab-packs');
+      if (on) {
         renderPacks(); loadCatalog(); loadPolicy(); startPoll();
       } else {
         stopPoll();

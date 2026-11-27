@@ -1431,7 +1431,9 @@
   window.tabRenderers['tab-cloud'] = renderCloud;
 
   store.on('tab_active', function (tab) {
-    if (tab === 'tab-cloud') renderCloud();
+    var on = (store && typeof store.isGroupActive === 'function')
+      ? store.isGroupActive('tab-cloud') : (tab === 'tab-cloud');
+    if (on) renderCloud();
   });
 
   /* ── 事件委托（无 inline onclick） ──
