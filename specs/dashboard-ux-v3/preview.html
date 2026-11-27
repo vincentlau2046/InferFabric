@@ -1,0 +1,934 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<title>InferFabric 控制台 v3</title>
+<!--
+  改版样机（示例数据）— 对应设计文档 specs/dashboard-ux-v3/design.md
+  布局概念：208px 文字侧栏 + 内容流(max 1180px)；状态页 = 态势条 → 2×2 卡网格；
+  组件语言：1px 边框、radius 12、零拟物阴影、状态语义色与图表系列色分离。
+  令牌（暖浅色默认，暖炭黑深色变体）：
+-->
+<style>
+:root{
+  --bg:#f5f3ee; --surface:#fdfcf9; --surface-2:#f0ede5;
+  --ink:#262117; --ink-2:#6d6555; --ink-3:#a09781;
+  --line:#e4dfd2; --line-strong:#d5cebd;
+  --accent:#b45a3c; --accent-strong:#a04829; --accent-ink:#fff7f2; --accent-soft:#f3e2d9;
+  --ok:#2e7d4f; --ok-bg:#e3f0e7; --warn:#9a6a10; --warn-bg:#f6ecd2;
+  --crit:#b3372b; --crit-bg:#f7e3de; --info:#2563eb; --info-bg:#e4ecfb;
+  --s1:#2563eb; --s2:#b45309;
+  --shadow:0 0 0 transparent;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#16130e; --surface:#1f1a13; --surface-2:#28211780;
+  --ink:#f0ebe0; --ink-2:#b5ac9a; --ink-3:#7f7663;
+  --line:#352d20; --line-strong:#4a4130;
+  --accent:#d98e6e; --accent-strong:#c97a58; --accent-ink:#241309; --accent-soft:#3a2519;
+  --ok:#7ccf9d; --ok-bg:#1c2b21; --warn:#e0a83f; --warn-bg:#2e2513;
+  --crit:#ef8b7d; --crit-bg:#331d18; --info:#7ba3f0; --info-bg:#1a2338;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#16130e; --surface:#1f1a13; --surface-2:#28211780;
+  --ink:#f0ebe0; --ink-2:#b5ac9a; --ink-3:#7f7663;
+  --line:#352d20; --line-strong:#4a4130;
+  --accent:#d98e6e; --accent-strong:#c97a58; --accent-ink:#241309; --accent-soft:#3a2519;
+  --ok:#7ccf9d; --ok-bg:#1c2b21; --warn:#e0a83f; --warn-bg:#2e2513;
+  --crit:#ef8b7d; --crit-bg:#331d18; --info:#7ba3f0; --info-bg:#1a2338;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:14px/1.55 -apple-system,"PingFang SC","Segoe UI","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+[hidden]{display:none!important}
+svg{display:block}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.num{font-variant-numeric:tabular-nums}
+
+/* ── 样机说明条 ── */
+.notebar{background:var(--surface-2);border-bottom:1px solid var(--line)}
+.notebar-in{padding:7px max(16px,env(safe-area-inset-left,0px)) 7px max(16px,env(safe-area-inset-right,0px));
+  font-size:12px;color:var(--ink-2);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.notebar b{color:var(--ink);font-weight:600}
+.notebar .tag{font-size:11px;padding:1px 8px;border:1px solid var(--line-strong);border-radius:99px;color:var(--ink-2)}
+
+/* ── 应用框架 ── */
+.app{display:grid;grid-template-columns:208px minmax(0,1fr);min-height:calc(100vh - 34px)}
+.side{border-right:1px solid var(--line);background:var(--surface);
+  padding:14px max(12px,env(safe-area-inset-left,0px)) 14px max(12px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:14px;position:sticky;top:0;height:fit-content;
+  min-height:calc(100vh - 34px);max-height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:9px;padding:2px 6px;font-weight:700;font-size:15px;letter-spacing:.2px}
+.brand .mark{width:26px;height:26px;border-radius:8px;background:var(--accent);color:var(--accent-ink);
+  display:grid;place-items:center;flex:none}
+.brand .mark svg{width:15px;height:15px}
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav button{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;
+  color:var(--ink-2);font-size:13.5px;text-align:left;transition:background .15s,color .15s}
+.nav button svg{width:17px;height:17px;flex:none}
+.nav button:hover{background:var(--surface-2);color:var(--ink)}
+.nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.side-foot{margin-top:auto;border-top:1px solid var(--line);padding-top:10px;display:flex;
+  flex-direction:column;gap:8px;font-size:12px;color:var(--ink-3)}
+.foot-row{display:flex;align-items:center;gap:7px;padding:0 6px}
+.foot-row .grow{flex:1}
+.dot{width:7px;height:7px;border-radius:99px;background:var(--ok);flex:none}
+.live-dot{width:7px;height:7px;border-radius:99px;background:var(--ok);flex:none;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent)}55%{box-shadow:0 0 0 5px transparent}}
+.theme-btn{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);
+  color:var(--ink-2);font-size:12px;transition:border-color .15s}
+.theme-btn:hover{border-color:var(--line-strong);color:var(--ink)}
+.theme-btn svg{width:13px;height:13px}
+
+.main{padding:20px max(24px,env(safe-area-inset-right,0px)) 48px max(24px,env(safe-area-inset-left,0px));min-width:0}
+.wrap{max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+
+/* ── 通用组件 ── */
+.view{display:flex;flex-direction:column;gap:16px;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:.4}to{opacity:1}}
+.page-h{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.page-h h1{margin:0;font-size:20px;font-weight:700;letter-spacing:.2px}
+.page-h .desc{color:var(--ink-2);font-size:13px;padding-bottom:2px}
+.page-h .grow{flex:1}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px 18px;min-width:0}
+.card-h{display:flex;align-items:baseline;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.card-h h2{margin:0;font-size:14px;font-weight:650}
+.card-h .hint{font-size:12px;color:var(--ink-3)}
+.card-h .grow{flex:1}
+.link{color:var(--accent);font-size:12.5px;font-weight:550}
+.link:hover{text-decoration:underline}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:8px;border:1px solid var(--line-strong);
+  font-size:13px;font-weight:550;color:var(--ink);background:var(--surface);transition:border-color .15s,background .15s}
+.btn:hover{border-color:var(--ink-3);background:var(--surface-2)}
+.btn svg{width:13px;height:13px}
+.btn.primary{background:var(--accent-strong);border-color:var(--accent-strong);color:var(--accent-ink)}
+.btn.primary:hover{background:var(--accent);border-color:var(--accent)}
+.btn.danger{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 35%,var(--line));background:transparent}
+.btn.danger:hover{background:var(--crit-bg)}
+.btn.sm{padding:3.5px 10px;font-size:12px;border-radius:7px}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:1.5px 9px;border-radius:99px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.pill::before{content:"";width:5.5px;height:5.5px;border-radius:99px;background:currentColor}
+.pill.ok{color:var(--ok);background:var(--ok-bg)}
+.pill.warn{color:var(--warn);background:var(--warn-bg)}
+.pill.crit{color:var(--crit);background:var(--crit-bg)}
+.pill.info{color:var(--info);background:var(--info-bg)}
+.pill.mute{color:var(--ink-3);background:var(--surface-2)}
+.pill.plain::before{display:none}
+.seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:2.5px;gap:2px}
+.seg button{padding:4px 12px;border-radius:6.5px;font-size:12.5px;color:var(--ink-2);font-weight:550;transition:all .15s}
+.seg button.on{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.06);font-weight:650}
+.select,.search{padding:5.5px 10px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);
+  color:var(--ink);font-size:12.5px}
+.search{min-width:180px}
+.switch{position:relative;width:34px;height:19px;border-radius:99px;background:var(--line-strong);transition:background .15s;flex:none}
+.switch::after{content:"";position:absolute;top:2.5px;left:3px;width:14px;height:14px;border-radius:99px;background:#fff;
+  transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.switch.on{background:var(--ok)}
+.switch.on::after{transform:translateX(14px)}
+.filerow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.filerow .grow{flex:1}
+.count-line{font-size:12.5px;color:var(--ink-2)}
+.count-line b{color:var(--ink);font-weight:650}
+.count-line .bad{color:var(--crit);font-weight:650}
+
+/* ── 表格 ── */
+.tblwrap{overflow-x:auto;margin:0 -18px;padding:0 18px}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+.tbl th{text-align:left;font-size:11px;font-weight:600;color:var(--ink-3);letter-spacing:.5px;
+  padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl td{padding:8.5px 10px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+.tbl tr:last-child td{border-bottom:0}
+.tbl tbody tr:hover{background:var(--surface-2)}
+.tbl .r{text-align:right;font-variant-numeric:tabular-nums}
+.tbl .dim{color:var(--ink-2)}
+.tbl .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px}
+tr.exp{cursor:pointer}
+tr.exp .chev{width:12px;height:12px;color:var(--ink-3);transition:transform .15s}
+tr.exp[aria-expanded="true"] .chev{transform:rotate(90deg)}
+tr.detail td{background:var(--surface-2);padding:12px 14px;white-space:normal}
+.kv{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-2)}
+.kv b{color:var(--ink);font-weight:600}
+.kv .k{color:var(--ink-3);margin-right:4px}
+
+/* ── 状态页 ── */
+.situation{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 18px}
+.situation .st{font-size:15px;font-weight:650;display:flex;align-items:center;gap:9px}
+.situation .st .seg-dot{width:9px;height:9px;border-radius:99px;background:var(--ok)}
+.situation .sub{color:var(--ink-2);font-size:13px}
+.situation .grow{flex:1}
+.situation .sync{font-size:12px;color:var(--ink-3);display:flex;align-items:center;gap:8px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.modelname{font-size:17px;font-weight:700;display:flex;align-items:center;gap:10px}
+.meta{display:flex;flex-direction:column;gap:7px;margin:12px 0 14px;font-size:13px;color:var(--ink-2)}
+.meta .row{display:flex;gap:8px}
+.meta .k{width:76px;color:var(--ink-3);flex:none}
+.meta b{color:var(--ink);font-weight:600}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.tele{display:grid;grid-template-columns:repeat(5,1fr);gap:14px}
+.tseg{display:flex;flex-direction:column;gap:5px;min-width:0}
+.tseg .l{font-size:11px;color:var(--ink-3);letter-spacing:.4px}
+.tseg .v{font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tseg .v small{font-size:11px;color:var(--ink-3);font-weight:500}
+.tbar{height:4px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.tbar i{display:block;height:100%;border-radius:99px;background:var(--s1)}
+.maint-row{display:flex;align-items:center;gap:11px;padding:9px 8px;border-radius:8px;width:100%;text-align:left;transition:background .15s}
+.maint-row:hover{background:var(--surface-2)}
+.maint-row svg{width:15px;height:15px;color:var(--ink-2);flex:none}
+.maint-row .t{font-size:13.5px;font-weight:550}
+.maint-row .d{font-size:12px;color:var(--ink-3)}
+.maint-row .grow{flex:1}
+.maint-row.is-crit .t,.maint-row.is-crit svg{color:var(--crit)}
+.mini-tbl{font-size:12.5px}
+.mini-tbl td{padding:6.5px 8px}
+
+/* ── 用量页 ── */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.kpi{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 15px;min-width:0}
+.kpi .l{font-size:11.5px;color:var(--ink-3);letter-spacing:.4px}
+.kpi .row{display:flex;align-items:flex-end;gap:10px;margin-top:3px}
+.kpi .v{font-size:24px;font-weight:700;letter-spacing:-.3px;font-variant-numeric:tabular-nums;line-height:1.15}
+.kpi .spark{margin-left:auto;color:var(--s1)}
+.kpi .sub{font-size:11.5px;color:var(--ink-3);margin-top:4px}
+.chart-card svg{width:100%;height:auto;display:block}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--ink-2);align-items:center}
+.legend i{width:9px;height:9px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
+.sharebar{width:90px;height:5px;border-radius:99px;background:var(--surface-2);display:inline-block;vertical-align:middle;margin-right:8px;overflow:hidden}
+.sharebar i{display:block;height:100%;background:var(--s1);border-radius:99px}
+
+/* ── 模型页 / 配置页 ── */
+.lamp{width:8px;height:8px;border-radius:99px;flex:none}
+.lamp.flowing{background:var(--ok)}
+.lamp.cooldown{background:var(--warn)}
+.lamp.fail{background:var(--crit)}
+.lamp.idle{background:var(--ink-3)}
+.lamp.unconfig{background:transparent;border:1.5px dashed var(--ink-3)}
+.strat{font-size:11px;padding:1.5px 8px;border:1px solid var(--line-strong);border-radius:99px;color:var(--ink-2);white-space:nowrap}
+.cand{display:flex;align-items:center;gap:9px;padding:7.5px 11px;border:1px solid var(--line);border-radius:9px;background:var(--surface);min-width:0;flex-wrap:wrap}
+.cand.active{border-color:color-mix(in srgb,var(--ok) 40%,var(--line));background:color-mix(in srgb,var(--ok) 6%,var(--surface))}
+.cand .pri{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:11px;color:var(--ink-3);width:26px;flex:none}
+.cand .tgt{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12.5px;font-weight:600}
+.cand .ops{display:flex;gap:4px}
+.cright{display:flex;align-items:center;gap:9px;margin-left:auto}
+.opbtn{width:21px;height:21px;border:1px solid var(--line);border-radius:6px;color:var(--ink-2);font-size:11px;display:grid;place-items:center;transition:all .15s;background:var(--surface)}
+.opbtn:hover{border-color:var(--ink-3);color:var(--ink)}
+.opbtn:disabled{opacity:.32;cursor:default}
+.opbtn:disabled:hover{border-color:var(--line);color:var(--ink-2)}
+.opbtn.del:hover{color:var(--crit);border-color:color-mix(in srgb,var(--crit) 45%,var(--line))}
+.proto{font-size:10px;padding:0 5px;border:1px solid var(--line);border-radius:4px;color:var(--ink-3);font-family:ui-monospace,Menlo,monospace}
+.dashbox{border:1.5px dashed var(--line-strong);border-radius:9px;padding:16px;text-align:center;color:var(--ink-3);font-size:12.5px}
+.tree-row{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid var(--line);font-size:12.5px;flex-wrap:wrap}
+.tree-row:last-child{border-bottom:0}
+.tree-row .gw{color:var(--ink-3)}
+.tnode{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border:1px solid var(--line);border-radius:99px;font-size:11.5px}
+.tnode.on{border-color:color-mix(in srgb,var(--ok) 40%,var(--line));background:color-mix(in srgb,var(--ok) 6%,var(--surface));font-weight:600}
+.tnode .pri{color:var(--ink-3);font-size:10px}
+.tarrow{color:var(--ink-3);font-size:11px}
+.sec-label{font-size:11.5px;color:var(--ink-3);letter-spacing:.6px;font-weight:650;margin:2px 0 -6px}
+.poolcard{display:flex;align-items:center;gap:14px;padding:11px 14px;border:1px solid var(--line);border-radius:10px}
+.poolcard .grow{flex:1;min-width:0}
+.poolcard .nm{font-size:13.5px;font-weight:650}
+.poolcard .ds{font-size:12px;color:var(--ink-3)}
+.stack{display:flex;flex-direction:column;gap:10px}
+.eng-strip{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.eng{background:var(--surface-2);border-radius:9px;padding:9px 12px}
+.eng .l{font-size:11px;color:var(--ink-3)}
+.eng .v{font-size:14.5px;font-weight:650;font-variant-numeric:tabular-nums;white-space:nowrap}
+.eng .v small{font-size:10.5px;color:var(--ink-3);font-weight:500}
+.cfg{display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;align-items:start}
+.subnav{display:flex;flex-direction:column;gap:2px;position:sticky;top:16px}
+.subnav button{text-align:left;padding:7px 11px;border-radius:8px;font-size:13px;color:var(--ink-2);transition:all .15s}
+.subnav button:hover{background:var(--surface-2);color:var(--ink)}
+.subnav button.on{background:var(--accent-soft);color:var(--accent);font-weight:650}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{border:1px solid var(--line-strong);border-radius:9px;padding:7px 13px;font-size:12.5px;color:var(--ink-2);background:var(--surface);transition:all .15s}
+.chip:hover{border-color:var(--ink-3);color:var(--ink)}
+.chip.set{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));color:var(--ok);font-weight:600}
+.list-row{display:flex;align-items:center;gap:12px;padding:10px 4px;border-bottom:1px solid var(--line)}
+.list-row:last-child{border-bottom:0}
+.list-row .t{font-size:13.5px;font-weight:600}
+.list-row .d{font-size:12px;color:var(--ink-3)}
+.list-row .grow{flex:1;min-width:0}
+
+/* ── 悬浮提示 ── */
+#tip{position:fixed;z-index:50;background:var(--ink);color:var(--bg);border-radius:8px;padding:7px 11px;
+  font-size:12px;pointer-events:none;opacity:0;transition:opacity .12s;max-width:240px;font-variant-numeric:tabular-nums}
+#tip.show{opacity:1}
+
+/* ── 响应式 ── */
+@media (max-width:960px){
+  .grid2{grid-template-columns:1fr}
+  .kpis{grid-template-columns:1fr 1fr}
+  .tele{grid-template-columns:repeat(3,1fr)}
+  .eng-strip{grid-template-columns:repeat(3,1fr)}
+}
+@media (max-width:860px){
+  .app{grid-template-columns:1fr;min-height:0}
+  .side{position:sticky;top:0;z-index:20;flex-direction:row;align-items:center;gap:10px;
+    padding:9px max(12px,env(safe-area-inset-left,0px));max-height:none;overflow:visible;border-right:0;border-bottom:1px solid var(--line)}
+  .brand{padding:0 2px;font-size:14px}
+  .nav{flex-direction:row;overflow-x:auto;gap:2px;scrollbar-width:none}
+  .nav::-webkit-scrollbar{display:none}
+  .nav button{padding:6px 10px;white-space:nowrap}
+  .side-foot{margin:0;border:0;padding:0;flex-direction:row;align-items:center}
+  .foot-row .ver{display:none}
+  .cfg{grid-template-columns:1fr}
+  .subnav{position:static;flex-direction:row;overflow-x:auto;scrollbar-width:none}
+  .subnav::-webkit-scrollbar{display:none}
+  .main{padding:16px max(16px,env(safe-area-inset-right,0px)) 40px max(16px,env(safe-area-inset-left,0px))}
+}
+@media (prefers-reduced-motion: reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+
+<div class="notebar"><div class="notebar-in">
+  <b>InferFabric 控制台 v3 · 改版样机</b><span>示例数据，仅示意方案</span>
+  <span class="tag">2026-11-27</span><span class="tag">specs/dashboard-ux-v3/design.md</span>
+  <span style="margin-left:auto" class="tag">侧栏可点击 · 共 6 区</span>
+</div></div>
+
+<div class="app">
+  <!-- ══ 侧栏 ══ -->
+  <aside class="side">
+    <div class="brand"><span class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M13 5l-6 8h4l-1 6 6-8h-4l1-6z" fill="currentColor"/></svg></span>InferFabric</div>
+    <nav class="nav" id="nav">
+      <button data-view="status" title="状态"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="18" height="18" rx="4"/><path d="M5.5 12.5l3-3.5 3 4 2.5-5 2.5 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg><span>状态</span></button>
+      <button data-view="requests" title="请求"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8.5 5.5H19M8.5 11H19M8.5 16.5H19"/><circle cx="4.2" cy="5.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.2" cy="11" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.2" cy="16.5" r="1.1" fill="currentColor" stroke="none"/></svg><span>请求</span></button>
+      <button data-view="usage" title="用量"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 19h16M5 16V9m4 7V5m4 11v-5m4 5V8"/></svg><span>用量</span></button>
+      <button data-view="routing" title="路由"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5v11.3"/><circle cx="15.5" cy="6" r="2.4"/><circle cx="7" cy="17.5" r="2.4"/><path d="M15.5 8.4a7.6 7.6 0 0 1-7.4 8.1"/></svg><span>路由</span></button>
+      <button data-view="models" title="模型"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M11 2l7 4.5v9L11 20l-7-4.5v-9L11 2z"/><path d="M11 11l7-4.5M11 11v9M11 11l-7-4.5"/></svg><span>模型</span></button>
+      <button data-view="config" title="配置"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="3"/><path d="M11 2v2.5m0 13V20m9-9h-2.5m-13 0H2m15.5-4.5l-1.8 1.8M6.3 12.7l-1.8 1.8m12.5 0l-1.8-1.8M7.5 9.3L5.7 7.5" stroke-linecap="round"/></svg><span>配置</span></button>
+    </nav>
+    <div class="side-foot">
+      <div class="foot-row"><span class="dot"></span><span class="grow">网关运行中</span>
+        <button class="theme-btn" id="themeBtn" title="切换深浅色"><svg id="themeIco" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M15 4a8 8 0 1 0 3 13 6 6 0 0 1-3-13z" stroke-linejoin="round"/></svg><span id="themeTxt">深色</span></button>
+      </div>
+      <div class="foot-row ver num">v7.13.0 · rev 2da34c2d</div>
+    </div>
+  </aside>
+
+  <!-- ══ 主区 ══ -->
+  <main class="main"><div class="wrap">
+
+  <!-- ════ 视图：状态 ════ -->
+  <section class="view" id="view-status">
+    <div class="situation">
+      <span class="st"><span class="seg-dot"></span>运行中</span>
+      <span class="sub num">qwen36-27b · 今日 <b class="num" style="color:var(--ink)">1,284</b> 请求 · <span style="color:var(--warn)">2 warning</span> · 电费 ¥1.02</span>
+      <span class="grow"></span>
+      <span class="sync num">已同步 16:02:41
+        <button class="theme-btn" title="立即刷新"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M17 8a6 6 0 1 0 1.2 5.5M17 4.5v3.2h-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </span>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="card-h"><h2>当前模型</h2><span class="pill ok">运行中</span><span class="grow"></span><button class="link">切换 ›</button></div>
+        <div class="modelname num">qwen36-27b</div>
+        <div class="meta">
+          <div class="row"><span class="k">引擎</span><b>NInfer</b><span class="num">· 端口 8007</span></div>
+          <div class="row"><span class="k">量化</span><span class="num">NVFP4 权重 + NVFP4 KV cache · MTP ×4</span></div>
+          <div class="row"><span class="k">已运行</span><b class="num">2h 14m</b><span>· 由空闲切换而来（51.2s）</span></div>
+        </div>
+        <div class="acts">
+          <button class="btn primary">切换模型</button>
+          <button class="btn">休眠</button>
+          <button class="btn danger">停止</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>硬件遥测</h2><span class="hint">RTX 5090D</span><span class="grow"></span><span class="hint num">3s 轮询</span></div>
+        <div class="tele">
+          <div class="tseg"><span class="l">VRAM</span><span class="v">18.6<small> / 28 GB</small></span><div class="tbar"><i style="width:66%"></i></div></div>
+          <div class="tseg"><span class="l">利用率</span><span class="v">62<small>%</small></span><div class="tbar"><i style="width:62%"></i></div></div>
+          <div class="tseg"><span class="l">功耗</span><span class="v">285<small> W</small></span><div class="tbar"><i style="width:57%"></i></div></div>
+          <div class="tseg"><span class="l">温度</span><span class="v">71<small> °C</small></span><div class="tbar"><i style="width:71%"></i></div></div>
+          <div class="tseg"><span class="l">时钟</span><span class="v">2.61<small> GHz</small></span><div class="tbar"><i style="width:74%"></i></div></div>
+        </div>
+        <div style="margin-top:13px;font-size:12px;color:var(--ink-3)">本机无 GPU 时，此卡自动降级为网关健康卡（统一内存 / 在线时长 / 版本）。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>最近请求</h2><span class="live-dot"></span><span class="grow"></span><button class="link" onclick="go('requests')">查看全部 ›</button></div>
+        <div class="tblwrap mini-tbl"><table class="tbl" style="min-width:0">
+          <tbody>
+            <tr><td class="num dim">16:02:37</td><td class="num">qwen36-27b</td><td><span class="pill ok">200</span></td><td class="r num">19.0s</td><td class="dim">Claude Code</td></tr>
+            <tr><td class="num dim">16:01:58</td><td class="num">qwen36-27b</td><td><span class="pill ok">200</span></td><td class="r num">8.3s</td><td class="dim">Claude Code</td></tr>
+            <tr><td class="num dim">16:00:12</td><td class="num">glm-5</td><td><span class="pill warn">429</span></td><td class="r num">0.1s</td><td class="dim">Codex</td></tr>
+            <tr><td class="num dim">15:58:44</td><td class="num">gpt-6.2-sol</td><td><span class="pill ok">200</span></td><td class="r num">25.1s</td><td class="dim">云端</td></tr>
+            <tr><td class="num dim">15:57:31</td><td class="num">qwen36-27b</td><td><span class="pill crit">503</span></td><td class="r num">0.2s</td><td class="dim">切换中</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>维护</h2><span class="hint">低频操作，已收纳</span></div>
+        <button class="maint-row"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 10V7a3 3 0 0 1 5.5-1.6" stroke-linecap="round"/><rect x="5" y="10" width="12" height="9" rx="1.5"/><path d="M11 13.5v3" stroke-linecap="round"/></svg><span><span class="t">释放 GPU</span><div class="d">清理 CUDA 残留显存（碎片整理）</div></span></button>
+        <button class="maint-row"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 8a6 6 0 1 0 1.2 5.5M17 4.5v3.2h-3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><span class="t">对账</span><div class="d">核对 state.db 与实际进程，修正漂移</div></span></button>
+        <button class="maint-row"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M11 7v5m0 3.5v.5"/><circle cx="11" cy="11" r="9"/></svg><span><span class="t">重载配置</span><div class="d">热加载 models.d 与网关参数</div></span></button>
+        <button class="maint-row is-crit"><svg viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 8l6 6m0-6l-6 6"/><circle cx="11" cy="11" r="8"/></svg><span><span class="t">强制重置</span><div class="d">停止全部模型，回到 idle（需确认）</div></span></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════ 视图：请求 ════ -->
+  <section class="view" id="view-requests" hidden>
+    <div class="page-h"><h1>请求</h1><span class="desc">发生过什么：请求日志、切换历史、异常事件</span></div>
+
+    <div class="seg" id="reqSub">
+      <button class="on" data-sub="log">请求</button>
+      <button data-sub="switch">切换历史</button>
+      <button data-sub="anom">异常 <span class="pill warn plain" style="padding:0 6px;margin-left:2px">17</span></button>
+    </div>
+
+    <div class="card" id="sub-log">
+      <div class="filerow">
+        <div class="seg" id="rangeSeg"><button data-r="1h">1h</button><button class="on" data-r="24h">24h</button><button data-r="7d">7d</button></div>
+        <select class="select"><option>全部状态</option><option>仅失败</option><option>2xx</option><option>4xx / 5xx</option></select>
+        <select class="select"><option>全部模型</option><option>qwen36-27b</option><option>qwen35-9b</option><option>云端</option></select>
+        <input class="search" placeholder="搜索客户端或请求 id">
+        <span class="grow"></span>
+        <span class="count-line"><span class="live-dot" style="display:inline-block;vertical-align:1px"></span> Live · <b class="num">1,284</b> 条 · <span class="bad num">37 失败</span></span>
+        <button class="btn sm">列 ▾</button>
+      </div>
+      <div class="tblwrap" style="margin-top:10px"><table class="tbl" style="min-width:860px">
+        <thead><tr><th></th><th>时间</th><th>状态</th><th>模型</th><th>协议</th><th>客户端</th><th class="r">Tokens</th><th class="r">耗时</th><th class="r">缓存</th></tr></thead>
+        <tbody>
+          <tr class="exp" aria-expanded="true"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">16:02:37</td><td><span class="pill ok">200</span></td><td class="num">qwen36-27b</td><td class="dim">OpenAI</td><td>Claude Code</td><td class="r num">37.6K</td><td class="r num">19.0s</td><td class="r num">89%</td></tr>
+          <tr class="detail"><td colspan="9"><div class="kv">
+            <span><span class="k">路由</span><b>本地 → 127.0.0.1:8007</b></span>
+            <span><span class="k">重试</span><b>0</b></span>
+            <span><span class="k">请求 id</span><b class="mono">iff-9f3ac2e1</b></span>
+            <span><span class="k">缓存</span><b>命中（temperature=0）</b></span>
+            <span><span class="k">异常关联</span><b>无</b></span>
+          </div></td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">16:01:58</td><td><span class="pill ok">200</span></td><td class="num">qwen36-27b</td><td class="dim">Anthropic</td><td>Claude Code</td><td class="r num">12.1K</td><td class="r num">8.3s</td><td class="r num">91%</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">16:00:12</td><td><span class="pill warn">429</span></td><td class="num">glm-5</td><td class="dim">OpenAI</td><td>Codex</td><td class="r num">—</td><td class="r num">0.1s</td><td class="r num">—</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:58:44</td><td><span class="pill ok">200</span></td><td class="num">gpt-6.2-sol</td><td class="dim">OpenAI</td><td>ocx-agent</td><td class="r num">41.2K</td><td class="r num">25.1s</td><td class="r num">—</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:57:31</td><td><span class="pill crit">503</span></td><td class="num">qwen36-27b</td><td class="dim">OpenAI</td><td>Claude Code</td><td class="r num">—</td><td class="r num">0.2s</td><td class="r num">—</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:57:02</td><td><span class="pill ok">200</span></td><td class="num">qwen35-9b</td><td class="dim">OpenAI</td><td>脚本</td><td class="r num">2.8K</td><td class="r num">1.9s</td><td class="r num">64%</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:55:19</td><td><span class="pill warn">401</span></td><td class="num">—</td><td class="dim">Anthropic</td><td>未知</td><td class="r num">—</td><td class="r num">0.05s</td><td class="r num">—</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:54:50</td><td><span class="pill ok">200</span></td><td class="num">glm-5</td><td class="dim">OpenAI</td><td>Codex</td><td class="r num">22.4K</td><td class="r num">12.7s</td><td class="r num">—</td></tr>
+          <tr class="exp" aria-expanded="false"><td><svg class="chev" viewBox="0 0 22 22" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 5l7 6-7 6" stroke-linecap="round" stroke-linejoin="round"/></svg></td><td class="num dim">15:53:08</td><td><span class="pill ok">200</span></td><td class="num">qwen36-27b</td><td class="dim">OpenAI</td><td>Claude Code</td><td class="r num">55.9K</td><td class="r num">31.4s</td><td class="r num">87%</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="card" id="sub-switch" hidden>
+      <div class="card-h"><h2>切换历史</h2><span class="hint">模型启停与切换记录</span></div>
+      <div class="tblwrap"><table class="tbl" style="min-width:560px">
+        <thead><tr><th>时间</th><th>来源 → 目标</th><th class="r">耗时</th><th>结果</th></tr></thead>
+        <tbody>
+          <tr><td class="num dim">15:57:04</td><td class="num">idle → qwen36-27b</td><td class="r num">51.2s</td><td><span class="pill ok">完成</span></td></tr>
+          <tr><td class="num dim">15:12:01</td><td class="num">qwen35-9b → idle</td><td class="r num">6.1s</td><td><span class="pill ok">完成</span></td></tr>
+          <tr><td class="num dim">14:48:33</td><td class="num">qwen36-27b → qwen35-9b</td><td class="r num">22.8s</td><td><span class="pill ok">完成</span></td></tr>
+          <tr><td class="num dim">11:02:11</td><td class="num">idle → qwen36-27b</td><td class="r num">49.5s</td><td><span class="pill ok">完成</span></td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div id="sub-anom" hidden style="display:flex;flex-direction:column;gap:16px">
+      <div class="card">
+        <div class="card-h"><h2>按严重度</h2><span class="hint">点击应用过滤</span></div>
+        <div class="kpis" style="grid-template-columns:repeat(4,1fr)">
+          <div class="kpi"><div class="l">INFO</div><div class="row"><span class="v num">30</span></div><div class="sub">近 24h</div></div>
+          <div class="kpi"><div class="l">WARNING</div><div class="row"><span class="v num" style="color:var(--warn)">12</span></div><div class="sub">近 24h</div></div>
+          <div class="kpi"><div class="l">ERROR</div><div class="row"><span class="v num">3</span></div><div class="sub">近 24h</div></div>
+          <div class="kpi"><div class="l">CRITICAL</div><div class="row"><span class="v num" style="color:var(--crit)">2</span></div><div class="sub">近 24h</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>结构化事件</h2><span class="grow"></span><input class="search" style="min-width:150px" placeholder="搜索事件"></div>
+        <div class="tblwrap"><table class="tbl" style="min-width:640px">
+          <thead><tr><th>时间</th><th>严重度</th><th>类别</th><th>消息</th></tr></thead>
+          <tbody>
+            <tr><td class="num dim">15:35:02</td><td><span class="pill warn">warning</span></td><td class="dim">route</td><td>Unknown model 'claude-sonnet-5-5' — rejected: no match in served_names or cloud_models</td></tr>
+            <tr><td class="num dim">15:21:47</td><td><span class="pill warn">warning</span></td><td class="dim">ratelimit</td><td>客户端 Codex 触发 RPM 限流（429），窗口 60s</td></tr>
+            <tr><td class="num dim">14:02:11</td><td><span class="pill crit">critical</span></td><td class="dim">engine</td><td>qwen35-9b 健康检查连续 3 次失败，watchdog 已自动重启</td></tr>
+            <tr><td class="num dim">09:44:26</td><td><span class="pill mute">info</span></td><td class="dim">config</td><td>models.d 热加载完成，2 个模型定义变更</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════ 视图：用量 ════ -->
+  <section class="view" id="view-usage" hidden>
+    <div class="page-h"><h1>用量</h1><span class="desc">花了多少：一个时间范围驱动全页</span><span class="grow"></span>
+      <div class="seg" id="usageRange"><button data-r="24h">24h</button><button class="on" data-r="7d">7d</button><button data-r="30d">30d</button></div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="l">请求</div><div class="row"><span class="v num">6,930</span><span class="spark" data-spark="req"></span></div><div class="sub">近 7 天 · 日均 990</div></div>
+      <div class="kpi"><div class="l">Tokens</div><div class="row"><span class="v num">412.7M</span><span class="spark" data-spark="tok"></span></div><div class="sub">In 389M · Out 23.7M</div></div>
+      <div class="kpi"><div class="l">估算成本</div><div class="row"><span class="v num">¥18.66</span><span class="spark" data-spark="cost" data-color="s2"></span></div><div class="sub">本地电费 + 云端 API 计费</div></div>
+      <div class="kpi"><div class="l">缓存命中</div><div class="row"><span class="v num">81%</span><span class="spark" data-spark="cache"></span></div><div class="sub">temperature=0 请求</div></div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="card-h"><h2>每日 Token</h2><span class="hint">按执行位置堆叠</span><span class="grow"></span>
+        <div class="legend"><span><i style="background:var(--s1)"></i>本地</span><span><i style="background:var(--s2)"></i>云端</span></div>
+      </div>
+      <div id="usageBars"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>按模型分解</h2><span class="hint">近 7 天</span></div>
+      <div class="tblwrap"><table class="tbl" style="min-width:760px">
+        <thead><tr><th>模型</th><th>来源</th><th>份额</th><th class="r">Tokens</th><th class="r">请求</th><th class="r">成本</th><th class="r">TTFT P50</th><th class="r">TTFT P95</th></tr></thead>
+        <tbody>
+          <tr><td class="num">qwen36-27b</td><td><span class="pill info plain" style="padding:1px 8px">本地</span></td><td><span class="sharebar"><i style="width:53%"></i></span><span class="num">53%</span></td><td class="r num">218.7M</td><td class="r num">3,672</td><td class="r num">¥3.10</td><td class="r num">0.21s</td><td class="r num">0.48s</td></tr>
+          <tr><td class="num">glm-5</td><td><span class="pill warn plain" style="padding:1px 8px">云端</span></td><td><span class="sharebar"><i style="width:31%"></i></span><span class="num">31%</span></td><td class="r num">128.0M</td><td class="r num">2,141</td><td class="r num">¥11.20</td><td class="r num">0.84s</td><td class="r num">1.90s</td></tr>
+          <tr><td class="num">qwen35-9b</td><td><span class="pill info plain" style="padding:1px 8px">本地</span></td><td><span class="sharebar"><i style="width:11%"></i></span><span class="num">11%</span></td><td class="r num">45.4M</td><td class="r num">806</td><td class="r num">¥0.41</td><td class="r num">0.12s</td><td class="r num">0.30s</td></tr>
+          <tr><td class="num">gpt-6.2-sol</td><td><span class="pill warn plain" style="padding:1px 8px">云端</span></td><td><span class="sharebar"><i style="width:5%"></i></span><span class="num">5%</span></td><td class="r num">20.6M</td><td class="r num">311</td><td class="r num">¥3.95</td><td class="r num">1.20s</td><td class="r num">2.80s</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2>按客户端</h2><span class="hint">agent 认领</span></div>
+      <div class="list-row"><span class="t">Claude Code</span><span class="grow"><span class="sharebar" style="width:180px"><i style="width:68%"></i></span></span><span class="num dim">4,712 请求</span><span class="num">68%</span></div>
+      <div class="list-row"><span class="t">Codex</span><span class="grow"><span class="sharebar" style="width:180px"><i style="width:27%"></i></span></span><span class="num dim">1,871 请求</span><span class="num">27%</span></div>
+      <div class="list-row"><span class="t" style="color:var(--ink-2)">未识别</span><span class="grow"><span class="sharebar" style="width:180px"><i style="width:5%;background:var(--ink-3)"></i></span></span><span class="num dim">347 请求</span><button class="btn sm">认领</button></div>
+    </div>
+  </section>
+
+  <!-- ════ 视图：路由 ════ -->
+  <section class="view" id="view-routing" hidden>
+    <div class="page-h"><h1>路由</h1><span class="desc">模型池与候选链：调候选、改顺序，对全部 agent 即时生效</span><span class="grow"></span>
+      <div class="seg" id="routeView"><button class="on" data-v="cards">卡片</button><button data-v="tree">链路树</button></div></div>
+
+    <div id="routeCards" style="display:flex;flex-direction:column;gap:16px">
+    <span class="sec-label">模型池 · 客户端指向 fabric-〈角色〉逻辑名</span>
+    <div class="card">
+      <div class="card-h" style="margin-bottom:10px">
+        <span class="lamp flowing"></span><h2 class="num">fabric-flash</h2>
+        <span style="font-size:12px;color:var(--ok);font-weight:600">调用中</span>
+        <span class="strat" title="候选按优先级依次回退">按序回退</span>
+        <span class="grow"></span><span class="hint">快速响应 — 日常对话与轻任务</span>
+        <button class="switch on" role="switch" aria-checked="true" aria-label="启用 fabric-flash"></button>
+      </div>
+      <div class="stack">
+        <div class="cand active">
+          <span class="pri">P10</span><span class="tgt">qwen36-27b</span>
+          <span class="pill ok" style="padding:0 8px;font-size:10.5px">调用中</span>
+          <span class="proto">openai</span><span class="proto">anthropic</span>
+          <span class="dim num" style="font-size:11.5px">本地 :8007 · NVFP4+MTP</span>
+          <span class="cright"><span class="spark" data-spark="latA"></span><span class="num dim" style="font-size:11.5px">TTFT 210ms</span>
+            <span class="ops"><button class="opbtn" disabled title="已在链首">↑</button><button class="opbtn" title="下移（降低优先级）">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+        <div class="cand">
+          <span class="pri">P20</span><span class="tgt">qwen35-9b</span>
+          <span class="pill warn" style="padding:0 8px;font-size:10.5px">冷却中</span>
+          <span class="proto">openai</span>
+          <span class="dim num" style="font-size:11.5px">本地 :8009 · GPTQ-4bit · 休眠</span>
+          <span class="cright"><span class="spark" data-spark="latB"></span><span class="num dim" style="font-size:11.5px">TTFT 120ms</span>
+            <span class="ops"><button class="opbtn" title="上移（提高优先级）">↑</button><button class="opbtn" title="下移（降低优先级）">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+        <div class="cand">
+          <span class="pri">P30</span><span class="tgt">glm-5</span>
+          <span class="proto">openai</span><span class="proto">anthropic</span>
+          <span class="dim num" style="font-size:11.5px">云 DeepSeek · 空闲</span>
+          <span class="cright"><span class="spark" data-spark="latC" data-color="s2"></span><span class="num dim" style="font-size:11.5px">TTFT 840ms</span>
+            <span class="ops"><button class="opbtn" title="上移（提高优先级）">↑</button><button class="opbtn" disabled title="已在链尾">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+      </div>
+      <div style="margin-top:11px;display:flex;gap:8px;align-items:center"><button class="btn sm">+ 添加候选</button><button class="btn sm">编辑池</button><span class="grow"></span><span class="hint num">revision 88 · CAS 防冲突</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h" style="margin-bottom:10px">
+        <span class="lamp idle"></span><h2 class="num">fabric-max</h2>
+        <span style="font-size:12px;color:var(--ink-3);font-weight:600">空闲</span>
+        <span class="strat" title="仅使用首选候选，不自动回退">仅首选</span>
+        <span class="grow"></span><span class="hint">旗舰质量 — 复杂推理与长文</span>
+        <button class="switch on" role="switch" aria-checked="true" aria-label="启用 fabric-max"></button>
+      </div>
+      <div class="stack">
+        <div class="cand">
+          <span class="pri">P10</span><span class="tgt">qwen36-27b</span>
+          <span class="proto">openai</span><span class="proto">anthropic</span>
+          <span class="dim num" style="font-size:11.5px">本地 :8007 · 运行中</span>
+          <span class="cright"><span class="num dim" style="font-size:11.5px">TTFT 210ms</span>
+            <span class="ops"><button class="opbtn" disabled title="已在链首">↑</button><button class="opbtn" title="下移（降低优先级）">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+        <div class="cand">
+          <span class="pri">P20</span><span class="tgt">gemma4-31b-vl</span>
+          <span class="proto">openai</span>
+          <span class="dim num" style="font-size:11.5px">本地 :8005 · NVFP4 · 未运行</span>
+          <span class="cright">
+            <span class="ops"><button class="opbtn" title="上移（提高优先级）">↑</button><button class="opbtn" disabled title="已在链尾">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+      </div>
+      <div style="margin-top:11px;display:flex;gap:8px"><button class="btn sm">+ 添加候选</button><button class="btn sm">编辑池</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h" style="margin-bottom:10px">
+        <span class="lamp idle"></span><h2 class="num">fabric-lite</h2>
+        <span style="font-size:12px;color:var(--ink-3);font-weight:600">空闲</span>
+        <span class="strat" title="候选按优先级依次回退">按序回退</span>
+        <span class="grow"></span><span class="hint">轻量任务 — 分类 / 抽取 / 批量</span>
+        <button class="switch on" role="switch" aria-checked="true" aria-label="启用 fabric-lite"></button>
+      </div>
+      <div class="stack">
+        <div class="cand">
+          <span class="pri">P10</span><span class="tgt">qwen35-9b</span>
+          <span class="pill warn" style="padding:0 8px;font-size:10.5px">冷却中</span>
+          <span class="proto">openai</span>
+          <span class="dim num" style="font-size:11.5px">本地 :8009 · 休眠</span>
+          <span class="cright">
+            <span class="ops"><button class="opbtn" disabled title="已在链首">↑</button><button class="opbtn" title="下移（降低优先级）">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+        <div class="cand">
+          <span class="pri">P20</span><span class="tgt">glm-5</span>
+          <span class="proto">openai</span>
+          <span class="dim num" style="font-size:11.5px">云 DeepSeek · 空闲</span>
+          <span class="cright">
+            <span class="ops"><button class="opbtn" title="上移（提高优先级）">↑</button><button class="opbtn" disabled title="已在链尾">↓</button><button class="opbtn del" title="移出候选">✕</button></span></span>
+        </div>
+      </div>
+      <div style="margin-top:11px;display:flex;gap:8px"><button class="btn sm">+ 添加候选</button><button class="btn sm">编辑池</button></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h" style="margin-bottom:10px">
+        <span class="lamp unconfig"></span><h2 class="num">fabric-classifier</h2>
+        <span class="pill mute" style="padding:0 8px;font-size:10.5px">未配置</span>
+        <span class="grow"></span><span class="hint">分类判别 — 路由 / 打标 / 判别</span>
+        <button class="switch" role="switch" aria-checked="false" aria-label="启用 fabric-classifier"></button>
+      </div>
+      <div class="dashbox">尚未添加候选 — 添加后客户端即可指向 fabric-classifier</div>
+      <div style="margin-top:11px;display:flex;gap:8px"><button class="btn sm primary">+ 添加候选</button><button class="btn sm">编辑池</button></div>
+    </div>
+    </div>
+
+    <div class="card" id="routeTree" hidden>
+      <div class="card-h"><h2>调用链路</h2><span class="hint">:8999 → fabric-〈角色〉 → 候选链（在役高亮）</span></div>
+      <div class="tree-row"><span class="gw num">:8999</span><span class="tarrow">→</span><span class="num" style="font-weight:650">fabric-flash</span><span class="tarrow">→</span>
+        <span class="tnode on"><span class="lamp flowing" style="width:6px;height:6px"></span><span class="num">qwen36-27b</span><span class="pri">P10</span></span>
+        <span class="tnode"><span class="lamp cooldown" style="width:6px;height:6px"></span><span class="num">qwen35-9b</span><span class="pri">P20</span></span>
+        <span class="tnode"><span class="lamp idle" style="width:6px;height:6px"></span><span class="num">glm-5</span><span class="pri">P30</span></span></div>
+      <div class="tree-row"><span class="gw num">:8999</span><span class="tarrow">→</span><span class="num" style="font-weight:650">fabric-max</span><span class="tarrow">→</span>
+        <span class="tnode on"><span class="lamp flowing" style="width:6px;height:6px"></span><span class="num">qwen36-27b</span><span class="pri">P10</span></span>
+        <span class="tnode"><span class="lamp idle" style="width:6px;height:6px"></span><span class="num">gemma4-31b-vl</span><span class="pri">P20</span></span></div>
+      <div class="tree-row"><span class="gw num">:8999</span><span class="tarrow">→</span><span class="num" style="font-weight:650">fabric-lite</span><span class="tarrow">→</span>
+        <span class="tnode"><span class="lamp cooldown" style="width:6px;height:6px"></span><span class="num">qwen35-9b</span><span class="pri">P10</span></span>
+        <span class="tnode"><span class="lamp idle" style="width:6px;height:6px"></span><span class="num">glm-5</span><span class="pri">P20</span></span></div>
+      <div class="tree-row"><span class="gw num">:8999</span><span class="tarrow">→</span><span class="num" style="font-weight:650">fabric-classifier</span><span class="tarrow">→</span>
+        <span class="dim" style="font-size:12px">未配置</span></div>
+      <div style="margin-top:11px;font-size:12px;color:var(--ink-3)">链路树复用现网调用树渲染（:8999 → fabric-〈角色〉 → 候选链）；实现时可作为路由页的常备视图切换。</div>
+    </div>
+  </section>
+
+  <!-- ════ 视图：模型 ════ -->
+  <section class="view" id="view-models" hidden>
+    <div class="page-h"><h1>模型</h1><span class="desc">本地与云端模型清单；池调序与回退在 路由</span><span class="grow"></span>
+      <button class="btn" onclick="go('config')">部署新模型 ›</button></div>
+
+    <div class="eng-strip">
+      <div class="eng"><div class="l">KV Cache</div><div class="v num">615K <small>tokens</small></div></div>
+      <div class="eng"><div class="l">上下文</div><div class="v num">32K</div></div>
+      <div class="eng"><div class="l">TPOT</div><div class="v num">18 <small>ms</small></div></div>
+      <div class="eng"><div class="l">TTFT</div><div class="v num">210 <small>ms</small></div></div>
+      <div class="eng"><div class="l">吞吐</div><div class="v num">96 <small>tok/s</small></div></div>
+    </div>
+
+    <span class="sec-label">本地模型 · 独占一次一个占满 GPU，共享与之并存</span>
+    <div class="card">
+      <div class="card-h"><h2>独占</h2><span class="hint">切换 / 休眠 / 停止</span><span class="grow"></span><button class="link" onclick="go('routing')">池与调序 › 路由</button></div>
+      <div class="cand active">
+        <span class="tgt">qwen36-27b</span><span class="pill ok" style="padding:0 8px;font-size:10.5px">运行中</span>
+        <span class="dim num" style="font-size:11.5px">NInfer :8007 · NVFP4+MTP · 2h 14m</span>
+        <span class="cright"><span class="dim" style="font-size:11.5px">在池 <span class="num">fabric-flash P10 · fabric-max P10</span></span>
+          <button class="btn sm primary">切换</button><button class="btn sm">休眠</button><button class="btn sm danger">停止</button></span>
+      </div>
+      <div class="cand" style="margin-top:8px">
+        <span class="tgt">gemma4-31b-vl</span><span class="pill mute" style="padding:0 8px;font-size:10.5px">已停止</span>
+        <span class="dim num" style="font-size:11.5px">NInfer :8005 · NVFP4 · 上次运行 11-26</span>
+        <span class="cright"><span class="dim" style="font-size:11.5px">在池 <span class="num">fabric-max P20</span></span>
+          <button class="btn sm primary">切换</button></span>
+      </div>
+      <div class="card-h" style="margin:16px 0 10px"><h2>共享</h2><span class="hint">与独占并存的小模型</span></div>
+      <div class="cand">
+        <span class="tgt">qwen35-9b</span><span class="pill warn" style="padding:0 8px;font-size:10.5px">休眠</span>
+        <span class="dim num" style="font-size:11.5px">vLLM :8009 · GPTQ-4bit · 唤醒约 3–6s</span>
+        <span class="cright"><span class="dim" style="font-size:11.5px">在池 <span class="num">fabric-flash P20 · fabric-lite P10</span></span>
+          <button class="btn sm">唤醒</button><button class="btn sm danger">停止</button></span>
+      </div>
+      <div class="cand" style="margin-top:8px">
+        <span class="tgt">comfyui</span><span class="pill mute" style="padding:0 8px;font-size:10.5px">已停止</span>
+        <span class="dim num" style="font-size:11.5px">ComfyUI :8188 · 图像生成</span>
+        <span class="cright"><button class="btn sm primary">启动</button></span>
+      </div>
+    </div>
+
+    <span class="sec-label">云端模型 · 按厂商分组；厂商连接与密钥在 配置 · 云端 管理</span>
+    <div class="card">
+      <div class="card-h"><h2>DeepSeek</h2><span class="pill ok">已连接</span><span class="grow"></span><button class="link" onclick="cfgGo('cloud')">管理密钥 ›</button></div>
+      <div class="list-row"><span class="t num">glm-5</span><span class="d grow num">已入池 fabric-flash P30 · fabric-lite P20</span><button class="switch on" role="switch" aria-checked="true" aria-label="glm-5 可路由"></button></div>
+      <div class="list-row"><span class="t num">deepseek-reasoner</span><span class="d grow">未入池，开启后可添加为池候选</span><button class="switch" role="switch" aria-checked="false" aria-label="deepseek-reasoner 可路由"></button></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Anthropic</h2><span class="pill ok">已连接</span><span class="grow"></span><button class="link" onclick="cfgGo('cloud')">管理密钥 ›</button></div>
+      <div class="list-row"><span class="t num">claude-sonnet-5-5</span><span class="d grow">可路由 · 云端直连</span><button class="switch on" role="switch" aria-checked="true" aria-label="claude-sonnet-5-5 可路由"></button></div>
+      <div class="list-row"><span class="t num">claude-opus-5-5</span><span class="d grow">可路由 · 云端直连</span><button class="switch on" role="switch" aria-checked="true" aria-label="claude-opus-5-5 可路由"></button></div>
+    </div>
+  </section>
+
+  <!-- ════ 视图：配置 ════ -->
+  <section class="view" id="view-config" hidden>
+    <div class="page-h"><h1>配置</h1><span class="desc">低频但找得到：云端、鉴权、接入、能力包、系统</span></div>
+    <div class="cfg">
+      <nav class="subnav" id="cfgNav">
+        <button class="on" data-c="cloud">云端</button>
+        <button data-c="auth">鉴权与密钥</button>
+        <button data-c="connect">接入</button>
+        <button data-c="packs">能力包</button>
+        <button data-c="sys">系统</button>
+      </nav>
+
+      <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+        <div id="cfg-cloud" style="display:flex;flex-direction:column;gap:16px">
+          <div class="card">
+            <div class="card-h"><h2>预设厂商</h2><span class="hint">点击展开填 Key，测试通过才可添加</span></div>
+            <div class="chips">
+              <button class="chip set">✓ DeepSeek</button><button class="chip set">✓ Anthropic</button>
+              <button class="chip">通义千问</button><button class="chip">Kimi</button><button class="chip">智谱 GLM</button>
+              <button class="chip">OpenAI</button><button class="chip">Gemini</button><button class="chip">OpenRouter</button><button class="chip">自定义</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>已配置 Provider</h2><span class="grow"></span><button class="btn sm">发现全部</button><button class="btn sm">重载配置</button></div>
+            <div class="tblwrap"><table class="tbl" style="min-width:520px">
+              <thead><tr><th>名称</th><th>状态</th><th class="r">可路由模型</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr><td class="num">DeepSeek</td><td><span class="pill ok">已连接</span></td><td class="r num">3</td><td><button class="link">测试</button> · <button class="link">模型</button> · <button class="link">编辑</button> · <button class="link" style="color:var(--crit)">删除</button></td></tr>
+                <tr><td class="num">Anthropic</td><td><span class="pill ok">已连接</span></td><td class="r num">2</td><td><button class="link">测试</button> · <button class="link">模型</button> · <button class="link">编辑</button> · <button class="link" style="color:var(--crit)">删除</button></td></tr>
+              </tbody>
+            </table></div>
+          </div>
+        </div>
+
+        <div id="cfg-auth" hidden style="display:flex;flex-direction:column;gap:16px">
+          <div class="card">
+            <div class="card-h"><h2>推理 API 鉴权</h2><span class="pill ok">已开启</span></div>
+            <div style="font-size:12.5px;color:var(--ink-2);margin-bottom:12px">:8999 上的推理请求需携带 API Key。本机控制台操作不受影响（零门槛边界不变）。</div>
+            <button class="btn danger">关闭鉴权</button>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>API 密钥</h2><span class="grow"></span><button class="btn sm primary">新建密钥</button></div>
+            <div class="tblwrap"><table class="tbl" style="min-width:520px">
+              <thead><tr><th>名称</th><th>创建</th><th>最近使用</th><th>操作</th></tr></thead>
+              <tbody>
+                <tr><td class="num">default</td><td class="num dim">11-02</td><td class="num dim">今日 16:02</td><td><button class="link">轮换</button> · <button class="link" style="color:var(--crit)">吊销</button></td></tr>
+                <tr><td class="num">vince-pc</td><td class="num dim">10-15</td><td class="num dim">昨日 23:41</td><td><button class="link">轮换</button> · <button class="link" style="color:var(--crit)">吊销</button></td></tr>
+              </tbody>
+            </table></div>
+            <div style="font-size:12px;color:var(--ink-3);margin-top:10px">密钥创建后仅明文展示一次；「重看」需输入保护密码（加密入库）。</div>
+          </div>
+        </div>
+
+        <div id="cfg-connect" hidden>
+          <div class="card">
+            <div class="card-h"><h2>客户端接入托管</h2><span class="hint">网关代写客户端配置，可回滚</span></div>
+            <div class="list-row"><span class="t">Claude Code</span><span class="pill ok">已托管</span><span class="d grow">配置由网关管理 · 上次应用 11-25</span><button class="btn sm">查看</button><button class="btn sm">回滚</button></div>
+            <div class="list-row"><span class="t">Codex</span><span class="pill mute">未托管</span><span class="d grow">将 base_url 指向 :8999 并写入密钥</span><button class="btn sm primary">一键接入</button></div>
+          </div>
+        </div>
+
+        <div id="cfg-packs" hidden>
+          <div class="card">
+            <div class="card-h"><h2>能力包</h2><span class="hint">已装 3 · 全部健康</span><span class="grow"></span><button class="btn primary">部署向导</button></div>
+            <div class="list-row"><span class="t num">nvlm72</span><span class="d grow num">NVFP4 · 72B · 已装 11-20</span><span class="pill ok">健康</span></div>
+            <div class="list-row"><span class="t num">qwen35-9b</span><span class="d grow num">GPTQ-4bit · 已装 11-18</span><span class="pill ok">健康</span></div>
+            <div class="list-row"><span class="t num">embed-bge</span><span class="d grow num">Embedding · 已装 11-10</span><span class="pill ok">健康</span></div>
+            <div style="font-size:12px;color:var(--ink-3);margin-top:10px">部署向导是唯一装载入口；旧版表单保留在折叠区。</div>
+          </div>
+        </div>
+
+        <div id="cfg-sys" hidden>
+          <div class="card">
+            <div class="card-h"><h2>授权设置</h2><span class="hint">本机零门槛是默认边界</span></div>
+            <div class="list-row"><span class="t">本机控制台</span><span class="d grow">本机操作无需登录（不变默认）</span><span class="pill ok">零门槛</span></div>
+            <div class="list-row"><span class="t">Key 保护密码</span><span class="d grow">重看密钥时需要</span><span class="pill ok">已设置</span><button class="btn sm">修改</button></div>
+            <div class="list-row"><span class="t">推理 API 鉴权</span><span class="d grow">见「鉴权与密钥」子页</span><button class="btn sm" onclick="cfgGo('auth')">前往 ›</button></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>网关控制</h2><span class="hint">运行时策略（自模型页移入）</span></div>
+            <div class="list-row"><span class="t">LRU 响应缓存</span><span class="d grow">temperature=0 命中缓存直接返回</span><button class="switch on" role="switch" aria-checked="true" aria-label="LRU 响应缓存"></button></div>
+            <div class="list-row"><span class="t">自动切换</span><span class="d grow">请求到未激活本地模型时自动切过去</span><button class="switch" role="switch" aria-checked="false" aria-label="自动切换"></button></div>
+            <div class="list-row"><span class="t">限流</span><span class="d grow num">30 req/min · 并发 8（iff.yaml）</span><span class="pill mute">只读</span></div>
+          </div>
+          <div class="card">
+            <div class="card-h"><h2>关于</h2></div>
+            <div class="kv">
+              <span><span class="k">版本</span><b class="num">v7.13.0</b></span>
+              <span><span class="k">rev</span><b class="mono">2da34c2d</b></span>
+              <span><span class="k">API</span><b>OpenAPI 规范</b></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  </div></main>
+</div>
+<div id="tip"></div>
+
+<script>
+"use strict";
+var $=function(s){return document.querySelector(s)}, $$=function(s){return [].slice.call(document.querySelectorAll(s))};
+
+/* ── 路由（hash → 视图） ── */
+var VIEWS=["status","requests","usage","routing","models","config"];
+function show(v){
+  if(VIEWS.indexOf(v)<0)v="status";
+  $$(".view").forEach(function(s){s.hidden=(s.id!=="view-"+v)});
+  $$("#nav button").forEach(function(b){b.classList.toggle("on",b.dataset.view===v)});
+  try{localStorage.setItem("iffv3view",v)}catch(e){}
+}
+function go(v){location.hash="#/"+v}
+$$("#nav button").forEach(function(b){b.addEventListener("click",function(){go(b.dataset.view)})});
+addEventListener("hashchange",function(){show((location.hash||"").replace(/^#\/?/,""))});
+var v0=(location.hash||"").replace(/^#\/?/,"");
+if(!v0){try{v0=localStorage.getItem("iffv3view")||""}catch(e){}}
+show(v0);
+
+/* ── 主题 ── */
+function setTheme(t){
+  if(t==="dark"){document.documentElement.dataset.theme="dark"}else{document.documentElement.dataset.theme="light"}
+  $("#themeTxt").textContent=t==="dark"?"浅色":"深色";
+  try{localStorage.setItem("iffv3theme",t)}catch(e){}
+}
+var th="light";try{th=localStorage.getItem("iffv3theme")||"light"}catch(e){}
+setTheme(th);
+$("#themeBtn").addEventListener("click",function(){
+  setTheme(document.documentElement.dataset.theme==="dark"?"light":"dark");
+  drawBars();
+});
+
+/* ── 子页 / 分段控件 ── */
+function bindSeg(id,cb){
+  $$(id+" button").forEach(function(b){b.addEventListener("click",function(){
+    $$(id+" button").forEach(function(x){x.classList.remove("on")});b.classList.add("on");cb(b);
+  })});
+}
+bindSeg("#reqSub",function(b){
+  ["log","switch","anom"].forEach(function(k){$("#sub-"+k).hidden=(b.dataset.sub!==k)});
+});
+bindSeg("#rangeSeg",function(){});
+bindSeg("#usageRange",function(b){drawBars(b.dataset.r)});
+bindSeg("#routeView",function(b){
+  $("#routeCards").hidden=(b.dataset.v!=="cards");
+  $("#routeTree").hidden=(b.dataset.v!=="tree");
+});
+
+/* ── 配置区子导航 ── */
+function cfgGo(c){
+  $$("#cfgNav button").forEach(function(b){b.classList.toggle("on",b.dataset.c===c)});
+  ["cloud","auth","connect","packs","sys"].forEach(function(k){$("#cfg-"+k).hidden=(k!==c)});
+}
+$$("#cfgNav button").forEach(function(b){b.addEventListener("click",function(){cfgGo(b.dataset.c)})});
+
+/* ── 行展开 ── */
+$$("tr.exp").forEach(function(tr){tr.addEventListener("click",function(){
+  var open=tr.getAttribute("aria-expanded")==="true";
+  tr.setAttribute("aria-expanded",open?"false":"true");
+  var d=tr.nextElementSibling;
+  if(d&&d.classList.contains("detail"))d.hidden=open;
+})});
+
+/* ── 开关（演示） ── */
+$$(".switch").forEach(function(s){s.addEventListener("click",function(){
+  s.classList.toggle("on");s.setAttribute("aria-checked",s.classList.contains("on")?"true":"false");
+})});
+
+/* ── sparkline ── */
+var SPARKS={
+  req:[812,904,855,1080,1180,1090,1009],
+  tok:[52,58,55,71,77,50,49.7],
+  cost:[1.9,2.2,2.0,2.6,3.1,3.4,3.46],
+  cache:[72,74,79,80,83,84,81],
+  latA:[212,209,215,210,208,211,207],
+  latB:[120,118,124,121,119,123,120],
+  latC:[840,862,831,855,846,851,838]
+};
+function spark(el){
+  var d=SPARKS[el.dataset.spark]||[],w=88,h=30,col="var(--s1)";
+  if(el.dataset.color==="s2")col="var(--s2)";
+  var mn=Math.min.apply(null,d),mx=Math.max.apply(null,d),rng=(mx-mn)||1;
+  var pts=d.map(function(v,i){return [2+i*(w-4)/(d.length-1), h-3-(v-mn)/rng*(h-7)]});
+  var line=pts.map(function(p){return p[0].toFixed(1)+","+p[1].toFixed(1)}).join(" ");
+  var last=pts[pts.length-1];
+  el.innerHTML='<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'">'+
+    '<path d="M'+line+' L'+w+','+h+' L2,'+h+' Z" fill="currentColor" opacity=".1"/>'+
+    '<polyline points="'+line+'" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'+
+    '<circle cx="'+last[0]+'" cy="'+last[1]+'" r="2.6" fill="currentColor"/></svg>';
+  el.style.color=col;
+}
+$$(".spark").forEach(spark);
+
+/* ── 堆叠柱图（每日 Token，本地/云端） ── */
+var BAR_DATA={
+  "24h":{labels:["09:00","11:00","13:00","15:00","17:00","19:00","21:00"],local:[42,55,38,64,71,49,58],cloud:[5,7,4,8,9,6,7],unit:"M"},
+  "7d":{labels:["11/21","11/22","11/23","11/24","11/25","11/26","11/27"],local:[46,50,47,62,68,42,41],cloud:[6,8,8,9,9,8,8.7],unit:"M"},
+  "30d":{labels:["10/29","11/05","11/12","11/19","11/26"],local:[210,260,248,301,259],cloud:[28,34,31,35,32],unit:"M"}
+};
+function drawBars(range){
+  var el=$("#usageBars");if(!el)return;
+  var d=BAR_DATA[range||"7d"],W=760,H=210,padL=44,padB=26,padT=10,gap=2;
+  var n=d.labels.length,bw=Math.min(56,(W-padL-10)/n*0.55);
+  var step=(W-padL-10)/n;
+  var totals=d.local.map(function(v,i){return v+d.cloud[i]});
+  var mx=Math.max.apply(null,totals);mx=Math.ceil(mx/50)*50;
+  var css=getComputedStyle(document.documentElement);
+  var c1=css.getPropertyValue("--s1").trim(),c2=css.getPropertyValue("--s2").trim(),
+      ink3=css.getPropertyValue("--ink-3").trim(),line=css.getPropertyValue("--line").trim();
+  var s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto">';
+  for(var g=0;g<=2;g++){var gy=padT+(H-padT-padB)*g/2,gv=mx*(1-g/2);
+    s+='<line x1="'+padL+'" y1="'+gy+'" x2="'+W+'" y2="'+gy+'" stroke="'+line+'" stroke-width="1"/>'+
+       '<text x="'+(padL-7)+'" y="'+(gy+3.5)+'" text-anchor="end" font-size="10" fill="'+ink3+'">'+gv+'M</text>'}
+  function topRound(x,y,w,h,r){ /* 顶部圆角、底部直角的段 */
+    r=Math.min(r,h/2,w/2);
+    return 'M'+x+','+(y+r)+' a'+r+','+r+' 0 0 1 '+r+','+(-r)+' h'+(w-2*r)+' a'+r+','+r+' 0 0 1 '+r+','+r+
+           ' v'+(h-r)+' h'+(-w)+' Z';
+  }
+  d.labels.forEach(function(lb,i){
+    var x=padL+step*i+(step-bw)/2, plotH=H-padT-padB;
+    var h1=plotH*d.local[i]/(mx*1.0), gap=2, h2=Math.max(plotH*d.cloud[i]/mx-gap,0);
+    var yB=H-padB;
+    s+='<g>';
+    if(h2>0.5){ /* 云端在上（顶部圆角），本地贴底 */
+      s+='<path d="'+topRound(x,yB-h1-h2-gap,bw,h2,3)+'" fill="'+c2+'"/>';
+      s+='<rect x="'+x+'" y="'+(yB-h1)+'" width="'+bw+'" height="'+Math.max(h1,1)+'" fill="'+c1+'"/>';
+    }else{
+      s+='<path d="'+topRound(x,yB-h1,bw,Math.max(h1,1),3)+'" fill="'+c1+'"/>';
+    }
+    s+='<rect x="'+(x-4)+'" y="'+padT+'" width="'+(bw+8)+'" height="'+plotH+'" fill="transparent" class="hit" data-i="'+i+'"/>';
+    s+='<text x="'+(x+bw/2)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="'+ink3+'">'+lb+'</text>';
+    s+='</g>';
+  });
+  s+='</svg>';
+  el.innerHTML=s;
+  var tip=$("#tip");
+  [].slice.call(el.querySelectorAll(".hit")).forEach(function(h){
+    h.addEventListener("mousemove",function(ev){
+      var i=+h.dataset.i;
+      tip.innerHTML="<b>"+d.labels[i]+"</b> · 本地 "+d.local[i]+"M · 云端 "+d.cloud[i]+"M · 合计 <b>"+(d.local[i]+d.cloud[i]).toFixed(1)+"M</b>";
+      tip.style.left=Math.min(ev.clientX+12,innerWidth-260)+"px";tip.style.top=(ev.clientY+14)+"px";
+      tip.classList.add("show");
+    });
+    h.addEventListener("mouseleave",function(){tip.classList.remove("show")});
+  });
+}
+drawBars("7d");
+</script>
