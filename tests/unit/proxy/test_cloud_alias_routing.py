@@ -279,3 +279,67 @@ def test_explain_unknown_contexts(tmp_path):
     finally:
         srv_a.shutdown()
         srv_b.shutdown()
+
+
+# ── #70：/v1/models 读 × 别名写并发（写侧持锁 + 整体重绑）──────────────
+
+def _v1_client():
+    h = ProxyHandler.__new__(ProxyHandler)
+    h.sent = []
+    h._send_json = lambda data, status=200, extra_headers=None: h.sent.append((data, status))
+    return h
+
+
+def test_v1_models_concurrent_with_alias_writes_no_runtimeerror(tmp_path):
+    """#70: 写侧原地变异时读侧迭代会 RuntimeError（dict changed size）；
+    持锁 + 整体重绑后该交错从根上消除。写线程走真别名端点，读线程走真
+    _handle_v1_models，任何 RuntimeError 即失败。"""
+    srv_a, base_a = _mk_upstream([])
+    srv_b, base_b = _mk_upstream([])
+    cd, _p = _mk_cd(tmp_path, base_a, base_b,
+                    aliases_b={"al-%02d" % i: "glm-5" for i in range(40)})
+    pm = _mk_pm(cd, [], [])
+    stop = threading.Event()
+    errors = []
+    barrier = threading.Barrier(2)
+
+    def writer():
+        barrier.wait()
+        i = 0
+        while not stop.is_set() and i < 4000:
+            try:
+                body = {"provider": "prov-b", "model_id": "glm-5",
+                        "alias": "probe-%d" % (i % 5),
+                        "expected_config_fingerprint": cd.disk_fingerprint()}
+                h = ProxyHandler.__new__(ProxyHandler)
+                h.command = "POST"
+                h._read_body = lambda b=json.dumps(body).encode(): json.loads(b)
+                sent = []
+                h._send_json = lambda data, status=200, extra_headers=None: sent.append((data, status))
+                h._handle_cloud_provider_alias(pm)
+            except Exception as e:  # noqa: BLE001
+                errors.append("writer: %r" % (e,))
+                return
+            i += 1
+
+    def reader():
+        barrier.wait()
+        while not stop.is_set():
+            try:
+                _v1_client()._handle_v1_models(pm)
+            except RuntimeError as e:
+                errors.append("reader RuntimeError: %r" % (e,))
+                return
+            except Exception as e:  # noqa: BLE001
+                errors.append("reader: %r" % (e,))
+                return
+
+    t1 = threading.Thread(target=writer, daemon=True)
+    t2 = threading.Thread(target=reader, daemon=True)
+    t1.start(); t2.start()
+    deadline = threading.Timer(30.0, stop.set)
+    deadline.start()
+    t1.join(); t2.join(timeout=35)
+    deadline.cancel()
+    stop.set()
+    assert not errors, errors[:3]
