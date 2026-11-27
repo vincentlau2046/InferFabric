@@ -16,7 +16,7 @@
 2. **零构建**：不加前端框架、依赖、外链脚本或 WebSocket，不放宽 CSP，不改变本机免登录和既有授权规则。凭证只写 `secrets.env`（600）；Key 明文不进入 GET 响应、YAML、日志、错误或测试快照。日志展示不透出上游错误体、请求原文或完整 metadata；新可选字段走白名单，不把任意字符串插入 HTML。
 3. **轮询收敛**：`/api/snapshot` 3s + ETag 保留；能力包页可见时才以 3s 节奏查独立状态，离开即停；向导仅运行中 2s，关闭即停；请求 Live 仅在日志子页可见且开启时查，至多一个在途请求；用量仅首次进入及时间范围变更时刷新。旧响应不得覆盖新筛选/页面状态。
 4. **视觉不换主题**：暖瓷白 `#f5f3ee`、暖炭黑 `#16130e`；accent `#b45a3c`（light）/ `#d98e6e`（dark）；4 枚状态色与固定图表系列色不混用。F 新增 on-accent 令牌，实际前景/背景对比度达 WCAG AA 4.5:1。术语用「对账／部署／自动切换」，保留 GPU、VRAM、KV Cache、TTFT、TPOT、tokens。
-5. **每期门禁**：从最新 main 拉独立分支、发 Draft PR 并完成两端开工回执，再 sandbox-first 实施；每期一个 patch + README 版本行（以开工时的 main 为准），不预占号；pytest 全套 unit + integration、import smoke、隔离网关及受影响页面 smoke、GLM-5.2 cross-review，按[双机协同 §4](../../../steering/dual-machine-collaboration.md#4-评审与验证)在同一 SHA 签收后才合并，禁止直推 main。**C 必须实测 Mac 的统一内存、压力与预算，以及 vince-pc 的 NVIDIA 显存、利用率、功耗、温度和时钟**。
+5. **每期门禁**：从最新 main 拉独立分支、发 Draft PR 并完成两端开工回执，再 sandbox-first 实施；每期一个 patch + README 版本行（以开工时的 main 为准），不预占号；pytest 全套 unit + integration、import smoke、隔离网关及受影响页面 smoke、**真实浏览器交互走查**（各期 task 项的浏览器验收为门禁组成部分，非可选）、fresh-context subagent cross-review（不绑定模型、不经云路由 —— 2026-10-25 用户裁决），按[双机协同 §4](../../../steering/dual-machine-collaboration.md#4-评审与验证)在同一 SHA 签收后才合并，禁止直推 main。**C 必须实测 Mac 的统一内存、压力与预算，以及 vince-pc 的 NVIDIA 显存、利用率、功耗、温度和时钟**。
 6. **验证隔离**：Mac 用主仓 `.venv/bin/python` 的绝对路径，但 CWD 为当前 sandbox；下文 `$PY` 表示对应平台已核实的 Python。每期先跑相关基线，新增用例 RED → GREEN 后再提交；全套命令为 `"$PY" -m pytest tests/unit/ tests/integration/ -q`，import smoke 为 `"$PY" -c 'import inferfabric'`。运行前核对隔离 HOME/数据目录、独立端口和目标实例身份；真机窗口另获许可，不默认跑 operational、触碰生产 :8999 或切 VL。长验证监看成功／失败／超时三种终态，收尾核对进程、端口、显存归还；证据只记录脱敏结论，不贴 Key、原始请求或私有日志。
 
 ## 评审重点
