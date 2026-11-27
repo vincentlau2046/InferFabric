@@ -325,14 +325,21 @@ def _resolve_chat_target(handler, pm, chat_data, cand, *, pool, remaining):
     route = ("pool:" + pool + "/cloud:" + c.provider + "/" + c.model_id) if pool \
         else ("cloud:" + c.provider + "/" + c.model_id)
     provider_cfg = pm.cloud.get_provider_config(c.provider)
-    cloud_model = pm.cloud.cloud_models.get(c.provider + "/" + c.model_id)
+    # #66: 查表走 resolve_cloud_model —— _DirectCandidate.model_id 三形态
+    # （别名解析出的上游 id / spec 键 / provider 前缀键直呼）未必等于
+    # "provider/model_id" 注册表键；原 raw dict get 对别名 id 与前缀键
+    # 直呼恒 miss → 兜底探测直接 target unavailable。与 _probe_native
+    # （PR2）口径对齐。
+    cloud_model = pm.cloud.resolve_cloud_model(c.provider, c.model_id)
     if provider_cfg is None or cloud_model is None:
         return None, b"", route
     snap_base = (cand.route or {}).get("openai_base") if cand.route else None
     if snap_base:
         provider_cfg = copy.copy(provider_cfg)
         provider_cfg.openai_base = snap_base
-    chat_data["model"] = c.model_id
+    # #66: 上游永远收注册表条目的原始 model_id（对齐 forwarder chat 路径）——
+    # spec 键直呼时 c.model_id 是注册表键而非上游 id，透传必 404。
+    chat_data["model"] = cloud_model.model_id
     gate = pm.dual_gate.acquire_target(c.provider + "/" + c.model_id,
                                        timeout=_gate_timeout(remaining))
     if not gate.ok:
@@ -433,7 +440,9 @@ def _probe_native(handler, pm, data, cand, *, pool, remaining, client_stream):
         if snap_base:
             provider_cfg = copy.copy(provider_cfg)
             provider_cfg.openai_base = snap_base
-        data["model"] = c.model_id
+        # #66: 上游收注册表条目的原始 model_id（spec 键直呼时 c.model_id
+        # 是注册表键；别名/前缀键形态 resolve_cloud_model 已归一）
+        data["model"] = cloud_model.model_id
         gate = pm.dual_gate.acquire_target(c.provider + "/" + c.model_id,
                                            timeout=_gate_timeout(remaining))
         if not gate.ok:

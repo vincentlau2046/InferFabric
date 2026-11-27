@@ -116,6 +116,8 @@ import threading
 import types
 from pathlib import Path
 
+import yaml
+
 from inferfabric.proxy import responses_bridge as _RB
 
 GOLDEN_SSE = Path(__file__).parent.parent / "golden" / "responses_native_stream.sse"
@@ -450,7 +452,7 @@ def _fake_pm_for_probe(kind="local"):
         active_services={"m1"})
     pm.dual_gate = _FakeDualGate()
     pm.get_target_port = lambda n: 8123
-    _reg = {"prov/mdl-x": object()}
+    _reg = {"prov/mdl-x": types.SimpleNamespace(model_id="mdl-x")}
     pm.cloud = types.SimpleNamespace(
         get_provider_config=lambda name: types.SimpleNamespace(
             openai_base="https://api.x.test/v1", api_key="sk-t", timeout=5)
@@ -630,3 +632,65 @@ def test_direct_pack_gate_503_releases_logic_gate(monkeypatch):
     # acquire 过（B2b 语义保留）且本次 503 路径已释放，无槽泄漏
     assert pm.dual_gate.model_calls[0][0] == "mdl-x"
     assert pm.dual_gate.model_calls[0][1].released == 1
+
+
+# ── #66：兜底探测三形态解析（别名上游 id / spec 键 / provider 前缀键）──────
+# 契约（specs/alias-fix-round-66-73 §#66）：
+# - 查表一律 resolve_cloud_model（c.model_id 三形态未必等于注册表键）；
+# - 上游永远收注册表条目的原始 model_id（对齐 forwarder chat 路径）——
+#   spec 键直呼时 c.model_id 是注册表键而非上游 id，透传必 404。
+
+def _mk_cd_spec_key(tmp_path):
+    """prov：spec 键 k3（注册表键 k3 / prov/k3，上游 model_id = kimi/k3）
+    + 别名 my-k3 → kimi/k3。构造时 spec-only 注册即生效。"""
+    from inferfabric.cloud_discovery import CloudDiscovery
+    p = tmp_path / "cloud_provider.yaml"
+    p.write_text(yaml.dump({"providers": {"prov": {
+        "api_key": "sk-t", "openai_base": "https://up.test/v1",
+        "models": {"k3": {"model_id": "kimi/k3", "name": "K3"}},
+        "aliases": {"my-k3": "kimi/k3"},
+    }}}), encoding="utf-8")
+    return CloudDiscovery(p)
+
+
+def test_chat_fallback_three_forms_send_upstream_model_id(tmp_path, monkeypatch):
+    cd = _mk_cd_spec_key(tmp_path)
+    pm = types.SimpleNamespace(cloud=cd, dual_gate=_FakeDualGate())
+    seen = {}
+
+    def _fake_probe(provider_cfg, chat_data, remaining):
+        seen["model"] = chat_data.get("model")
+        return 200, b"{}"
+
+    monkeypatch.setattr(_RB, "_probe_cloud_chat", _fake_probe)
+    h = _FakeHandler()
+    for form, mid in (("alias-upstream-id", "kimi/k3"),
+                      ("spec-key", "k3"),
+                      ("provider-prefixed-key", "prov/k3")):
+        seen.clear()
+        cand = _RB._DirectCandidate(provider="prov", model_id=mid, kind="cloud")
+        status, raw, route = _RB._resolve_chat_target(
+            h, pm, {"model": mid}, cand, pool=None, remaining=None)
+        assert status == 200, f"{form}: 探测必须可达（三形态都可解析）"
+        assert seen["model"] == "kimi/k3", \
+            f"{form}: 上游必须收到注册表原始 model_id"
+
+
+def test_probe_native_spec_key_sends_upstream_model_id(tmp_path, monkeypatch):
+    cd = _mk_cd_spec_key(tmp_path)
+    pm = types.SimpleNamespace(cloud=cd, dual_gate=_FakeDualGate())
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResp(body=json.dumps(
+            {"id": "resp-1", "status": "completed", "output": []}).encode())
+
+    monkeypatch.setattr(_RB, "urlopen", _fake_urlopen)
+    cand = _RB._DirectCandidate(provider="prov", model_id="k3", kind="cloud")
+    res = _RB._probe_native(_FakeHandler(), pm,
+                            {"model": "k3", "input": "hi"}, cand,
+                            pool=None, remaining=None, client_stream=False)
+    assert res.ok, "spec 键直呼 native 探测必须可达"
+    assert captured["body"]["model"] == "kimi/k3", \
+        "native 上游必须收到注册表原始 model_id，而非 spec 键"
