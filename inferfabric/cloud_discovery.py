@@ -710,10 +710,27 @@ class CloudDiscovery:
         #    （其他 provider 的条目未被清除，short-key first-wins 跳过不受影响）
         self._register_whitelist_models(self._cloud_models, old=old)
 
+    def routable_entries(self, provider: str) -> "dict[str, CloudModel]":
+        """该 provider 的可路由条目，键 = provider 内 id（#72）。
+
+        注册表双键（短名 + provider/ 前缀）与带 / 的 model_id 短键统一
+        归一到 provider 内 id 去重 —— 此前 `" /" not in k` 过滤把带 /
+        的 model_id（如 org/x）整类漏计，且跨 provider 短名碰撞时仅有
+        前缀键的 provider 被计为 0。
+        """
+        prefix = provider + "/"
+        out: dict[str, CloudModel] = {}
+        with self._models_lock:
+            for k, m in self._cloud_models.items():
+                if m.provider != provider:
+                    continue
+                internal = k[len(prefix):] if k.startswith(prefix) else k
+                out.setdefault(internal, m)
+        return out
+
     def _routable_count(self, provider: str) -> int:
-        """该 provider 可路由模型数（短名 key 计数，避免双键重复）。"""
-        return sum(1 for k, v in self._cloud_models.items()
-                   if "/" not in k and v.provider == provider)
+        """该 provider 可路由模型数（provider 内 id 去重，#72 口径）。"""
+        return len(self.routable_entries(provider))
 
     def resolve_route(self, model_name: str, local_models: set[str]) -> Optional[str]:
         """路由决策：给定模型名，返回 "local" / "cloud:<provider>" / None。"""

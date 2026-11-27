@@ -523,3 +523,41 @@ class TestLoadPathAliasValidation:
             "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
         }, retired={"prov-b": {"old-name": "glm-5"}})
         assert cd._config_corrupt is True
+
+
+class TestRoutableCountAndCaps:
+    """#72 — routable_caps/count 按 provider 内 id 归一：仅有前缀键的
+    provider 与带 / 的 model_id 不再漏计；双键去重。"""
+
+    def _get(self, cd):
+        h, sent = _mk_handler(cd)
+        h._handle_cloud_providers(_mk_pm(cd))
+        return {pr["name"]: pr for pr in sent[0][0]["providers"]}
+
+    def test_prefixed_key_only_provider_counted(self, tmp_path):
+        """跨 provider 同短名碰撞 → B 只有前缀键：B 行 count=1 且 caps 含该模型
+        （此前 "/" not in k 过滤把 B 整类漏计为 0）。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        })
+        rows = self._get(cd)
+        assert rows["prov-b"]["routable_count"] == 1, rows["prov-b"]
+        assert "glm-5" in rows["prov-b"]["routable_caps"]
+
+    def test_slash_bearing_model_id_counted(self, tmp_path):
+        """model_id 带 /（org/x）：短键与前缀键都含 / —— 此前整类漏计。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-b": {"openai_base": "http://b",
+                       "models": {"org/x": {"model_id": "org/x", "name": "X"}}},
+        })
+        rows = self._get(cd)
+        assert rows["prov-b"]["routable_count"] == 1, rows["prov-b"]
+        assert "org/x" in rows["prov-b"]["routable_caps"]
+
+    def test_no_double_count_dual_keys(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+        })
+        rows = self._get(cd)
+        assert rows["prov-a"]["routable_count"] == 1

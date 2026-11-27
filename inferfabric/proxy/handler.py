@@ -3386,7 +3386,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if pm.cloud.config_fingerprint() != _disk_fp:
                 pm.cloud.reload()
             config_fingerprint = pm.cloud.disk_fingerprint()  # PR1: 编辑 CAS 基础
-            all_models = pm.cloud.cloud_models  # 快照一次（含短名 + provider/ 前缀双键）
             providers = []
             # #70: providers 迭代快照（并发 add/delete provider 时防 RuntimeError）
             for name, cfg in list(pm.cloud.providers.items()):
@@ -3399,9 +3398,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     key_source = "external"
                 else:
                     key_source = "unset"
-                # v6.1 Phase 1: 可路由数 = 短名键计数（避免双键重复统计）
-                routable = sum(1 for k, m in all_models.items()
-                               if "/" not in k and m.provider == name)
+                # v6.1 Phase 1: 可路由数 = provider 内 id 去重（#72：仅看短键
+                # 会把前缀键-only 的 provider 与带 / 的 model_id 整类漏计）
+                _routables = pm.cloud.routable_entries(name)
+                routable = len(_routables)
                 providers.append({
                     "name": name,
                     "enabled": cfg.enabled,
@@ -3436,8 +3436,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "routable_caps": {
                         k: {"supports_vision": m.supports_vision,
                             "supports_tools": m.supports_tools}
-                        for k, m in all_models.items()
-                        if "/" not in k and m.provider == name
+                        for k, m in _routables.items()
                     },
                     "routable_count": routable,
                     "model_count": routable,  # 兼容旧字段：语义对齐可路由数
