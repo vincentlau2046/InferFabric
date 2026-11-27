@@ -347,6 +347,34 @@ class TestProviderAliasEndpoint:
         assert cd.alias_target("glm-5-b") == ("prov-a", "glm-5")
         assert cd._retired_aliases == {}
 
+    def test_provider_delete_save_failure_rolls_back(self, tmp_path):
+        """#71: DELETE 落盘失败 → 逆序恢复（provider 仍可路由、别名仍激活、
+        retired 未变、注册表条目原样）—— 此前 drop 已生效且不可逆。"""
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"],
+                       "aliases": {"al-x": "glm-5"}},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"]},
+        })
+        retired_before = {p: dict(v) for p, v in cd._retired_aliases.items()}
+        entries_before = dict(cd.cloud_models)
+        h, sent = _mk_handler(cd, command="DELETE",
+                              body=json.dumps({"name": "prov-a"}).encode())
+        real_save = cd.save_config
+
+        def _boom():
+            raise OSError("disk full")
+
+        cd.save_config = _boom
+        try:
+            h._handle_cloud_providers(_mk_pm(cd))
+        finally:
+            cd.save_config = real_save
+        assert sent[0][1] == 500, sent
+        assert "prov-a" in cd.providers, "provider 必须回插"
+        assert cd.alias_target("al-x") == ("prov-a", "glm-5"), "别名必须仍激活"
+        assert cd._retired_aliases == retired_before, "retired 表必须还原"
+        assert dict(cd.cloud_models) == entries_before, "注册表条目必须还原"
+
     def test_provider_delete_endpoint_retires_aliases(self, tmp_path):
         """DELETE /admin/cloud/providers 调 retire_provider_aliases（Task 1 接线）。"""
         cd, p = self._cd(tmp_path, aliases={"glm-5-b": "glm-5"})

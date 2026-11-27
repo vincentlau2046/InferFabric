@@ -614,6 +614,25 @@ class CloudDiscovery:
             }
             self._candidates.pop(provider, None)
 
+    def restore_provider(self, name: str, cfg: "ProviderConfig",
+                         aliases: dict, entries: dict, candidates: list,
+                         retired: dict):
+        """#71: DELETE 落盘失败时逆序恢复 drop 前状态。
+
+        cfg 回插 _providers、aliases 重绑回 cfg、注册表条目回插（并集重绑，
+        保留 drop 后其他 provider 的新条目）、候选回插、退役表整体重绑回
+        快照。调用方传 drop 前快照；本方法持锁整体重绑。
+        """
+        with self._models_lock:
+            self._providers[name] = cfg
+            cfg.aliases = dict(aliases)
+            self._cloud_models = {**self._cloud_models, **entries}
+            if candidates:
+                self._candidates[name] = list(candidates)
+            else:
+                self._candidates.pop(name, None)
+            self._retired_aliases = {p: dict(v) for p, v in retired.items()}
+
     def alias_target(self, alias: str) -> "tuple[str, str] | None":
         """显式调用别名 → (provider, 上游 model_id)；未命中返回 None。
 

@@ -3477,6 +3477,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         elif self.command == "DELETE":
             data = self._read_body()
             name = (data or {}).get("name", "")
+            # #71: drop 前快照（retire 会原地搬走 cfg.aliases，必须先拍）——
+            # save 失败逆序恢复，否则 provider 从内存消失且不可逆
+            _snap_cfg = pm.cloud.get_provider_config(name)
+            _snap_aliases = dict(_snap_cfg.aliases) if _snap_cfg else {}
+            with pm.cloud._models_lock:
+                _snap_entries = {k: m for k, m in pm.cloud._cloud_models.items()
+                                 if m.provider == name}
+                _snap_cands = list(pm.cloud._candidates.get(name) or [])
+                _snap_retired = {p: dict(v)
+                                 for p, v in pm.cloud._retired_aliases.items()}
             # PR2: 删除前退役别名 → 顶层 retired_aliases（未激活、不自动复活；
             # provider 不存在时 no-op，不改变 drop 的 KeyError 语义）
             pm.cloud.retire_provider_aliases(name)
@@ -3487,12 +3497,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return
             except Exception as e:
                 log.error("Failed to drop provider '%s': %s", name, e)
+                if _snap_cfg is not None:
+                    pm.cloud.restore_provider(name, _snap_cfg, _snap_aliases,
+                                              _snap_entries, _snap_cands,
+                                              _snap_retired)
                 self._send_json({"error": f"Failed to delete provider: {e}"}, 500)
                 return
             try:
                 pm.cloud.save_config()
             except Exception as e:
                 log.error("Failed to persist provider deletion: %s", e)
+                if _snap_cfg is not None:
+                    pm.cloud.restore_provider(name, _snap_cfg, _snap_aliases,
+                                              _snap_entries, _snap_cands,
+                                              _snap_retired)
                 self._send_json({"error": "Failed to save config", "detail": str(e)}, 500)
                 return
             self._send_json({"status": "deleted", "provider": name})
