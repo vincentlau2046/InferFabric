@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+、SQLite、vanilla JS/CSS、vendored ECharts、pytest、Node VM；关键动线用浏览器在隔离实例验收。
 
-**Spec:** [定稿设计](../../../specs/dashboard-ux-v3/design.md) §3–§7、[交互样机](../../../specs/dashboard-ux-v3/preview.html)（样机示例数据不代表后端已有字段）。本文件为实施计划，**待用户审阅，未授权开工**。事实底账：`main` @ `03cabb1`。
+**Spec:** [定稿设计](../../../specs/dashboard-ux-v3/design.md) §3–§7、[接口与 UI 对接契约](../../../specs/dashboard-ux-v3/interface-contract.md)、[交互样机](../../../specs/dashboard-ux-v3/preview.html)（示例数据不代表后端已有字段；遥测语义以契约为准）。本文件为实施计划，**未开始实现**。事实底账：`main` @ `03cabb1`。
 
 ## 全局约束
 
@@ -16,7 +16,7 @@
 2. **零构建**：不加前端框架、依赖、外链脚本或 WebSocket，不放宽 CSP，不改变本机免登录和既有授权规则。凭证只写 `secrets.env`（600）；Key 明文不进入 GET 响应、YAML、日志、错误或测试快照。日志展示不透出上游错误体、请求原文或完整 metadata；新可选字段走白名单，不把任意字符串插入 HTML。
 3. **轮询收敛**：`/api/snapshot` 3s + ETag 保留；能力包页可见时才以 3s 节奏查独立状态，离开即停；向导仅运行中 2s，关闭即停；请求 Live 仅在日志子页可见且开启时查，至多一个在途请求；用量仅首次进入及时间范围变更时刷新。旧响应不得覆盖新筛选/页面状态。
 4. **视觉不换主题**：暖瓷白 `#f5f3ee`、暖炭黑 `#16130e`；accent `#b45a3c`（light）/ `#d98e6e`（dark）；4 枚状态色与固定图表系列色不混用。F 新增 on-accent 令牌，实际前景/背景对比度达 WCAG AA 4.5:1。术语用「对账／部署／自动切换」，保留 GPU、VRAM、KV Cache、TTFT、TPOT、tokens。
-5. **每期门禁**：从最新 main 拉独立分支、发 Draft PR 并完成两端开工回执，再 sandbox-first 实施；每期一个 patch + README 版本行（以开工时的 main 为准），不预占号；pytest 全套 unit + integration、import smoke、隔离网关及受影响页面 smoke、GLM-5.2 cross-review，按[双机协同 §4](../../../steering/dual-machine-collaboration.md#4-评审与验证)在同一 SHA 签收后才合并，禁止直推 main。**C 必须验证 Mac 无 NVIDIA 遥测及 vince-pc 真实 GPU 遥测**。
+5. **每期门禁**：从最新 main 拉独立分支、发 Draft PR 并完成两端开工回执，再 sandbox-first 实施；每期一个 patch + README 版本行（以开工时的 main 为准），不预占号；pytest 全套 unit + integration、import smoke、隔离网关及受影响页面 smoke、GLM-5.2 cross-review，按[双机协同 §4](../../../steering/dual-machine-collaboration.md#4-评审与验证)在同一 SHA 签收后才合并，禁止直推 main。**C 必须实测 Mac 的统一内存、压力与预算，以及 vince-pc 的 NVIDIA 显存、利用率、功耗、温度和时钟**。
 6. **验证隔离**：Mac 用主仓 `.venv/bin/python` 的绝对路径，但 CWD 为当前 sandbox；下文 `$PY` 表示对应平台已核实的 Python。每期先跑相关基线，新增用例 RED → GREEN 后再提交；全套命令为 `"$PY" -m pytest tests/unit/ tests/integration/ -q`，import smoke 为 `"$PY" -c 'import inferfabric'`。运行前核对隔离 HOME/数据目录、独立端口和目标实例身份；真机窗口另获许可，不默认跑 operational、触碰生产 :8999 或切 VL。长验证监看成功／失败／超时三种终态，收尾核对进程、端口、显存归还；证据只记录脱敏结论，不贴 Key、原始请求或私有日志。
 
 ## 评审重点
@@ -27,7 +27,7 @@
 | wizard 占位符嵌在 packs 内；配置并入后仍能加载各面板、向导和既有云别名操作 | A2、E2 |
 | 真实日志远多于 500 条；过滤后分页总数准确，旧库或损坏摘要不坏整页、不透原文 | B1 |
 | 用户快速切过滤或切页，旧响应晚到；关 Live 不停全站健康快照 | B2、D2 |
-| Mac 无 NVIDIA 遥测或设备暂时漏指标；未知成本、用量缺失都不显示成已测得的 0 | C1、D1、D2 |
+| Mac 统一内存与推理预算不同；部分采样缺值、读数过期与真 `0` 不混用；未知成本、用量缺失不显示成 `0` | C1、C2、D1、D2 |
 
 ## A — 六区导航与存量迁移
 
@@ -79,14 +79,20 @@
 
 ## C — 状态页
 
-### C1：态势、模型控制和两种遥测
+### C1：状态与遥测接口
 
-**文件**：`inferfabric/dashboard/fragments/status.html`、`inferfabric/dashboard/js/overview.js`（若 A 已拆分则用对应状态 renderer）、`inferfabric/dashboard/js/inference.js`（共用操作）；新增 `tests/unit/dashboard/test_status_panel.py`。
+**文件**：`inferfabric/proxy/handler.py`、`api-spec/openapi.yaml`、`api-spec/components/schemas.yaml`、`tests/unit/proxy/test_snapshot_etag.py`、`tests/unit/proxy/test_async_server.py`。字段以[接口与 UI 对接契约](../../../specs/dashboard-ux-v3/interface-contract.md) §C 为准；不改现有采集器和设备控制路径。
 
-- [ ] RED：样例覆盖 idle/running/切换中、空历史、NVIDIA 指标为 0 与缺失、Mac 无 NVIDIA 遥测；维护菜单含释放 GPU／对账／重载配置／强制重置，保持既有确认、授权与锁。最近 5 条真实请求、成功/失败按同一展示范围统计，「查看全部」保留已知过滤条件并用 A1 URL。
-- [ ] `"$PY" -m pytest tests/unit/dashboard/test_status_panel.py -q`：RED。GREEN：态势使用 snapshot 的当日聚合、活跃模型、最近同步时间，warning 按当天异常端点聚合（截断需标明，不把样本数当总数）；空闲显示历史中最近 3 个去重、仍可切换的模型；当前模型操作复用原路径，不读/写转发核心。无可信启动时间显示「—」或明确标「本页已观察」，不拿页面计时冒充真实运行时长。
-- [ ] 有 GPU 遥测时展示 VRAM／利用率／功耗／温度／时钟；无 GPU 数据用统一内存/网关在线时长/版本健康卡，缺字段用「—」，不把 `/proc/uptime` 的主机时长或默认 `0` 当网关时长。若确需补充网关启动时长，仅由 handler 复用真实进程启动时刻，测试覆盖 Mac/Ubuntu。
-- [ ] 同命令 GREEN；Mac 健康卡与 vince-pc 五段真遥测按 §4.3 两端留证并清退，PR-C。真实 GPU 窗口未授权不算验完。
+- [ ] RED：在 HTTP 和 async 的 snapshot 回归中钉住 `device` 值／能力变化时 ETag 更新、只变时间仍可 `304`；新 `X-IFF-Device-Sample-Age` 同样适用于 `200/304`，不由 3 秒轮询频率反推。`"$PY" -m pytest tests/unit/proxy/test_snapshot_etag.py tests/unit/proxy/test_async_server.py -q`：新增头部断言 RED。
+- [ ] GREEN：复用已缓存的 `device.snapshot/capabilities`；增加采样年龄头，不加额外采集；OpenAPI 补响应 schema、头及样例，旧字段值不改。重跑同命令 GREEN。
+
+### C2：状态 UI 与双机核对
+
+**文件**：`inferfabric/dashboard/fragments/status.html`、`inferfabric/dashboard/js/{store,overview,inference}.js`（若 A 已拆分则用对应 renderer）；新增 `tests/unit/dashboard/test_status_panel.py`。
+
+- [ ] RED：用契约样本验 Apple 统一内存总量/压力/预算、NVIDIA 五项、真实 `0`、部分/全部缺值、旧响应、`304`、过期和离线；另验运行／空闲／切换中、空历史、`200` 业务失败及部分重载。`"$PY" -m pytest tests/unit/dashboard/test_status_panel.py -q`：RED。
+- [ ] GREEN：UI 按能力和实际值显示，不按 OS 名写死版式；版本/连接与硬件读数独立，不显示不准确的网关运行时长。态势计数按契约的 UTC 当天及已保留警告，最近五条计数不冒充总数；可用快捷模型与维护动作复用原操作和严格结果判定。重跑同命令 GREEN。
+- [ ] 在 Mac 隔离实例对照 `sysctl`/`vm_stat`，在 vince-pc 获准窗口对照 `nvidia-smi`；脱敏双端证据、真实终态及清退记入 PR-C。真实 GPU 窗口未授权不算验完。
 
 ## D — 用量页
 
