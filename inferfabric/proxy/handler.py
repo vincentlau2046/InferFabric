@@ -3299,6 +3299,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             if mgr is not None:
                 local_names = {m.served_name for m in mgr._models.values()
                                if getattr(m, "served_name", None)}
+                # #68: find_model_by_served_name 第二段按 name 匹配（先于
+                # resolve_route）—— 本地模型 name 同样占用调用名命名空间，
+                # 仅并 served_name 会漏掉「name ≠ served_name」的模型
+                local_names |= {m.name for m in mgr._models.values()
+                                if getattr(m, "name", None)}
             pool_reg = getattr(pm, "pool_registry", None)
             if pool_reg is not None:
                 try:

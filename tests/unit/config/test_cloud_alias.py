@@ -311,6 +311,20 @@ class TestProviderAliasEndpoint:
         assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
         assert cd.alias_target("fast-pool") is None
 
+    def test_alias_conflict_with_local_model_name_not_served(self, tmp_path):
+        """#68: find_model_by_served_name 第二段按 name 匹配 —— 本地模型的
+        name（非 served_name）同样占用调用名命名空间，撞名须拒绝。"""
+        cd, _p = self._cd(tmp_path)
+
+        class _M:
+            served_name = "Qwen3-27B"
+            name = "qwen-chat"
+        sent = self._post(cd, {"provider": "prov-a", "model_id": "glm-5",
+                               "alias": "qwen-chat",
+                               "expected_config_fingerprint": cd.disk_fingerprint()},
+                          models={"m": _M()})
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+
     def test_alias_set_unretires_deleted_pair(self, tmp_path):
         """重建同名 provider 后端点显式重设 → 激活且 retired 清空。"""
         cd, p = self._cd(tmp_path)
