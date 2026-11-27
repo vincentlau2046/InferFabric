@@ -3313,6 +3313,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     if pname == name and a == alias and mid == model_id:
                         continue  # 幂等重设不与自己撞
                     other_aliases.add(a)
+            # #67: 退役名并入撞名集合 —— 跨 provider 抢设已删除提供方的
+            # 别名拒绝；同 provider 显式重设放行（unretire 语义）。
+            for rp, rslot in pm.cloud._retired_aliases.items():
+                if rp != name:
+                    other_aliases |= set(rslot)
             ok, why = validate_alias(alias, name, model_id,
                                      local_names=local_names,
                                      registry_short_names=registry_short_names,

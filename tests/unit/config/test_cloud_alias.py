@@ -351,3 +351,77 @@ def test_get_providers_exposes_aliases(tmp_path):
     h._handle_cloud_providers(_mk_pm(cd))
     by_name = {pr["name"]: pr for pr in sent[0][0]["providers"]}
     assert by_name["prov-a"]["aliases"] == {"glm-5-b": "glm-5"}
+
+
+class TestRetiredAliasSemantics:
+    """#67 — 已退役别名绝不回退（先于 local/短名判定）、可解释、撞名集合含退役名。"""
+
+    def _cd_two(self, tmp_path, extra_models_a=None):
+        a = {"openai_base": "http://a", "enabled_models": ["glm-5"]}
+        if extra_models_a:
+            a["models"] = extra_models_a
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": a,
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"shared-alias": "glm-5"}},
+        })
+        return cd
+
+    def test_retired_alias_never_falls_back_to_local(self, tmp_path):
+        """删除承诺字面语义：退役名命中 → None，先于本地模型判定。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        assert cd.resolve_route("shared-alias", {"shared-alias"}) is None
+
+    def test_retired_alias_never_falls_back_to_other_provider(self, tmp_path):
+        """他 provider 之后注册同名短名 —— 退役名不回退到他 provider。"""
+        cd = self._cd_two(tmp_path, extra_models_a={"shared-alias": {}})
+        cd.retire_provider_aliases("prov-b")
+        assert cd.resolve_route("shared-alias", set()) is None
+
+    def test_explain_unknown_reports_deleted_provider(self, tmp_path):
+        """既有「目标提供方已删除」分支由此可达（此前 alias_target 未命中恒 None）。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        msg = cd.explain_unknown("shared-alias")
+        assert msg is not None and "已删除" in msg and "prov-b" in msg
+
+    def test_retired_alias_owner_helper(self, tmp_path):
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        assert cd.retired_alias_owner("shared-alias") == "prov-b"
+        assert cd.retired_alias_owner("nope") is None
+
+
+class TestRetiredAliasEndpointConflicts:
+    """#67 — validate_alias 调用点并入退役名（同 provider 显式重设除外）。"""
+
+    def _cd_two(self, tmp_path):
+        cd, _p = _mk_cd(tmp_path, {
+            "prov-a": {"openai_base": "http://a", "enabled_models": ["glm-5"]},
+            "prov-b": {"openai_base": "http://b", "enabled_models": ["glm-5"],
+                       "aliases": {"shared-alias": "glm-5"}},
+        })
+        return cd
+
+    def test_cross_provider_grab_of_retired_name_rejected(self, tmp_path):
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        sent = TestProviderAliasEndpoint()._post(
+            cd, {"provider": "prov-a", "model_id": "glm-5",
+                 "alias": "shared-alias",
+                 "expected_config_fingerprint": cd.disk_fingerprint()})
+        assert sent[0][1] == 400 and sent[0][0]["error"] == "alias_conflict", sent
+        assert cd.alias_target("shared-alias") is None
+
+    def test_same_provider_reset_of_retired_allowed(self, tmp_path):
+        """同 provider 显式重设退役名放行（unretire 语义），retired 清空。"""
+        cd = self._cd_two(tmp_path)
+        cd.retire_provider_aliases("prov-b")
+        sent = TestProviderAliasEndpoint()._post(
+            cd, {"provider": "prov-b", "model_id": "glm-5",
+                 "alias": "shared-alias",
+                 "expected_config_fingerprint": cd.disk_fingerprint()})
+        assert sent[0][1] == 200, sent
+        assert cd.alias_target("shared-alias") == ("prov-b", "glm-5")
+        assert cd._retired_aliases.get("prov-b", {}) == {}

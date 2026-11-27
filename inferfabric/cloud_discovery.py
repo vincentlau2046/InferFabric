@@ -655,6 +655,15 @@ class CloudDiscovery:
             if not slot:
                 del self._retired_aliases[provider]
 
+    def retired_alias_owner(self, alias: str) -> "str | None":
+        """别名退役归属提供方（#67）：alias 在任一退役表中即返回该 provider
+        名，否则 None。锁内读。"""
+        with self._models_lock:
+            for provider, slot in self._retired_aliases.items():
+                if alias in slot:
+                    return provider
+        return None
+
     def _rebuild_provider_registry(self, provider: str, cfg: ProviderConfig):
         """按 floor = (候选∩白名单) ∪ 白名单 ∪ model_specs 重建 provider 的注册表条目。
 
@@ -689,6 +698,11 @@ class CloudDiscovery:
 
     def resolve_route(self, model_name: str, local_models: set[str]) -> Optional[str]:
         """路由决策：给定模型名，返回 "local" / "cloud:<provider>" / None。"""
+        # #67: 已退役别名先于一切回退判定 —— 删除承诺字面语义「绝不回退到
+        # 本地/另一 provider/池」。命中退役名即显式 None（explain_unknown
+        # 给删除语义）。别名命名空间不含 "/"，model_name 即调用名形态。
+        if self.retired_alias_owner(model_name) is not None:
+            return None
         short_name = model_name.split("/")[-1] if "/" in model_name else model_name
         if short_name in local_models or model_name in local_models:
             return "local"
@@ -757,6 +771,10 @@ class CloudDiscovery:
         """
         target = self.alias_target(model_name)
         if target is None:
+            # #67: 退役别名（提供方已删除）——既有「已删除」分支由此可达
+            owner = self.retired_alias_owner(model_name)
+            if owner is not None:
+                return f"别名 '{model_name}' 的目标提供方 {owner} 已删除"
             return None
         provider_name, mid = target
         cfg = self._providers.get(provider_name)
