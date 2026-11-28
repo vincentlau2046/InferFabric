@@ -284,12 +284,12 @@ def _handler(path):
 
 
 def _win_row(i, ts, model="m1", status=200, req_id=None, metadata=None,
-             agent="claude-code"):
+             agent="claude-code", error=None):
     return {
         "req_id": req_id or f"r{i}", "key_name": "k", "model": model,
         "status": status, "ttft_ms": 10.0, "tokens_in": 1,
         "tokens_in_cached": 0, "tokens_out": 2, "duration_ms": 5.0,
-        "route": "local", "cloud_provider": None, "error": None,
+        "route": "local", "cloud_provider": None, "error": error,
         "timestamp": ts, "ts": str(ts), "agent": agent, "ua": "ua/1",
         "metadata": metadata if metadata is not None else {},
     }
@@ -509,3 +509,93 @@ def test_request_log_invalid_window_params_400(tmp_path, query, secret):
     code, data = h._sent[-1]
     assert code == 400, (query, data)
     assert secret not in json.dumps(data)        # 不回显非法值
+
+
+# ── 7b. 修复轮（fresh-context review #90）──────────────────────────
+# - window 模式 error 恒 None：上游错误原文/内部文案不进响应（legacy 逐字不变）
+# - 池摘要损坏形态（合法 JSON 但类型错）→ 行可读、投影 None，整页不 500
+# - window=（空白值）是显式 window 模式 → 400（不得静默落 legacy）；
+#   offset 超 SQLite int64 上界 → 400（不得 500）
+
+def test_request_log_window_error_never_raw(tmp_path):
+    import inferfabric.migrations  # noqa: F401
+    from inferfabric.db import IFFDB
+    db = IFFDB(tmp_path)
+    raw = 'UPSTREAM RAW <html>provider oops</html> {"internal":1}'
+    row = _win_row(1, 7000.0, status=503, error=raw)
+    db.insert_request_log([row])
+    pm = _pm(tmp_path)
+
+    code, data = _window_page(pm, "window=1h&until=10000.0")
+    assert code == 200
+    assert raw not in json.dumps(data)               # 上游原文不透出
+    assert data["logs"][0]["error"] in (None, "")    # 安全投影：不给内部文案
+
+    # legacy 模式逐字不变（既有策略边界：错误原文仅限旧模式）
+    h = _handler("/api/request_log?since=0&limit=5")
+    h._handle_request_log(pm)
+    code2, data2 = h._sent[-1]
+    assert code2 == 200
+    assert data2["logs"][0]["error"] == raw
+
+
+def test_request_log_pool_projection_malformed_shapes_no_500(tmp_path):
+    import inferfabric.migrations  # noqa: F401
+    from inferfabric.db import IFFDB
+    db = IFFDB(tmp_path)
+    rows = [
+        # attempts 是整数（损坏但合法 JSON）→ 行可读，投影 None，不 500
+        _win_row(1, 7000.0, metadata={"pool_summary": {
+            "v": 1, "pool": "web", "attempts": 3,
+            "retry_count": 2, "fallback_count": 1}}),
+        # admitted 是 truthy 字符串 → 不得冒认；计数非整数 → None
+        _win_row(2, 7001.0, metadata={"pool_summary": {
+            "v": 1, "pool": "web",
+            "attempts": [{"route": "pool:web/local:m", "admitted": "yes"}],
+            "retry_count": "2", "fallback_count": True}}),
+        # 负数计数 → None；0 合法
+        _win_row(3, 7002.0, metadata={"pool_summary": {
+            "v": 1, "pool": "web", "attempts": [],
+            "retry_count": -1, "fallback_count": 0}}),
+    ]
+    db.insert_request_log(rows)
+    pm = _pm(tmp_path)
+
+    code, data = _window_page(pm, "window=1h&until=10000.0")
+    assert code == 200 and len(data["logs"]) == 3    # 整页不被单行损坏击穿
+    by_req = {r["req_id"]: r["pool"] for r in data["logs"]}
+    p1, p2, p3 = by_req["r1"], by_req["r2"], by_req["r3"]
+    # v==1 且池名合法 → 保留对象（B1 裁决 56），仅可疑字段退化为 None
+    assert p1 is not None and p1["route_kind"] is None   # attempts 非数组 → 不冒认
+    assert p1["retry_count"] == 2 and p1["fallback_count"] == 1
+    assert p2 is not None and p2["route_kind"] is None   # 字符串 admitted 不冒认
+    assert p2["retry_count"] is None and p2["fallback_count"] is None
+    assert p3["retry_count"] is None and p3["fallback_count"] == 0
+
+
+def test_request_log_blank_window_is_explicit_mode_400(tmp_path):
+    import inferfabric.migrations  # noqa: F401
+    from inferfabric.db import IFFDB
+    db = IFFDB(tmp_path)
+    _seed_bulk(db)
+    pm = _pm(tmp_path)
+    h = _handler("/api/request_log?window=")
+    h._handle_request_log(pm)
+    code, data = h._sent[-1]
+    assert code == 400 and data == {"error": "invalid window"}  # 不落 legacy
+
+
+@pytest.mark.parametrize("query,secret", [
+    ("window=1h&offset=99999999999999999999999", "99999999999999999999999"),
+])
+def test_request_log_blank_window_and_huge_offset_400(tmp_path, query, secret):
+    import inferfabric.migrations  # noqa: F401
+    from inferfabric.db import IFFDB
+    db = IFFDB(tmp_path)
+    _seed_bulk(db)
+    pm = _pm(tmp_path)
+    h = _handler(f"/api/request_log?{query}")
+    h._handle_request_log(pm)
+    code, data = h._sent[-1]
+    assert code == 400, (query, code, data)      # 不 500
+    assert secret not in json.dumps(data)

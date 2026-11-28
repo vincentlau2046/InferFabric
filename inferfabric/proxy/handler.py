@@ -1414,9 +1414,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             from urllib.parse import urlparse, parse_qs
             import time
-            qs = parse_qs(urlparse(self.path).query)
-            if qs.get("window", [None])[0] is not None:
-                self._handle_request_log_window(pm, qs)
+            raw_q = urlparse(self.path).query
+            qs = parse_qs(raw_q)
+            # 显式 window 模式检测用原文（parse_qs 默认丢空白值，window=
+            # 会静默落 legacy —— 修复轮裁决：空白模式选择器属显式调用，400）
+            explicit_window = any(p.split("=", 1)[0] == "window"
+                                  for p in raw_q.split("&") if p)
+            if explicit_window or qs.get("window", [None])[0] is not None:
+                self._handle_request_log_window(
+                    pm, parse_qs(raw_q, keep_blank_values=True))
                 return
             limit = min(int(qs.get("limit", ["50"])[0]), 500)
             since = float(qs.get("since", ["0"])[0])
@@ -1450,8 +1456,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         过滤、分页、同快照计数；非法参数一律 400 且不回显原值；until
         缺省取服务端当前时刻，只接受有限且非未来值；空过滤参数视为
-        未提供。行仅新增安全 req_id 与白名单池摘要（_safe_pool_projection），
-        不透出全量 metadata、上游原文或凭证。
+        未提供（空白 window 值本身属非法模式 → 400）。行仅新增安全
+        req_id 与白名单池摘要（_safe_pool_projection），不透出全量
+        metadata、错误原文（error 恒 None）、上游原文或凭证。
         """
         import math
         import time
@@ -1479,7 +1486,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             offset = int(qs.get("offset", ["0"])[0])
         except ValueError:
             return self._send_json({"error": "invalid filter"}, 400)
-        if not 1 <= limit <= 500 or offset < 0:
+        # offset 上界 = SQLite int64（超界绑定 OverflowError → 500，修复轮收口）
+        if not 1 <= limit <= 500 or not 0 <= offset <= 2 ** 63 - 1:
             return self._send_json({"error": "invalid filter"}, 400)
         res = pm.telemetry.query_request_log_window(
             since=until - win, until=until,
@@ -1488,6 +1496,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             status_class=None if status == "all" else status,
             q=q or None, limit=limit, offset=offset)
         logs = [{**self._base_log_row(r),
+                 "error": None,   # 修复轮：错误原文（上游体/内部文案）不进响应
                  "req_id": r.get("req_id", ""),
                  "pool": self._safe_pool_projection(r.get("metadata"))}
                 for r in res["logs"]]
@@ -1523,14 +1532,18 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         name = s.get("pool")
         if not isinstance(name, str) or not name or "/" in name:
             return None
+        # 修复轮硬化：attempts 必须是数组；admitted 必须是真布尔（truthy
+        # 字符串/数字不冒认）；单行损坏（任意异常）→ 投影 None，整页可读
         route_kind = None
-        for attempt in reversed(s.get("attempts") or []):
-            if isinstance(attempt, dict) and attempt.get("admitted"):
-                route_kind = self._parse_pool_route_kind(attempt.get("route"))
-                break
+        attempts = s.get("attempts")
+        if isinstance(attempts, list):
+            for attempt in reversed(attempts):
+                if isinstance(attempt, dict) and attempt.get("admitted") is True:
+                    route_kind = self._parse_pool_route_kind(attempt.get("route"))
+                    break
 
         def _count(v):
-            return v if isinstance(v, int) and not isinstance(v, bool) else None
+            return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
         return {"name": name, "route_kind": route_kind, "target_port": None,
                 "retry_count": _count(s.get("retry_count")),

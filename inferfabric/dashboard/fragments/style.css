@@ -2050,3 +2050,9 @@ hr { border: none; border-top: 1px solid var(--border); margin: var(--sp-2) 0; }
 }
 .pack-ext-details > summary::-webkit-details-marker { display: none; }
 .pack-ext-details[open] > summary { margin-bottom: 8px; }
+
+/* B2 修复轮（review Important 7 / Minor 1）：
+   - 列菜单 hidden 属性必须压过 display 规则（Chromium computed display:flex）
+   - 失败计数 .bad 有真实红色规则（此前仅有类名无样式） */
+.req-cols-menu[hidden] { display: none; }
+.bad { color: var(--crit); }

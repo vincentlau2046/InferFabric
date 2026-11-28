@@ -97,7 +97,10 @@
   }
 
   function paramsKey(cp) {
-    return Object.keys(cp).sort().map(function (k) { return k + '=' + cp[k]; }).join('&');
+    // 修复轮：k/v 经 URI 编码 —— q 值含字面 '&'/'=' 时与真实多参数不得同键
+    return Object.keys(cp).sort().map(function (k) {
+      return encodeURIComponent(k) + '=' + encodeURIComponent(cp[k]);
+    }).join('&');
   }
 
   function toHash(view, sub, params) {
@@ -174,19 +177,10 @@
   }
 
   var _lastAppliedKey = null;
+  var _lastAppliedCp = null;   // 修复轮：消费方最后见到的参数（boot 深链参数计入）
 
-  /* B2：route_params 发布 —— 同值不重复发布（store.set 对象恒等不判内容）；
-   * 空⇄空安静。boot 不发布：深链初始参数由消费方装载时自 location.hash 解析，
-   * 避免订阅回放把 boot 参数伪装成一次「变更」（见 ledger Ruling）。 */
-  function publishParams(cp) {
-    if (!window.store || typeof window.store.set !== 'function') return;
-    var prev = (typeof window.store.get === 'function') ? window.store.get('route_params') : undefined;
-    if (prev !== undefined && prev !== null && typeof prev === 'object' &&
-        paramsKey(prev) === paramsKey(cp)) return;
-    var prevEmpty = (prev == null || typeof prev !== 'object') ||
-                    Object.keys(prev).length === 0;
-    if (Object.keys(cp).length === 0 && prevEmpty) return;
-    window.store.set('route_params', cp);
+  function _lastAppliedCpEq(cp) {
+    return _lastAppliedCp !== null && paramsKey(_lastAppliedCp) === paramsKey(cp);
   }
 
   function applyRoute(route, opts) {
@@ -204,8 +198,18 @@
       if (window.store && typeof window.store.setActiveView === 'function') {
         window.store.setActiveView(route.view, route.sub);      // 视图组合先于 DOM 应用
       }
-      // B2：参数先于 applyTab 落 store —— applyTab 触发的 renderer 读到本次参数
-      if (!(opts && opts.boot)) publishParams(cp);
+      // B2：参数先于 applyTab 落 store —— applyTab 触发的 renderer 读到本次参数。
+      // boot 不发布（深链初始参数由消费方装载时自 location.hash 解析，ledger
+      // Ruling），但计入 _lastAppliedCp：此后与 boot 参数不同的变化（含清空到
+      // 空集）必须发布 —— 修复轮裁决：「空⇄空」抑制只对已发布过的状态成立，
+      // 不得吞掉清除深链过滤的导航（消费方残留旧过滤 = URL 与页面不一致）。
+      if (opts && opts.boot) {
+        _lastAppliedCp = cp;
+      } else if (window.store && typeof window.store.set === 'function' &&
+                 !_lastAppliedCpEq(cp)) {
+        window.store.set('route_params', cp);
+        _lastAppliedCp = cp;
+      }
       if (tab && window.store && typeof window.store.applyTab === 'function') {
         window.store.applyTab(tab);
         applied = true;

@@ -32,7 +32,7 @@
   var store = window.store || null;
 
   /* ── 状态 ── */
-  var _params = { window: '24h', status: '', model: '', q: '' };
+  var _params = { window: '24h', status: '', model: '', agent: '', q: '' };
   var _page = 1;
   var _until = null;          // 首次响应固定的窗口上界（翻页/Live 语义见规格）
   var _state = null;          // { logs, total, failed, until }
@@ -44,6 +44,8 @@
   var _timer = null;
   var _cols = loadCols();
   var _expanded = {};
+  var _anomalies = [];        // 修复轮：异常关联数据源 = /api/anomalies（有界环）
+  var _anomaliesInflight = false;
 
   /* ── 工具 ── */
   function $(id) { return document.getElementById(id); }
@@ -70,7 +72,10 @@
       if (raw) {
         var arr = JSON.parse(raw);
         if (Array.isArray(arr)) {
-          var ok = arr.filter(function (k) { return COL_LABELS[k]; });
+          // 修复轮：校验合法列 id 且去重（损坏偏好不产生重复表头）
+          var ok = arr.filter(function (k, i) {
+            return COL_LABELS[k] && arr.indexOf(k) === i;
+          });
           if (ok.length) return ok;
         }
       }
@@ -93,7 +98,10 @@
 
   /* ── 取数 ── */
   function paramsKey(p) {
-    return Object.keys(p).sort().map(function (k) { return k + '=' + p[k]; }).join('&');
+    // 修复轮：与 router.paramsKey 同编码 —— q 含字面 '&'/'=' 不与他参数同键
+    return Object.keys(p).sort().map(function (k) {
+      return encodeURIComponent(k) + '=' + encodeURIComponent(p[k]);
+    }).join('&');
   }
   function currentKey() {
     return paramsKey(_params) + '#' + _page + '#' + (_until == null ? '' : _until);
@@ -103,6 +111,7 @@
     if (params.window) qs.push('window=' + encodeURIComponent(params.window));
     if (params.status) qs.push('status=' + encodeURIComponent(params.status));
     if (params.model) qs.push('model=' + encodeURIComponent(params.model));
+    if (params.agent) qs.push('agent=' + encodeURIComponent(params.agent));
     if (params.q) qs.push('q=' + encodeURIComponent(params.q));
     qs.push('limit=' + PAGE_SIZE);
     qs.push('offset=' + ((page - 1) * PAGE_SIZE));
@@ -114,22 +123,25 @@
     if (!isActive()) return;
     var isLive = !!(opts && opts.live);
     var key = currentKey();
+    // 修复轮：任何取数入口都使在途响应失效 —— 即使同键去重命中（如浏览器
+    // 后退到已加载数据），迟到的旧筛选响应也不得覆盖当前数据。
+    _seq++;
     if (!force) {
       if (key === _inflightKey) return;             // 同键在途：去重
       if (key === _loadedKey && _state) return;     // 同键已有数据
     }
     // Live 轮询不带 until（滚动窗）；翻页沿用已锚定的 until
     var url = buildQuery(_params, _page, isLive ? null : _until);
-    var seq = ++_seq;
+    var seq = _seq;
     _inflightKey = key;
     fetch(url).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
     }).then(function (data) {
+      // 修复轮：簿记移到守卫之后 —— 迟到响应不得改写 in/loaded 键
+      if (seq !== _seq || !isActive()) return;
       _inflightKey = null;
       _loadedKey = key;
-      // 迟到响应按序失效 + 离页不写入
-      if (seq !== _seq || !isActive()) return;
       _state = {
         logs: (data && data.logs) || [],
         total: (data && data.total) || 0,
@@ -142,11 +154,25 @@
       if (_page === 1 && data && data.until != null) _until = data.until;
       renderData();
     }).catch(function (e) {
-      _inflightKey = null;
       if (seq !== _seq || !isActive()) return;
+      _inflightKey = null;
       _error = e;
       renderData();
     });
+  }
+
+  /* ── 异常关联数据源（修复轮）：/api/anomalies 有界环，激活时刷新 ── */
+  function loadAnomalies() {
+    if (_anomaliesInflight) return;
+    _anomaliesInflight = true;
+    fetch('/api/anomalies?since=0&limit=200').then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }).then(function (data) {
+      _anomaliesInflight = false;
+      _anomalies = (data && data.events) || [];
+      if (_state && Object.keys(_expanded).length) renderTable();
+    }).catch(function () { _anomaliesInflight = false; /* 缺数据 → 「异常关联 —」 */ });
   }
 
   /* ── 参数应用 ── */
@@ -155,6 +181,7 @@
       window: (p && p.window) || '24h',
       status: (p && p.status) || '',
       model: (p && p.model) || '',
+      agent: (p && p.agent) || '',
       q: (p && p.q) || '',
     };
     _page = 1;
@@ -167,6 +194,7 @@
     if (_params.window) p.window = _params.window;
     if (_params.status) p.status = _params.status;
     if (_params.model) p.model = _params.model;
+    if (_params.agent) p.agent = _params.agent;
     if (_params.q) p.q = _params.q;
     Object.keys(patch).forEach(function (k) {
       if (patch[k]) p[k] = patch[k]; else delete p[k];
@@ -187,6 +215,8 @@
     if (st) st.value = _params.status;
     var md = $('reqModel');
     if (md) md.value = _params.model;
+    var ag = $('reqAgent');
+    if (ag) ag.value = _params.agent;
     var se = $('reqSearch');
     if (se && document.activeElement !== se) se.value = _params.q;
     var lb = $('reqLiveBtn');
@@ -197,7 +227,11 @@
     var keys = Object.keys(COL_LABELS);
     for (var j = 0; j < keys.length; j++) {
       var mi = $('reqCol-' + keys[j]);
-      if (mi) mi.classList.toggle('on', _cols.indexOf(keys[j]) >= 0);
+      if (mi) {
+        var on = _cols.indexOf(keys[j]) >= 0;
+        mi.classList.toggle('on', on);
+        mi.checked = on;   // 修复轮：原生 checked 同步（显示状态跟随偏好）
+      }
     }
   }
 
@@ -224,6 +258,7 @@
   }
 
   function statusCls(s) {
+    if (s == null || s === '') return '';   // 修复轮：状态未知用中性徽章，不冒认 2xx
     var n = Number(s) || 0;
     return n < 400 ? 'ok' : (n < 500 ? 'warn' : 'crit');
   }
@@ -231,9 +266,11 @@
   function cellHtml(col, l) {
     switch (col) {
       case 'time': return '<td class="mono">' + escHtml(fmtTs(l.timestamp)) + '</td>';
-      case 'status':
-        return '<td><span class="badge ' + statusCls(l.status) + '">' +
+      case 'status': {
+        var cls = statusCls(l.status);
+        return '<td><span class="badge' + (cls ? ' ' + cls : '') + '">' +
                escHtml(l.status == null ? '—' : l.status) + '</span></td>';
+      }
       case 'model': return '<td>' + escHtml(l.model || '—') + '</td>';
       case 'agent': return '<td class="mono">' + escHtml(l.agent || '—') + '</td>';
       case 'tokens':
@@ -253,10 +290,10 @@
     }
   }
 
-  /* 异常关联：模型 + 状态码 + ±300s 推断（B1 anomaly ring 不含 req_id 关联） */
+  /* 异常关联：模型 + 状态码 + ±300s 推断（B1 anomaly ring 不含 req_id 关联）。
+   * 修复轮：数据源 = /api/anomalies 端点（loadAnomalies），非 store 种子。 */
   function correlateAnomaly(l) {
-    if (!store || typeof store.get !== 'function') return null;
-    var list = store.get('anomalies') || [];
+    var list = _anomalies;
     if (!list.length || (Number(l.status) || 0) < 400) return null;
     var best = null, bestGap = Infinity;
     for (var i = 0; i < list.length; i++) {
@@ -339,6 +376,7 @@
   function renderData() {
     renderCount();
     renderPager();
+    renderAgentOptions();
     renderTable();
   }
 
@@ -359,15 +397,36 @@
     for (var i = 0; i < names.length; i++) {
       if (!seen[names[i]]) { seen[names[i]] = 1; uniq.push(names[i]); }
     }
+    // 修复轮：选中模型不在当前目录（退役/云端书签）时注入 option，控件不显示为空
+    if (_params.model && !seen[_params.model]) uniq.unshift(_params.model);
     md.innerHTML = '<option value="">全部模型</option>' + uniq.map(function (n) {
       return '<option value="' + escHtml(n) + '">' + escHtml(n) + '</option>';
     }).join('');
     md.value = _params.model || '';
   }
 
+  /* ── 客户端选项（修复轮，design §3.2 过滤行「客户端」）：
+   * 当前页去重 agent + 选中项兜底注入（页内 facet；D 期分解出全量）。 ── */
+  function renderAgentOptions() {
+    var ag = $('reqAgent');
+    if (!ag) return;
+    var seen = {}, names = [];
+    var logs = (_state && _state.logs) || [];
+    for (var i = 0; i < logs.length; i++) {
+      var a = (logs[i] || {}).agent;
+      if (a && !seen[a]) { seen[a] = 1; names.push(a); }
+    }
+    if (_params.agent && !seen[_params.agent]) names.unshift(_params.agent);
+    ag.innerHTML = '<option value="">全部客户端</option>' + names.map(function (n) {
+      return '<option value="' + escHtml(n) + '">' + escHtml(n) + '</option>';
+    }).join('');
+    ag.value = _params.agent || '';
+  }
+
   /* ── Live 门控 ── */
   function tick() {
     if (!_live || _page !== 1 || !isActive()) return;   // Live 只服务第一页
+    if (_inflightKey) return;   // 修复轮：单飞 —— 前一取数在途时跳过本轮
     fetchPage(true, { live: true });
   }
   function startTimer() {
@@ -381,7 +440,8 @@
     if (isActive()) {
       renderControls();
       startTimer();
-      fetchPage();     // 去重守卫：数据已新鲜时为 no-op
+      loadAnomalies();   // 修复轮：激活时刷新异常关联环
+      fetchPage();       // 去重守卫：数据已新鲜时为 no-op（seq 仍失效在途）
     } else {
       stopTimer();
     }
@@ -395,6 +455,12 @@
     },
     collapseAll: function () { _expanded = {}; renderTable(); },
     refresh: function () { fetchPage(true); },
+  };
+
+  /* 修复轮：全局刷新按钮触达工作台（store.forceRefresh 按 tabRenderers 分发） */
+  window.tabRenderers = window.tabRenderers || {};
+  window.tabRenderers['tab-monitor.log'] = function () {
+    if (isActive()) fetchPage(true);
   };
 
   /* ── 接线 ── */
@@ -418,6 +484,8 @@
     if (st) st.addEventListener('change', function () { navWith({ status: st.value }); });
     var md = $('reqModel');
     if (md) md.addEventListener('change', function () { navWith({ model: md.value }); });
+    var ag = $('reqAgent');
+    if (ag) ag.addEventListener('change', function () { navWith({ agent: ag.value }); });
     var se = $('reqSearch');
     if (se) se.addEventListener('change', function () { navWith({ q: se.value }); });
 
@@ -445,6 +513,12 @@
       _live = !_live;
       try { localStorage.setItem('iff_req_live', _live ? '1' : '0'); } catch (e) { /* 忽略 */ }
       renderControls();
+      // 修复轮：深页开 Live 即回第一页滚动取数（契约「Live 回到第一页」）
+      if (_live && _page !== 1) {
+        _page = 1;
+        _until = null;
+        fetchPage();
+      }
     });
 
     var prev = $('reqPrev'), next = $('reqNext');

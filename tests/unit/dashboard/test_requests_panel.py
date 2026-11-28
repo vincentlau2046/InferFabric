@@ -59,7 +59,7 @@ function makeEl(id, attrs) {
   const attribs = Object.assign({}, attrs || {});
   const el = {
     id, _classes: classes, _attrs: attribs,
-    value: '', disabled: false, hidden: false, title: '',
+    value: '', disabled: false, hidden: false, title: '', checked: false,
     innerHTML: '', textContent: '',
     classList: {
       add: (...cs) => cs.forEach((c) => classes.add(c)),
@@ -118,9 +118,11 @@ const window = {
   addEventListener: (ev, fn) => { if (ev === 'hashchange') hashListener = fn; },
 };
 
-// ── 可编程 fetch：/api/request_log 走脚本队列，其余（snapshot）计数放行 ──
+// ── 可编程 fetch：/api/request_log 走脚本队列，/api/anomalies 独立脚本，
+// 其余（snapshot）计数放行 ──
 const requests = [];
 let snapshotFetches = 0;
+let anomaliesFetches = 0;
 const pending = [];            // {resolve, spec}
 const queue = (input.responses || []).slice();
 function respond(spec) {
@@ -129,6 +131,10 @@ function respond(spec) {
 }
 const fetch = (url) => {
   const u = String(url);
+  if (u.indexOf('/api/anomalies') === 0) {
+    anomaliesFetches += 1;
+    return respond({ json: input.anomaliesJson || { events: [] } });
+  }
   if (u.indexOf('/api/request_log') !== 0) {
     snapshotFetches += 1;
     return respond({ json: input.snapshotJson || {} });
@@ -176,12 +182,14 @@ for (const step of (input.steps || [])) {
     for (let i = 0; i < step.advanceTimers; i++)
       for (const t of intervals) if (!t.dead && t.ms === (step.timerMs || 5000)) t.fn();
   }
+  if (step.forceRefresh) { window.store.forceRefresh(); }
   await drain();   // 每步后泵微任务（auto-resolve fetch / 状态落地）
 }
 await drain();       // 无 steps 场景同样泵到位再取快照
 const reqTable = el('reqTable');
 const out = {
-  requests, snapshotFetches, pendingCount: pending.filter((p) => !p.done).length,
+  requests, snapshotFetches, anomaliesFetches,
+  pendingCount: pending.filter((p) => !p.done).length,
   tableHTML: reqTable.innerHTML,
   countHTML: el('reqCountLine').innerHTML,
   pageInfo: el('reqPageInfo').textContent,
@@ -189,7 +197,10 @@ const out = {
   liveOn: el('reqLiveBtn').classList.contains('on'),
   windowOn: ['1h', '24h', '7d'].filter((w) => el('reqWin-' + w).classList.contains('on')),
   statusValue: el('reqStatus').value, modelValue: el('reqModel').value,
+  agentValue: el('reqAgent') ? el('reqAgent').value : null,
   searchValue: el('reqSearch').value,
+  colsChecked: Object.fromEntries(['time', 'status', 'model', 'agent', 'tokens', 'dur', 'cache']
+    .map((k) => [k, el('reqCol-' + k).checked])),
   modelOptions: (el('reqModel').innerHTML.match(/<option value="([^"]*)"/g) || [])
     .map((s) => /<option value="([^"]*)"/.exec(s)[1]),
   colsMenuHTML: el('reqColsMenu').innerHTML,
@@ -228,7 +239,8 @@ def _log_row(req_id, ts, model="m1", status=200, pool=None, agent="claude-code")
     return {"req_id": req_id, "timestamp": ts, "model": model, "status": status,
             "tokens_in": 100, "tokens_in_cached": 50, "tokens_out": 20,
             "ttft_ms": 120.0, "duration_ms": 900.0, "route": "local",
-            "key_name": "k", "error": "" if status < 400 else "upstream 5xx",
+            "key_name": "k",
+            "error": "" if (status is None or status < 400) else "upstream 5xx",
             "agent": agent, "ua": "ua/1", "pool": pool}
 
 
@@ -388,17 +400,155 @@ def test_pool_and_nonpool_expansion(tmp_path):
 
 
 def test_anomaly_correlation_labeled(tmp_path):
+    """修复轮：关联数据源是 /api/anomalies 端点（生产无 store 种子）——
+    工作台激活时拉取有界环，事件按 模型+状态码+300s 匹配。"""
     out = _run_harness(tmp_path, {
         "hash": "#/requests",
         "responses": [_RESP_OK],
-        "steps": [{"seedStore": {"anomalies": [
-                      {"id": "a1", "ts": 1700000000.0, "model": "m2",
-                       "status_code": 503, "severity": "error",
-                       "message": "上游 503：引擎过载"}]}},
-                  {"expand": "iff-2"}],
+        "anomaliesJson": {"events": [
+            {"id": "a1", "ts": 1699999900.0, "model": "m2", "status_code": 503,
+             "severity": "error", "message": "上游 503：引擎过载",
+             "category": "cloud", "possible_cause": "x", "detail": "y"}]},
+        "steps": [{"expand": "iff-2"}],
     })
+    assert out["anomaliesFetches"] >= 1            # 数据源是真实端点
     assert "按模型/时间推断" in out["tableHTML"]
-    assert "上游 503" in out["tableHTML"]
+    assert "上游 503" in out["tableHTML"]          # 仅展示 message/category 安全字段
+
+
+# ── 修复轮（fresh-context review #90）────────────────────────────
+
+def test_back_with_pending_filter_discards_stale_write(tmp_path):
+    """浏览器后退到已加载数据的筛选态：同键去重命中也必须使在途旧筛选响应
+    失效（seq 提升），否则迟到的 4xx 结果覆盖「全部」数据。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [
+            {"json": {"logs": [_log_row("all-1", 3.0)], "count": 1, "total": 1,
+                      "failed_total": 0, "until": 3.0}},               # 初载
+            {"wait": True, "json": {"logs": [_log_row("f-1", 2.0)],
+                                    "count": 1, "total": 1,
+                                    "failed_total": 0, "until": 2.0}},  # 4xx 在途
+        ],
+        "steps": [
+            {"setValue": ["reqStatus", "4xx"]},
+            {"hashChange": "#/requests"},          # 后退（同键去重命中）
+            {"flush": 0},                          # 4xx 响应迟到
+        ],
+    })
+    assert out["pendingCount"] == 0
+    assert "f-1" not in out["tableHTML"]           # 迟到的旧筛选结果不得覆盖
+    assert "all-1" in out["tableHTML"]             # 当前（全部）数据保持
+
+
+def test_live_tick_skips_while_inflight(tmp_path):
+    """Live 单飞：前一取数在途时 tick 跳过（计划全局约束 3：不并发放大）。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [
+            {"wait": True, "json": {"logs": [_log_row("a", 1.0)], "count": 1,
+                                    "total": 1, "failed_total": 0, "until": 1.0}},
+        ],
+        "steps": [{"advanceTimers": 2}],           # 两个 tick 落在在途窗口内
+    })
+    assert len(out["requests"]) == 1               # 不并发
+    assert out["pendingCount"] == 1
+
+
+def test_live_enable_from_deep_page_returns_page1(tmp_path):
+    """深页开 Live：即回第一页滚动取数（契约「Live 回到第一页」），
+    而非停在无轮询的深页。"""
+    logs = [_log_row(f"p{i}", 1.0 + i) for i in range(50)]
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "storage": {"data": {"iff_req_live": "0"}},
+        "responses": [
+            {"json": {"logs": logs, "count": 50, "total": 120,
+                      "failed_total": 0, "until": 9.0}},
+            {"json": {"logs": logs, "count": 50, "total": 120,
+                      "failed_total": 0, "until": 9.0}},             # 第 2 页
+            {"json": {"logs": [_log_row("live-1", 5.0)], "count": 1,
+                      "total": 1, "failed_total": 0, "until": 5.0}},  # 回第一页
+        ],
+        "steps": [
+            {"click": "reqNext"},
+            {"click": "reqLiveBtn"},               # 开 Live
+            {"advanceTimers": 1},
+        ],
+    })
+    assert len(out["requests"]) >= 3
+    assert "offset=0" in out["requests"][2]
+    assert "until=" not in out["requests"][2]      # 滚动窗取数（不带 until）
+
+
+def test_agent_filter_end_to_end(tmp_path):
+    """design §3.2 过滤行含「客户端」：agent 参数端到端（深链 → 查询串 → 控件态）。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests?agent=claude-code",
+        "responses": [_RESP_OK],
+        "steps": [{"seedStore": {"local_models": ["m1", "m2"]}}],
+    })
+    assert "agent=claude-code" in out["requests"][0]
+    assert out["agentValue"] == "claude-code"
+
+
+def test_selected_model_absent_from_catalog_stays_visible(tmp_path):
+    """选中的模型不在当前目录（退役/云端书签）时注入 option，控件不得显示为空。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests?model=retired-m",
+        "responses": [_RESP_OK],
+        "steps": [{"seedStore": {"local_models": ["m1", "m2"]}}],
+    })
+    assert "retired-m" in out["modelOptions"]
+    assert out["modelValue"] == "retired-m"
+
+
+def test_column_toggle_syncs_checked_state(tmp_path):
+    """列开关同步原生 checked（真实 DOM 显示状态跟随偏好，非仅样式类）。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [_RESP_OK],
+        "steps": [{"click": "reqColsBtn"},
+                  {"fire": ["reqCol-cache", "click"]}],
+    })
+    assert out["colsChecked"]["cache"] is False
+    assert out["colsChecked"]["time"] is True
+
+
+def test_stored_columns_deduped(tmp_path):
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "storage": {"data": {"iff_req_cols": json.dumps(["time", "time", "status"])}},
+        "responses": [_RESP_OK],
+        "steps": [],
+    })
+    head = out["tableHTML"].split("<tbody>")[0]
+    assert head.count("时间") == 1                 # 渲染层去重（损坏偏好不产生重复表头）
+    assert "状态" in head and "客户端" not in head
+
+
+def test_global_refresh_refreshes_workbench(tmp_path):
+    """全局刷新按钮触达工作台（tabRenderers['tab-monitor.log'] 注册）。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [_RESP_OK,
+                      {"json": {"logs": [_log_row("new-1", 9.0)], "count": 1,
+                                "total": 1, "failed_total": 0, "until": 9.0}}],
+        "steps": [{"click": "reqLiveBtn"},         # 关 Live（排除轮询干扰）
+                  {"forceRefresh": True}],
+    })
+    assert len(out["requests"]) == 2
+
+
+def test_null_status_neutral_badge(tmp_path):
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [{"json": {"logs": [_log_row("ns-1", 1.0, status=None)],
+                                "count": 1, "total": 1, "failed_total": 0,
+                                "until": 1.0}}],
+        "steps": [],
+    })
+    assert '<span class="badge">—</span>' in out["tableHTML"]   # 非成功绿
 
 
 # ── Live 门控与离页 ──────────────────────────────────────────────

@@ -76,6 +76,15 @@ def test_legacy_js_deleted():
     assert not (ROOT / "inferfabric" / "dashboard" / "js" / "state.js").exists()
 
 
+def test_workbench_css_state_rules():
+    """修复轮（review Important 7 / Minor 1）：列菜单 hidden 必须压过 display
+    规则；失败计数 .bad 必须有真实红色规则（测试此前只断言类名不见样式）。"""
+    css = (ROOT / "inferfabric" / "dashboard" / "fragments" / "style.css").read_text(
+        encoding="utf-8")
+    assert ".req-cols-menu[hidden]" in css      # display:none 覆盖
+    assert ".bad" in css                        # 失败计数红色
+
+
 def test_new_js_present():
     """ui.js / store.js 已创建。"""
     assert (ROOT / "inferfabric" / "dashboard" / "js" / "ui.js").exists()

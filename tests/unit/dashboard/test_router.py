@@ -703,7 +703,39 @@ def test_navigate_sub_roundtrip_preserves_params(run_store_router):
         ],
     })
     assert out["hash"] == "#/requests?status=4xx"
-    assert out["routeParams"] == {"status": "4xx"}
+    # 修复轮细化：boot 参数消费方装载时已自 hash 应用 —— 参数未变时不发布
+    # route_params（订阅不回放伪装变更）；保留语义在 URL 与消费方状态。
+    assert out["paramSteps"] == []
+
+
+def test_deep_link_boot_then_clear_publishes_empty(run_store_router):
+    """修复轮（review Important 3a）：boot 不发布 route_params（裁决不变——
+    深链初始参数由消费方装载时自 hash 解析），但 boot 深链参数计入「已应用」
+    状态 —— 随后清空参数的导航必须发布 {}，不得被「空⇄空」抑制而让消费方
+    残留深链过滤。"""
+    out = run_store_router({
+        "hash": "#/requests?status=4xx",       # boot（不发布）
+        "calls": [
+            {"navigate": {"view": "status", "sub": None}},    # 跨视图，不携带
+            {"navigate": {"view": "requests", "sub": None}},  # 回请求区（空参数）
+        ],
+    })
+    assert out["hash"] == "#/requests"
+    assert out["paramSteps"] == [{}]           # 清空发布过一次，消费方得以复位
+
+
+def test_params_key_distinguishes_delimiter_values(run_store_router):
+    """修复轮（review Important 3b）：q 含字面 '&status=4xx' 与真实 status
+    参数是不同参数集 —— 应用键/发布键经 URI 编码，不得碰撞。"""
+    out = run_store_router({
+        "hash": "#/requests?q=x%26status%3D4xx",   # q = 'x&status=4xx'（深链）
+        "calls": [
+            {"navigate": {"view": "requests", "sub": None,
+                          "params": {"q": "x", "status": "4xx"}}},
+        ],
+    })
+    assert out["hash"] == "#/requests?q=x&status=4xx"
+    assert out["paramSteps"] == [{"q": "x", "status": "4xx"}]
     out2 = run_store_router({
         "hash": "#/requests?status=4xx",
         "calls": [{"navigate": {"view": "status"}}],
