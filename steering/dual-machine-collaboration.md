@@ -44,7 +44,7 @@
 
 ### 4.1 验证分级（按变更影响，不按机器名字）
 
-- 代码 PR 保留 constitution 的 LLM cross-review（GLM-5.2）和双端 unit + integration 基线。无 CI（方案 A 不加 Actions）；最后 push 的主责端负责收齐证据与全量绿，不能代签另一端结果。
+- 代码 PR 保留 LLM cross-review（**fresh-context subagent 一次评审，不绑定模型、不经云路由** —— 2026-10-25 用户裁决，取代早期「GLM-5.2」表述）和双端 unit + integration 基线。无 CI（方案 A 不加 Actions）；最后 push 的主责端负责收齐证据与全量绿，不能代签另一端结果。
 - **仅文档或纯视觉**：文档验证链接与 diff；纯视觉代码按现有代码回归要求，加受影响页面冒烟，不因跑在 Ubuntu 就占用 GPU。若实际改变状态、端点或平台文案含义，按共用功能验。
 - **共用网关／UI／配置契约**：Mac（Apple Silicon）与 Ubuntu（x86 + NVIDIA）各自在隔离实例做受影响的功能验收。能模拟就不消耗真机时段，例如云端接入、路由与别名用模拟上游；约定中的另一端可选代码复审，不能代替必需的跨端验收。
 - **硬件或平台专属行为**：涉及引擎生命周期、平台探测、进程收割、显存／统一内存准入、硬件运行时或依赖本地状态的路由时，逐项列明受影响平台和必测场景。NVIDIA GPU operational 只在 vince-pc 或另行约定的 Ubuntu 验证主机跑；Apple Silicon 用其独立代表路径。只认实测组合：列出 Ubuntu 版本、x86 架构、驱动、GPU 和引擎版本，某一组合通过不代表其他组合。
