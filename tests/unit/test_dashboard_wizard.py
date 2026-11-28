@@ -28,7 +28,7 @@ class TestAssembly:
     def test_mounted_inside_packs(self):
         # 2026-11-24 迁移（specs/console-ux-batch WS1）：向导挂能力包 tab；
         # 模型池页不再有向导入口/占位符
-        mp = (_DASH / "fragments" / "model-pools.html").read_text(
+        mp = (_DASH / "fragments" / "routing.html").read_text(
             encoding="utf-8")
         pk = (_DASH / "fragments" / "packs.html").read_text(
             encoding="utf-8")
@@ -60,7 +60,7 @@ class TestSourceContract:
 
     def test_no_inline_onclick(self):
         for name in ("js/wizard.js", "fragments/wizard.html",
-                     "fragments/model-pools.html", "fragments/packs.html"):
+                     "fragments/routing.html", "fragments/packs.html"):
             text = (_DASH / name).read_text(encoding="utf-8")
             assert "onclick=" not in text, name
 

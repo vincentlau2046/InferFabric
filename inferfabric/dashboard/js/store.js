@@ -12,6 +12,28 @@
 (function () {
   'use strict';
 
+/* ── UX v3 A2：视图 ⇄ 既有内容组映射（2026-11-27）──
+ * 六区每个视图组合一个或多个"既有内容组"（= 旧 tab id，模块的渲染/刷新守卫沿用旧键）。
+ * 模块经 store.isGroupActive('<旧tab id>') 判断自己是否在可见视图内；
+ * 组合关系唯一在此；router 只负责地址与视图/子页切换。 */
+var VIEW_GROUPS = {
+  'status':            ['tab-overview'],
+  'requests':          ['tab-monitor'],            // 子页默认 = 请求日志
+  'requests/switches': ['tab-monitor'],
+  'requests/anomalies':['tab-anomaly'],
+  'usage':             ['tab-monitor'],            // Token/Agent/延迟/功耗图仍由 monitor.js 渲染
+  'routing':           ['tab-model-pools'],
+  'models':            ['tab-inference', 'tab-monitor'],  // 引擎指标卡由 monitor.js 渲染
+  'config':            ['tab-cloud'],              // 子页默认 = 云端（样机 subnav 首项）
+  'config/cloud':      ['tab-cloud'],
+  'config/auth':       ['tab-security'],
+  'config/connect':    ['tab-connect'],
+  'config/packs':      ['tab-packs'],
+  'config/sys':        ['tab-settings'],
+};
+/* 子页默认节（路由 sub 为 null 时显示的 data-sub 节） */
+var VIEW_DEFAULT_SUB = { 'requests': 'main', 'config': 'cloud' };
+
 class StateStore {
   constructor(initial = {}) {
     this._state = { ...initial };
@@ -19,6 +41,8 @@ class StateStore {
     this._timer = null;
     this._tabActive = null;
     this._switchLocked = false;
+    this._view = null;   // 当前视图（router.setActiveView 注入；null = router 未载入）
+    this._sub = null;    // 当前子页（null = 区默认）
     // Snapshot sync metadata
     this._etag = null;   // last etag received from /api/snapshot
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
@@ -199,13 +223,17 @@ class StateStore {
   }
 
   /* Force a fresh snapshot (manual refresh / post-action refresh).
-   * v2: 按 TAB 注册的渲染器替代 window.refreshPanels。 */
+   * v2: 按 TAB 注册的渲染器替代 window.refreshPanels。
+   * A2: 一个视图可能组合多个内容组（如 models = inference + 引擎指标），逐组调用。 */
   async forceRefresh() {
     const snap = await this.fetchSnapshot(true);
     if (snap) {
-      const fn = window.tabRenderers && window.tabRenderers[this.get('tab_active')];
-      if (typeof fn === 'function') {
-        try { fn(snap); } catch (e) { console.warn('[store] tabRenderer error:', e); }
+      const groups = this.activeGroups();
+      for (const g of groups) {
+        const fn = window.tabRenderers && window.tabRenderers[g];
+        if (typeof fn === 'function') {
+          try { fn(snap); } catch (e) { console.warn('[store] tabRenderer error:', g, e); }
+        }
       }
     }
     return snap;
@@ -234,9 +262,33 @@ class StateStore {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
   }
 
-  /* ── Tab Management ── */
-  switchTab(tabId) {
-    if (this._switchLocked) return;
+  /* ── 视图组合（A2）：router 在应用路由前注入 view/sub ── */
+  setActiveView(view, sub) {
+    this._view = view || null;
+    this._sub = sub || null;
+  }
+
+  /** 当前视图包含的既有内容组（旧 tab id 列表）。 */
+  activeGroups() {
+    if (!this._view) return this._state.tab_active ? [this._state.tab_active] : [];
+    const key = this._view + (this._sub ? '/' + this._sub : '');
+    return VIEW_GROUPS[key] || VIEW_GROUPS[this._view] || [];
+  }
+
+  /** 某内容组当前是否可见（模块渲染/轮询守卫用；router 未载入时退回旧 tab_active 语义）。 */
+  isGroupActive(groupId) {
+    if (!this._view) return this._state.tab_active === groupId;
+    return this.activeGroups().indexOf(groupId) >= 0;
+  }
+
+  /* ── Tab Management ──
+   * A1（2026-11-27）：路由与持久化唯一归 router.js；store 只保留 DOM 应用
+   * （applyTab）与兼容入口（switchTab）。迁移表唯一在 router.js LEGACY_TAB_ROUTE。
+   * A2（2026-11-27）：tab_active = 六区壳 id（tab-<view>）；子页可见性同在此应用。 */
+
+  /** DOM 应用：唯一挂载路径（router.applyRoute 经此切页；不查锁、不持久化）。
+   *  同时应用壳内 data-sub 子页切换（节显隐 + 临时入口 active 态）。 */
+  applyTab(tabId) {
     // Deactivate all tabs
     document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.if-nav-item').forEach(t => { t.classList.remove('active'); t.removeAttribute('aria-current'); });
@@ -245,23 +297,45 @@ class StateStore {
     if (target) target.classList.add('active');
     const btn = document.querySelector(`.if-nav-item[data-tab="${tabId}"]`);
     if (btn) { btn.classList.add('active'); btn.setAttribute('aria-current', 'page'); }
-    // Store + notify
+    // 壳内子页：data-sub 节按当前 sub（无 sub 用区默认）显隐；入口按钮同步 active
+    if (target && typeof target.querySelectorAll === 'function') {
+      const view = tabId && tabId.indexOf('tab-') === 0 ? tabId.slice(4) : null;
+      const sub = this._sub || VIEW_DEFAULT_SUB[view] || null;
+      target.querySelectorAll('[data-sub]').forEach(el => {
+        el.classList.toggle('on', sub !== null && el.getAttribute('data-sub') === sub);
+      });
+    }
+    // Notify renderers（同一壳内子页切换也要通知：内容组可能变化）
     this._tabActive = tabId;
-    this.set('tab_active', tabId);
-    // Save to localStorage
-    try { localStorage.setItem('iff_active_tab', tabId); } catch(e) {}
+    if (this._state.tab_active !== tabId) {
+      this.set('tab_active', tabId);
+    } else {
+      this._notify('tab_active', tabId, tabId);
+    }
+    // 隐藏壳内初始化的图表在可见后重算尺寸（ECharts 0 尺寸实例）
+    try {
+      if (window.IFCharts && typeof window.IFCharts.resizeAll === 'function') window.IFCharts.resizeAll();
+    } catch (e) { /* noop */ }
+  }
+
+  /** 兼容入口（nav onclick/旧调用）：锁检查后交 router 导航；router 缺失时降级直切。 */
+  switchTab(tabId) {
+    if (this._switchLocked) return;
+    const r = (window.ifRouter && typeof window.ifRouter.routeForTab === 'function')
+      ? window.ifRouter.routeForTab(tabId) : null;
+    if (r && typeof window.ifRouter.navigate === 'function') {
+      window.ifRouter.navigate(r.view, r.sub);
+      return;
+    }
+    this.applyTab(tabId);   // router 未载入的降级路径（不持久化）
   }
 
   restoreTab() {
+    // 恢复与旧键迁移的唯一实现在 router.js boot（含 tab-deploy→config/packs）；
+    // 此处仅 router 未载入时兜底，不持有迁移表。
     try {
-      let saved = localStorage.getItem('iff_active_tab');
-      // 旧版遗留 tab 迁移：部署已并入能力包页（2026-11-20），否则全 tab 失活
-      const LEGACY_TAB_MAP = { 'tab-deploy': 'tab-packs' };
-      if (saved && LEGACY_TAB_MAP[saved]) {
-        saved = LEGACY_TAB_MAP[saved];
-        try { localStorage.setItem('iff_active_tab', saved); } catch(e) {}
-      }
-      // Restore last active tab (anomaly is a regular nav item in v2, no longer hidden)
+      if (window.ifRouter) return;
+      const saved = localStorage.getItem('iff_active_tab');
       if (saved) this.switchTab(saved);
     } catch(e) {}
   }
@@ -287,8 +361,8 @@ window.tabRenderers = {};
 // Render on state changes (batched)
 store.on('gpu_mode', () => store._scheduleRender());
 
-// Expose switchTab globally (replaces legacy monolith version)
-window.switchTab = window.switchTab || ((tabId) => store.switchTab(tabId));
+// Expose switchTab globally (single source: this store entry; routing lives in router.js)
+window.switchTab = (tabId) => store.switchTab(tabId);
 
 /* ── 顶栏 / 外壳绑定（订阅式，R2） ──────────────────────────── */
 

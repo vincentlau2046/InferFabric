@@ -87,6 +87,10 @@
   }
 
   function isOverviewActive() {
+    // A2：视图组合判断（状态页 = 本内容组）；store 无该能力时退回旧 DOM 判断
+    if (store && typeof store.isGroupActive === 'function') {
+      return store.isGroupActive('tab-overview');
+    }
     var el = $('tab-overview');
     return !!(el && el.classList.contains('active'));
   }
@@ -397,7 +401,9 @@
   store.on('sync_meta', renderRail);
   store.on('sync_meta', function () { if (isOverviewActive()) renderOverview(); });
   store.on('tab_active', function (tab) {
-    if (tab === 'tab-overview') { renderRail(); renderOverview(); }
+    var on = (store && typeof store.isGroupActive === 'function')
+      ? store.isGroupActive('tab-overview') : (tab === 'tab-overview');
+    if (on) { renderRail(); renderOverview(); }
   });
 
   /* ── 5. 系统操作：release / reconcile / reload / reset ── */

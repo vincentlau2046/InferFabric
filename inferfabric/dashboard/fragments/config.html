@@ -1,0 +1,23 @@
+<div class="tab-content" id="tab-config">
+  <!-- 配置页壳（UX v3 A2）：五个配置子页收进一个导航项；A 期临时页内入口
+       （横排 chips，路由唯一源 = ifRouter），E 定型为页内左侧二级导航。 -->
+  <div class="if-subnav" role="tablist" aria-label="配置子页">
+    <button type="button" class="if-subnav-btn" data-sub="cloud"
+            onclick="window.ifRouter.navigate('config','cloud')">云端</button>
+    <button type="button" class="if-subnav-btn" data-sub="auth"
+            onclick="window.ifRouter.navigate('config','auth')">鉴权与密钥</button>
+    <button type="button" class="if-subnav-btn" data-sub="connect"
+            onclick="window.ifRouter.navigate('config','connect')">接入</button>
+    <button type="button" class="if-subnav-btn" data-sub="packs"
+            onclick="window.ifRouter.navigate('config','packs')">能力包</button>
+    <button type="button" class="if-subnav-btn" data-sub="sys"
+            onclick="window.ifRouter.navigate('config','sys')">系统</button>
+  </div>
+
+  <!-- FRAGMENT:cloud -->
+  <!-- FRAGMENT:security -->
+  <!-- FRAGMENT:connect -->
+  <!-- FRAGMENT:packs -->
+  <!-- FRAGMENT:settings -->
+
+</div>

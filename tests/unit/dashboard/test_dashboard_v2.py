@@ -61,10 +61,10 @@ def test_icon_symbols_present():
 
 
 def test_js_modules_list():
-    """__init__.py 必须用显式 JS_MODULES 列表。"""
+    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store）。"""
     import inferfabric.dashboard as dash
     assert getattr(dash, "JS_MODULES", None) == [
-        "ui", "store", "charts", "overview", "inference",
+        "ui", "store", "router", "charts", "overview", "inference",
         "monitor", "deploy", "cloud", "model-pools", "anomaly",
         "packs", "security", "settings", "connect", "wizard",
     ]
@@ -223,13 +223,13 @@ def test_overview_js_present():
 
 
 def test_overview_no_fake_script():
-    """overview.html 不得残留 Task 2 静态原型假数据 <script>（已由 overview.js 接管）。
+    """状态页壳（原 overview.html 内容，A2 平移）不得残留静态原型假数据 <script>。
 
     断言：fragment 无任何内联 <script>；无 'prototype-only' 注释标记；
     无假值 '24.1'（原型 VRAM 假值）/ MutationObserver 原型代码。
     """
-    frag = (_DASHBOARD_DIR / "fragments" / "overview.html").read_text(encoding="utf-8")
-    assert "<script" not in frag, "overview.html must not contain an inline <script> block"
+    frag = (_DASHBOARD_DIR / "fragments" / "status.html").read_text(encoding="utf-8")
+    assert "<script" not in frag, "status.html must not contain an inline <script> block"
     assert "prototype-only" not in frag
     assert "24.1" not in frag
     assert "MutationObserver" not in frag
@@ -614,16 +614,18 @@ def test_monitor_readonly():
         bad.append(ln.strip())
     assert not bad, f"monitor.js 存在非 admin 写操作: {bad}"
     # HTML fragment 不得有 form action 或 method
-    frag = (_DASHBOARD_DIR / "fragments" / "monitor.html").read_text(encoding="utf-8")
-    assert "method=" not in frag, "monitor.html contains method= — read-only violation"
-    assert "<form" not in frag, "monitor.html contains <form> — read-only violation"
+    # （A2：monitor 内容平移至 请求/用量/模型 三壳，逐一检查）
+    for frag_name in ("requests.html", "usage.html", "models.html"):
+        frag = (_DASHBOARD_DIR / "fragments" / frag_name).read_text(encoding="utf-8")
+        assert "method=" not in frag, f"{frag_name} contains method= — read-only violation"
+        assert "<form" not in frag, f"{frag_name} contains <form> — read-only violation"
 
 
 def test_monitor_latency_trend():
     """v6.0 延迟趋势 DOM/JS 契约：共享控制条（窗口 latwin + 分位 latq）+ 模型 chip
     选择器（#monLatChips）+ TTFT/TPOT 双趋势卡（#monTtftChart/#monTpotChart 保留）；
     只读——fragment 无 <form。"""
-    frag = (_DASHBOARD_DIR / "fragments" / "monitor.html").read_text(encoding="utf-8")
+    frag = (_DASHBOARD_DIR / "fragments" / "usage.html").read_text(encoding="utf-8")
     js = (ROOT / "inferfabric" / "dashboard" / "js" / "monitor.js").read_text(encoding="utf-8")
     # 控制条契约
     assert 'id="monLatChips"' in frag
@@ -1034,10 +1036,10 @@ def test_inference_js_present():
 
 
 def test_inference_no_inline_onclick():
-    """inference.html 不得含任何 inline onclick= 属性（事件委托约束）。"""
-    frag = (_DASHBOARD_DIR / "fragments" / "inference.html").read_text(encoding="utf-8")
+    """models.html（原 inference.html 内容，A2 平移）不得含 inline onclick=（事件委托约束）。"""
+    frag = (_DASHBOARD_DIR / "fragments" / "models.html").read_text(encoding="utf-8")
     assert "onclick=" not in frag, (
-        "inference.html contains inline onclick= — must use event delegation"
+        "models.html contains inline onclick= — must use event delegation"
     )
 
 
@@ -1587,7 +1589,7 @@ def test_gateway_rate_limit_is_readonly_indicator():
         （配置改动仍走 iff.yaml + 重启 proxy，无热加载）
       * 字段缺失（旧 proxy / 异常）→ 回退静态标签「配置见 iff.yaml」不白屏"""
     js = (ROOT / "inferfabric" / "dashboard" / "js" / "inference.js").read_text(encoding="utf-8")
-    html = (ROOT / "inferfabric" / "dashboard" / "fragments" / "inference.html").read_text(encoding="utf-8")
+    html = (ROOT / "inferfabric" / "dashboard" / "fragments" / "models.html").read_text(encoding="utf-8")
 
     # 数据源：必须读 snapshot 的 rate_limit 字段（非写死）
     assert "rate_limit" in js, "renderGateway must read snapshot local_models.rate_limit"

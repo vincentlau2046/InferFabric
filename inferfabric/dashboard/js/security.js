@@ -244,7 +244,9 @@
   };
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab === 'tab-security') {
+      var on = (store && typeof store.isGroupActive === 'function')
+        ? store.isGroupActive('tab-security') : (tab === 'tab-security');
+      if (on) {
         clearReveal();   // 每次进入先清空（迟到响应由代次守卫丢弃）
         loadStatus();
       } else {

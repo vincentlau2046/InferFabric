@@ -177,27 +177,25 @@ def test_stopped_card_collapses_to_two_slots(render_inference):
 
 def test_nav_grouped_ia_and_aria_current():
     html = BASE_HTML.read_text(encoding="utf-8")
-    import re
-    caps = [s.strip() for s in re.findall(
-        r'<span class="nav-cap"[^>]*>([^<]+)</span>', html)]
-    # IA v3.1（2026-11-24 用户修订，specs/console-ux-batch WS4）：监控为最常用入口
-    # 并入状态组、异常随迁，可观测组取消（4 组 10 项 — PR3 WS4 增设设置页）
-    assert caps == ["状态", "推理与池", "网关策略", "接入"]
-    assert html.count('class="if-nav-item') == 10  # 9 + tab-settings（PR3 WS4）
-    # 组顺序：推理在模型池前；监控/异常紧跟总览（状态组内）
-    assert html.find("tab-inference") < html.find("tab-model-pools")
-    assert 0 < html.find("tab-overview") < html.find("tab-monitor") < html.find("tab-anomaly")
-    # 设置页位于网关策略组（鉴权之后、云端之前）
-    assert 0 < html.find("tab-security") < html.find("tab-settings") < html.find("tab-cloud")
-    # deploy 不再是独立 nav tab（并入能力包页 deploySection）
+    # UX v3 六区导航（2026-11-27 三轮裁决）：状态/请求/用量/路由/模型/配置，
+    # 无分组标题；旧 4 组 10 项结构移除（A2）
+    assert 'class="nav-cap"' not in html
+    assert html.count('class="if-nav-item') == 6
+    order = ["tab-status", "tab-requests", "tab-usage", "tab-routing", "tab-models", "tab-config"]
+    positions = [html.find('data-tab="%s"' % t) for t in order]
+    assert all(p > 0 for p in positions), positions
+    assert positions == sorted(positions), "六区导航顺序不符"
+    # deploy 不是独立 nav tab（并入配置·能力包子页）
     assert 'data-tab="tab-deploy"' not in html
-    # fallback switchTab 维护 aria-current
-    assert 'setAttribute(\'aria-current\', \'page\')' in html
+    # DOM 应用唯一在 store.js applyTab（A1 起）；nav onclick 经 store.switchTab → router
+    store = STORE_JS.read_text(encoding="utf-8")
+    assert "aria-current" in store
+    assert "setAttribute('aria-current', 'page')" in store
+    assert "removeAttribute('aria-current')" in store
+    # 旧 localStorage 'tab-deploy' 迁移到能力包（否则全 tab 失活）；
+    # A1 起迁移表唯一在 router.js LEGACY_TAB_ROUTE（store.restoreTab 仅兜底）
+    router = (ROOT / "inferfabric" / "dashboard" / "js" / "router.js").read_text(encoding="utf-8")
+    assert "'tab-deploy'" in router and "'tab-packs'" in router
 
     packs = (ROOT / "inferfabric" / "dashboard" / "fragments" / "packs.html").read_text(encoding="utf-8")
     assert 'id="deploySection"' in packs
-    # 旧 localStorage 'tab-deploy' 迁移到 'tab-packs'（否则全 tab 失活）
-    store = STORE_JS.read_text(encoding="utf-8")
-    assert "aria-current" in store
-    assert "removeAttribute('aria-current')" in store
-    assert "'tab-deploy'" in store and "'tab-packs'" in store

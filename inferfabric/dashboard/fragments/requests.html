@@ -1,0 +1,49 @@
+<div class="tab-content" id="tab-requests">
+  <!-- 请求页壳（UX v3 A2）：三子页 请求 / 切换历史 / 异常。
+       临时页内入口（B2 定型为与筛选联动的正式子页导航）；路由唯一源 = ifRouter。 -->
+  <div class="if-subnav" role="tablist" aria-label="请求子页">
+    <button type="button" class="if-subnav-btn" data-sub="main"
+            onclick="window.ifRouter.navigate('requests')">请求</button>
+    <button type="button" class="if-subnav-btn" data-sub="switches"
+            onclick="window.ifRouter.navigate('requests','switches')">切换历史</button>
+    <button type="button" class="if-subnav-btn" data-sub="anomalies"
+            onclick="window.ifRouter.navigate('requests','anomalies')">异常</button>
+  </div>
+
+  <!-- 子页：请求日志（monitor.js renderLogTable 渲染；B2 重做为日志工作台） -->
+  <section class="view-sub" data-sub="main">
+    <div class="if-card">
+      <div class="if-card-hdr">
+        <span class="if-card-title">请求日志</span>
+        <span class="if-card-sub" id="monLogTs"></span>
+      </div>
+      <div class="if-card-body" id="monLogTable">
+        <div class="skeleton">
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 子页：切换历史（monitor.js renderHistTable 渲染） -->
+  <section class="view-sub" data-sub="switches">
+    <div class="if-card">
+      <div class="if-card-hdr">
+        <span class="if-card-title">切换历史</span>
+      </div>
+      <div class="if-card-body" id="monHistTable">
+        <div class="skeleton">
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 子页：异常（anomaly.js 渲染；fragment 自带 data-sub=anomalies 包装） -->
+  <!-- FRAGMENT:anomaly -->
+
+</div>

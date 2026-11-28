@@ -23,7 +23,7 @@ def _src(name: str) -> str:
 
 def test_settings_page_is_assembled():
     html = dashboard.get_html()
-    assert 'data-tab="tab-settings"' in html
+    assert 'data-sub="sys"' in html    # A2：设置 = 配置区子页（临时入口）
     assert 'id="tab-settings"' in html
     assert "settings" in dashboard.JS_MODULES
     # settings.js 真实内联（security.js 也含 status URL — 需 settings 独有标记）
@@ -35,8 +35,10 @@ def test_settings_page_is_assembled():
 
 def test_settings_nav_sits_in_gateway_group():
     html = dashboard.get_html()
-    # 位于 鉴权 之后、云端 之前（网关策略组）
-    assert 0 < html.find("tab-security") < html.find("tab-settings") < html.find("tab-cloud")
+    # A2：五子页收进配置区，顺序 = 云端 / 鉴权与密钥 / 接入 / 能力包 / 系统（样机 subnav 序）
+    assert (0 < html.find('id="tab-cloud"') < html.find('id="tab-security"')
+            < html.find('id="tab-connect"') < html.find('id="tab-packs"')
+            < html.find('id="tab-settings"'))
 
 
 # ── 源码契约 ─────────────────────────────────────────────────────

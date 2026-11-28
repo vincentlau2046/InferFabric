@@ -34,6 +34,15 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  /* A2：视图组合判断（路由页 = 本内容组）；store 无该能力时退回旧 tab_active 语义。 */
+  function isPoolActive() {
+    var st = window.store;
+    if (st && typeof st.isGroupActive === 'function') {
+      return st.isGroupActive('tab-model-pools');
+    }
+    return !!(st && typeof st.get === 'function' && st.get('tab_active') === 'tab-model-pools');
+  }
+
   var POOLS_URL = '/admin/model-pools';
   var STATUS_URL = '/admin/model-pools/status';
   var RUNTIME_URL = '/admin/model-pools/runtime';
@@ -969,8 +978,7 @@
   function cdTick() {
     try {
       if (typeof document !== 'undefined' && document.hidden) return;
-      if (window.store && typeof window.store.get === 'function'
-          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      if (!isPoolActive()) return;
       // 评审 I7：按真实流逝时间递减（非执行次数计数——隐藏/切 tab 期间
       // 计时器被节流，锚点差值仍反映真实时间）
       var elapsed = Math.floor((Date.now() - _rtAt) / 1000);
@@ -2002,8 +2010,7 @@
      向导/成果卡在屏时忽略（那里没有池卡上下文）。 */
   function onKeyDown(ev) {
     if (!ev || !ev.key) return;
-    if (window.store && typeof window.store.get === 'function'
-        && window.store.get('tab_active') !== 'tab-model-pools') return;
+    if (!isPoolActive()) return;
     var t = ev.target;
     if (t && t.tagName
         && ['INPUT', 'SELECT', 'TEXTAREA']
@@ -2043,8 +2050,7 @@
   function pollTick() {
     try {
       if (typeof document !== 'undefined' && document.hidden) return;
-      if (window.store && typeof window.store.get === 'function'
-          && window.store.get('tab_active') !== 'tab-model-pools') return;
+      if (!isPoolActive()) return;
       return renderModelPools();   // 返回 promise 供测试/调用方等待
     } catch (e) { /* 轮询失败静默 — 下个滴答重试 */ }
   }

@@ -305,7 +305,9 @@
   };
   if (store && store.on) {
     store.on('tab_active', function (tab) {
-      if (tab === 'tab-settings') {
+      var on = (store && typeof store.isGroupActive === 'function')
+        ? store.isGroupActive('tab-settings') : (tab === 'tab-settings');
+      if (on) {
         clearReveal();
         loadStatus();
       } else {

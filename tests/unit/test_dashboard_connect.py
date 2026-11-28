@@ -30,8 +30,9 @@ def test_connect_tab_is_assembled():
         encoding="utf-8")
     assert '"connect"' in init_src          # fragment 循环注册
     html = dashboard.get_html()
-    assert 'id="tab-connect"' in html       # fragment 已装配
-    assert 'data-tab="tab-connect"' in html  # 导航入口
+    assert 'id="tab-connect"' in html       # fragment 已装配（A2：配置区子页）
+    # A2：接入不再是独立导航项——配置页内临时入口（data-sub=connect）
+    assert 'data-sub="connect"' in html
     assert "admin/connect/status" in html   # connect.js 已内联
     assert "<!-- FRAGMENT:connect -->" not in html   # 占位符已替换
     assert "<!-- JS:connect -->" not in html

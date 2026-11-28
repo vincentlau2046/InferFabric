@@ -215,7 +215,9 @@
   window.doAnomRefresh = loadAnomalies;
 
   store.on('tab_active', function (tab) {
-    if (tab === 'tab-anomaly') renderAnomaly();
+    var on = (store && typeof store.isGroupActive === 'function')
+      ? store.isGroupActive('tab-anomaly') : (tab === 'tab-anomaly');
+    if (on) renderAnomaly();
   });
 
   /* ── 过滤栏接线（模块初始化，无 inline onclick） ── */

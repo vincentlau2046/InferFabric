@@ -339,10 +339,16 @@
     if (_resizeTimer) clearTimeout(_resizeTimer);
     _resizeTimer = setTimeout(function () {
       _resizeTimer = null;
-      for (var id in _instances) {
-        if (_instances[id]) { try { _instances[id].chart.resize(); } catch (e) {} }
-      }
+      resizeAll();
     }, 150);
+  }
+
+  /* 立即重算所有实例尺寸（A2：视图切换后调用——隐藏壳内初始化的
+     ECharts 实例为 0 尺寸，显示后需 resize 才能正确绘制）。 */
+  function resizeAll() {
+    for (var id in _instances) {
+      if (_instances[id]) { try { _instances[id].chart.resize(); } catch (e) {} }
+    }
   }
 
   window.IFCharts = {
@@ -350,6 +356,7 @@
     create: create,
     update: update,
     dispose: dispose,
+    resizeAll: resizeAll,
     onThemeChange: onThemeChange,
     currentTheme: currentTheme,
   };
