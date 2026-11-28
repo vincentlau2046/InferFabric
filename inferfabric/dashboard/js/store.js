@@ -18,12 +18,12 @@
  * 组合关系唯一在此；router 只负责地址与视图/子页切换。 */
 var VIEW_GROUPS = {
   'status':            ['tab-overview'],
-  'requests':          ['tab-monitor'],            // 子页默认 = 请求日志
-  'requests/switches': ['tab-monitor'],
+  'requests':          ['tab-monitor.log'],        // 子页默认 = 请求日志
+  'requests/switches': ['tab-monitor.log'],
   'requests/anomalies':['tab-anomaly'],
-  'usage':             ['tab-monitor'],            // Token/Agent/延迟/功耗图仍由 monitor.js 渲染
+  'usage':             ['tab-monitor.usage'],      // Token/Agent/延迟/功耗图（monitor.js 渲染）
   'routing':           ['tab-model-pools'],
-  'models':            ['tab-inference', 'tab-monitor'],  // 引擎指标卡由 monitor.js 渲染
+  'models':            ['tab-inference', 'tab-monitor.kpis'],  // 引擎指标卡（monitor.js 渲染）
   'config':            ['tab-cloud'],              // 子页默认 = 云端（样机 subnav 首项）
   'config/cloud':      ['tab-cloud'],
   'config/auth':       ['tab-security'],
@@ -43,6 +43,7 @@ class StateStore {
     this._switchLocked = false;
     this._view = null;   // 当前视图（router.setActiveView 注入；null = router 未载入）
     this._sub = null;    // 当前子页（null = 区默认）
+    this._effSub = null; // 最近一次应用的有效子页（默认子页已展开）
     // Snapshot sync metadata
     this._etag = null;   // last etag received from /api/snapshot
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
@@ -298,18 +299,24 @@ class StateStore {
     const btn = document.querySelector(`.if-nav-item[data-tab="${tabId}"]`);
     if (btn) { btn.classList.add('active'); btn.setAttribute('aria-current', 'page'); }
     // 壳内子页：data-sub 节按当前 sub（无 sub 用区默认）显隐；入口按钮同步 active
+    var view = tabId && tabId.indexOf('tab-') === 0 ? tabId.slice(4) : null;
+    var effSub = null;
     if (target && typeof target.querySelectorAll === 'function') {
-      const view = tabId && tabId.indexOf('tab-') === 0 ? tabId.slice(4) : null;
-      const sub = this._sub || VIEW_DEFAULT_SUB[view] || null;
+      effSub = (this._sub || VIEW_DEFAULT_SUB[view]) || null;
       target.querySelectorAll('[data-sub]').forEach(el => {
-        el.classList.toggle('on', sub !== null && el.getAttribute('data-sub') === sub);
+        el.classList.toggle('on', effSub !== null && el.getAttribute('data-sub') === effSub);
       });
     }
-    // Notify renderers（同一壳内子页切换也要通知：内容组可能变化）
+    // Notify renderers：仅在「壳变化」或「有效子页变化」时通知 —
+    // #/config 与 #/config/cloud 是同一有效子页，不触发模块重渲染（cross-review Important 4）；
+    // 同一壳内真实换子页（如 requests→switches）仍须通知。
     this._tabActive = tabId;
-    if (this._state.tab_active !== tabId) {
+    var sameShell = this._state.tab_active === tabId;
+    var sameSub = this._effSub === effSub;
+    this._effSub = effSub;
+    if (!sameShell) {
       this.set('tab_active', tabId);
-    } else {
+    } else if (!sameSub) {
       this._notify('tab_active', tabId, tabId);
     }
     // 隐藏壳内初始化的图表在可见后重算尺寸（ECharts 0 尺寸实例）
@@ -342,7 +349,17 @@ class StateStore {
 
   /* ── Switch Lock ── */
   setSwitchLocked(locked) {
-    this._switchLocked = locked;
+    var was = this._switchLocked;
+    this._switchLocked = !!locked;
+    // 解锁：锁内被丢弃的浏览器前进/后退（hash 已变、未应用）在此补一次解析与应用，
+    // 避免「地址=新视图、页面=旧视图」的错配直到刷新（cross-review Important 1）。
+    if (was && !this._switchLocked) {
+      try {
+        if (window.ifRouter && typeof window.ifRouter.applyFromHash === 'function') {
+          window.ifRouter.applyFromHash();
+        }
+      } catch (e) { /* 对账失败不阻断解锁 */ }
+    }
   }
   isSwitchLocked() {
     return this._switchLocked;
@@ -465,11 +482,11 @@ function toggleTheme() {
   const isLight = html.getAttribute('data-theme') === 'light';
   if (isLight) {
     html.removeAttribute('data-theme');          // → dark (:root 默认)
-    localStorage.setItem('iff_theme', 'dark');
+    try { localStorage.setItem('iff_theme', 'dark'); } catch (e) { /* 存储禁用不影响主题切换 */ }
     store.set('theme', 'dark');                  // 通知图表等订阅者（charts.js）
   } else {
     html.setAttribute('data-theme', 'light');
-    localStorage.setItem('iff_theme', 'light');
+    try { localStorage.setItem('iff_theme', 'light'); } catch (e) { /* 同上 */ }
     store.set('theme', 'light');
   }
   updateThemeIcon();
@@ -492,7 +509,9 @@ window.toggleTheme = toggleTheme;
 // 直接 light。:root 语义色仍按 dark 定义（[data-theme] 覆盖），default 只是
 // 首屏落点。
 (function initTheme() {
-  const saved = localStorage.getItem('iff_theme');
+  // 存储禁用（SecurityError）不得中断自举：读取失败按默认浅色继续
+  let saved = null;
+  try { saved = localStorage.getItem('iff_theme'); } catch (e) { /* storage denied */ }
   var th = 'light';
   if (saved === 'dark') {
     document.documentElement.removeAttribute('data-theme');   // → dark (:root 默认)

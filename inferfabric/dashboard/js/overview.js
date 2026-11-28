@@ -228,10 +228,10 @@
           '<span class="if-card-sub">GPU 空闲</span>' +
         '</div>' +
         '<div class="if-card-body" id="ovActiveBody">' +
-          '<p class="muted">当前无模型在运行。切换模型请前往推理页。</p>' +
+          '<p class="muted">当前无模型在运行。切换模型请前往模型页。</p>' +
         '</div>' +
         '<div class="if-card-actions">' +
-          '<button class="btn btn-sec btn-sm" data-action="goto-inference">' + UI.icon('cube', 14) + '前往推理</button>' +
+          '<button class="btn btn-sec btn-sm" data-action="goto-inference">' + UI.icon('cube', 14) + '前往模型</button>' +
         '</div>';
       return;
     }

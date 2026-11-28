@@ -68,6 +68,7 @@
   var _engineCache = null;
   var _engineModel = null;
   var _lastEngineFetch = 0;
+  var _engineInflight = null;    // {model} — 同模型在途去重（forceRefresh 双触发）
   var ENGINE_TTL = 15000;        // 15s
 
   // Token 卡四档统一节流 + 数据源（单位语义统一 v6.3）：
@@ -93,15 +94,18 @@
     return String(m).split('/').pop();
   }
 
-  function isMonitorActive() {
-    // A2：monitor 内容组分布在 请求/用量/模型 三视图（VIEW_GROUPS），
-    // 以 store 视图组合判断；store 无该能力时退回旧 DOM 判断。
+  /* A2 修复轮：monitor 内容按六区分三个内容节（store VIEW_GROUPS 伪组）——
+   log = 请求日志+切换历史（请求页）；usage = 功耗/Token/Agent/延迟（用量页）；
+   kpis = 引擎指标（模型页）。隐藏节不渲染、不拉数（cross-review Important 4）。 */
+  function groupActive(g) {
     if (store && typeof store.isGroupActive === 'function') {
-      return store.isGroupActive('tab-monitor');
+      return store.isGroupActive(g);
     }
-    var el = $('tab-monitor');
-    return !!(el && el.classList.contains('active'));
+    return true;   // 无视图组合能力（旧桩/降级）：保持旧「全渲染」兜底
   }
+  function logActive() { return groupActive('tab-monitor.log'); }
+  function usageActive() { return groupActive('tab-monitor.usage'); }
+  function kpisActive() { return groupActive('tab-monitor.kpis'); }
 
   function fmtTok(n) {
     if (n == null || isNaN(n)) return '0';
@@ -213,7 +217,7 @@
         })
         .then(function (data) {
           _pgranCache[gran] = { data: data || {}, at: Date.now() };
-          if (isMonitorActive()) drawPower();
+          if (usageActive()) drawPower();
         })
         .catch(function (e) { console.warn('[monitor] /api/device_power fetch failed:', e); })
         .then(function () { _pgranInflight[gran] = false; });
@@ -378,7 +382,7 @@
         })
         .then(function () {
           _tokenCurveInflight[gran] = false;
-          if (isMonitorActive()) renderTokenChart();
+          if (usageActive()) renderTokenChart();
         });
     }
     return _tokenFromBuckets(gran, (hit && hit.data[scope]) || [], now);
@@ -634,7 +638,7 @@
         })
         .then(function (data) {
           _latCache[win] = { data: data || {}, at: Date.now() };
-          if (isMonitorActive()) renderLatencyCards();
+          if (usageActive()) renderLatencyCards();
         })
         .catch(function (e) { console.warn('[monitor] /api/latency fetch failed:', e); })
         .then(function () { _latFetchInflight[win] = false; });
@@ -862,7 +866,7 @@
     if (!active.length) {
       _engineCache = null;
       _engineModel = null;
-      el.innerHTML = '<div class="if-empty">无活跃模型 — 到推理 TAB 启动一个</div>';
+      el.innerHTML = '<div class="if-empty">无活跃模型 — 到模型页启动一个</div>';
       var mLabel = $('monKpiModel');
       if (mLabel) mLabel.textContent = '';
       return;
@@ -877,6 +881,8 @@
       return;
     }
 
+    if (_engineInflight && _engineInflight.model === model) return;   // 在途去重
+    _engineInflight = { model: model };
     UI.skeleton(el, 3);
     // GET only — no method specified = GET (read-only constraint)
     fetch('/api/engine_metrics?model=' + encodeURIComponent(model), {
@@ -887,12 +893,14 @@
         return res.json();
       })
       .then(function (data) {
+        _engineInflight = null;
         _engineCache = data;
         _engineModel = model;
         _lastEngineFetch = Date.now();
         drawKpis(data);
       })
       .catch(function () {
+        _engineInflight = null;
         el.innerHTML = '<div class="if-empty">引擎指标暂不可用</div>';
       });
   }
@@ -1070,7 +1078,7 @@
   }
 
   function renderAgentCard() {
-    if (!isMonitorActive()) return;
+    if (!usageActive()) return;
     var d = _agentCache; if (!d) { getAgentStats(); return; }
     var emptyEl = $('monAgentEmpty');
     var have = d.window_requests > 0;
@@ -1294,24 +1302,34 @@
     renderHistTable();
   }
   window.tabRenderers['tab-monitor'] = renderMonitor;
+  /* A2 修复轮：按内容节注册（store.forceRefresh 迭代 activeGroups 的伪组键） */
+  window.tabRenderers['tab-monitor.log'] = function () { renderLogTable(); renderHistTable(); };
+  window.tabRenderers['tab-monitor.usage'] = function () { renderPowerCard(); renderTokenChart(); getAgentStats(); };
+  window.tabRenderers['tab-monitor.kpis'] = renderKpis;
 
   /* ── 订阅：sync_meta → 仅 monitor tab 活跃时刷新 ──
    * 功耗采样在服务端（PowerSampler 60s，页面关着历史也连续），前端零积累——
    * 不再有 GPU ring buffer 采样 push。 */
   store.on('sync_meta', function () {
-    if (isMonitorActive()) renderMonitor();
+    if (logActive()) { renderLogTable(); renderHistTable(); }
+    if (usageActive()) { renderPowerCard(); renderTokenChart(); getAgentStats(); }
+    if (kpisActive()) renderKpis();
   });
 
   store.on('tab_active', function () {
-    if (store.isGroupActive && store.isGroupActive('tab-monitor')) {
-      // 进入含 monitor 内容组的视图：立即渲染（charts 可能需要 init）
-      renderMonitor();
+    // 进入视图/换子页：按可见内容节立即渲染（charts 可能需要 init）
+    if (logActive()) { renderLogTable(); renderHistTable(); }
+    if (usageActive()) {
+      renderPowerCard();
+      renderTokenChart();
+      getAgentStats();
       // 延迟卡 + 功耗卡：TTL 缓存命中即时画 / 过期触发 fetch 落地后重绘
       renderLatencyCards();
       renderPowerCard();
       // Agent 卡：切 tab 时图实例可能已重建，即便 TTL 命中也强制重画一次
       if (_agentCache) renderAgentCard();
     }
+    if (kpisActive()) renderKpis();
   });
 
   /* ── 事件委托：窗口/粒度切换（display filter，不触达服务端） ──
@@ -1407,7 +1425,7 @@
   if (IFCharts && typeof IFCharts.onThemeChange === 'function') {
     IFCharts.onThemeChange(function () {
       // 重建后实例已更新，重新渲染所有图表注入数据；热缓存 guard 需复位否则被跳过
-      if (isMonitorActive()) {
+      if (usageActive()) {
         _pgranRendered = null;
         _tokenRenderedAt = {};     // Token guard 复位（实例重建，强制重画）
         renderPowerCard();

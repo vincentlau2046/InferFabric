@@ -163,17 +163,20 @@
     // 不再重复触发 renderer；真实多次应用只发生在 route 真正变化时。
     var key = route.view + '/' + (route.sub || '');
     if (key === _lastAppliedKey) return true;
-    _lastAppliedKey = key;
     var tab = tabForRoute(route.view, route.sub);
     persistRoute(route);
+    var applied = false;
     try {
       if (window.store && typeof window.store.setActiveView === 'function') {
         window.store.setActiveView(route.view, route.sub);      // 视图组合先于 DOM 应用
       }
       if (tab && window.store && typeof window.store.applyTab === 'function') {
         window.store.applyTab(tab);
+        applied = true;
       }
-    } catch (e) { /* store 未就绪：下次 hashchange 再应用 */ }
+    } catch (e) { /* store 未就绪/应用失败：下次 hashchange 再应用 */ }
+    // 应用成功才记录键：applyTab 抛错时同路由必须可重试，不能被提前去重
+    if (applied) _lastAppliedKey = key;
     return true;
   }
 
@@ -181,7 +184,21 @@
     var r = parseHash(hash);
     if (r && r.sub === '__invalid__') r.sub = null;      // 非法子页回退区默认
     if (r) return r;
+    // 旧锚点收藏（#tab-xxx，无 '#/'）：按旧 tab 迁移表解析（cross-review Important 2）
+    if (typeof hash === 'string' && hash.indexOf('#tab-') === 0) {
+      var lr = routeForTab(hash.slice(1));
+      if (lr) return { view: lr.view, sub: lr.sub, params: {} };
+    }
     return { view: 'status', sub: null, params: {} };
+  }
+
+  /** 把当前地址规范为 resolved 路由的规范形式（replace 不新增历史项）。
+   *  hash→路由 的三个入口（boot / hashchange / reconcile）共用此规范化。 */
+  function canonicalize(r) {
+    var canonical = toHash(r.view, r.sub, r.params || {});
+    if (location.hash !== canonical) {
+      try { location.replace(canonical); } catch (e) { /* 非 DOM 环境忽略 */ }
+    }
   }
 
   /* ── 公共 API ── */
@@ -193,20 +210,37 @@
     tabForRoute: tabForRoute,
 
     /** 程序化导航（click/代码共用入口）。锁定或未知 view → false。
-     *  设 hash 后显式应用一次；浏览器随后派发的 hashchange 由幂等去重吞掉。 */
+     *  非法 sub 回退区默认（不进 hash/存储）；设 hash 后显式应用一次；
+     *  浏览器随后派发的 hashchange 由幂等去重吞掉。 */
     navigate: function (view, sub, params) {
       if (VIEWS.indexOf(view) < 0) return false;
       if (isLocked()) return false;
+      // 非法子页不得进入地址与持久化（cross-review Important 2）
+      if (sub !== null && sub !== undefined &&
+          (SUBS[view] || []).indexOf(sub) < 0) sub = null;
       var target = toHash(view, sub, params);
       if (location.hash !== target) location.hash = target;
       applyRoute({ view: view, sub: sub || null, params: params || {} });
       return true;
     },
 
-    /** hashchange 入口：锁与兜底都在这一条路径上。 */
+    /** hashchange 入口：锁与兜底都在这一条路径上；畸形地址 replace 规范。 */
     applyFromHash: function () {
       if (isLocked()) return false;
-      return applyRoute(resolve(location.hash));
+      var r = resolve(location.hash);
+      canonicalize(r);
+      return applyRoute(r);
+    },
+
+    /** 解锁对账（store.setSwitchLocked(false) 调用）：锁内被丢弃的浏览器
+     *  前进/后退 hash，在解锁时对当前地址补一次解析与应用。 */
+    reconcile: function () {
+      if (isLocked()) return false;
+      var r = resolve(location.hash);
+      var key = r.view + '/' + (r.sub || '');
+      if (key === _lastAppliedKey) return true;
+      canonicalize(r);
+      return applyRoute(r);
     },
 
     /** 启动：hash 优先；否则按存储恢复（用 replace 不留多余历史项）。
@@ -215,13 +249,9 @@
     boot: function () {
       if (isLocked()) return false;
       if (location.hash) {
-        var parsed = parseHash(location.hash);
-        if (!parsed || parsed.sub === '__invalid__') {
-          var r = resolve(location.hash);
-          try { location.replace(toHash(r.view, r.sub, {})); } catch (e) { /* 忽略 */ }
-          return applyRoute(r);
-        }
-        return applyRoute(parsed);
+        var r = resolve(location.hash);
+        canonicalize(r);
+        return applyRoute(r);
       }
       var stored = readStoredRoute();
       var route = stored || { view: 'status', sub: null, params: {} };

@@ -89,8 +89,12 @@ const window = {
 };
 const document = { addEventListener: () => {}, querySelectorAll: () => [] };
 if (input.store) {
+  let failsLeft = input.store.failApplyTimes || 0;
   window.store = {
-    applyTab: (tabId) => { applied.push(tabId); },
+    applyTab: (tabId) => {
+      applied.push(tabId);
+      if (failsLeft > 0) { failsLeft -= 1; throw new Error('applyTab failed'); }
+    },
     isSwitchLocked: () => !!input.store.locked,
   };
 }
@@ -309,17 +313,24 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 
-function makeStorage(data) {
-  const map = Object.assign({}, data || {});
+function makeStorage(opts) {
+  opts = opts || {};
+  const map = Object.assign({}, opts.data || {});
   return {
-    getItem: (k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null),
-    setItem: (k, v) => { map[k] = String(v); },
+    getItem: (k) => {
+      if (opts.throwOn === 'get') throw new Error('storage denied');
+      return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null;
+    },
+    setItem: (k, v) => {
+      if (opts.throwOn === 'set') throw new Error('storage denied');
+      map[k] = String(v);
+    },
     removeItem: (k) => { delete map[k]; },
     _map: map,
   };
 }
 const storage = makeStorage(input.storage);
-let hashValue = '';
+let hashValue = input.hash || '';
 let hashListener = null;
 const location = {
   get hash() { return hashValue; },
@@ -388,10 +399,28 @@ const ctx = {
 vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), ctx);   // store.js
 vm.runInNewContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);   // router.js
 assert.ok(window.store && window.ifRouter, 'store and router must both load');
-if (input.locked) window.store.setSwitchLocked(true);
-const callResult = window.switchTab(input.tab);
+let notifyCount = 0;
+window.store.on('tab_active', function () { notifyCount += 1; });
+const notifySteps = [notifyCount];   // 注册即回放当前值一次
+for (const step of (input.calls || [])) {
+  if (step.setLocked !== undefined) window.store.setSwitchLocked(step.setLocked);
+  if (step.hashChange) { hashValue = step.hashChange; if (hashListener) hashListener(); }
+  notifySteps.push(notifyCount);
+}
+if (input.call && input.call.groupChecks) {
+  outGroups = {};
+  for (const g of input.call.groupChecks) outGroups[g] = window.store.isGroupActive(g);
+}
+if (input.locked && !(input.calls || []).length) window.store.setSwitchLocked(true);
+if (input.tab) {
+  var callResult = window.switchTab(input.tab);
+  var outCall = (callResult === undefined ? null : callResult);
+}
+var outGroups = (typeof outGroups !== 'undefined') ? outGroups : null;
 const out = {
-  callResult: callResult === undefined ? null : callResult,
+  callResult: (typeof outCall !== 'undefined') ? outCall : null,
+  notifySteps: notifySteps,
+  groups: outGroups,
   hash: hashValue,
   tab_active: window.store.get('tab_active'),
   activePanels: Object.keys(panels).filter((id) => panels[id]._classes.has('active')),
@@ -443,3 +472,103 @@ def test_store_switch_tab_locked_is_refused(run_store_router):
     assert out["hash"] == "#/status"          # boot 默认地址，未因点击而变
     assert out["activePanels"] == ["tab-status"]
     assert out["iff_view"] == "status"
+
+
+# ── 6. 修复轮（cross-review Important 1/2/3/4）：路由规范化 / 解锁对账 / 存储容错 / 分组分发 ──
+
+def test_navigate_invalid_sub_normalized(run_router):
+    """navigate 的非法 sub 不得进入 hash 与存储（回退区默认子页）。"""
+    out = run_router({"store": {}, "call": {"navigate": {"view": "requests", "sub": "missing"}}})
+    assert out["navigateResult"] is True
+    assert out["finalHash"] == "#/requests"
+    assert out["iff_view"] == "requests"
+
+
+def test_runtime_hash_unknown_canonicalized(run_router):
+    """运行中收到未知 hash：面板回退 + 地址 replace 规范（不留历史项）。"""
+    out = run_router({"store": {}, "call": {"hashChange": "#/nope"}})
+    assert out["applied"] == ["tab-status"]
+    assert out["finalHash"] == "#/status"
+
+
+def test_runtime_hash_extra_segments_canonicalized(run_router):
+    out = run_router({"store": {}, "call": {"hashChange": "#/config/cloud/extra"}})
+    assert out["finalHash"] == "#/config/cloud"
+    assert out["applied"][-1] == "tab-config"
+
+
+def test_runtime_hash_invalid_sub_canonicalized(run_router):
+    out = run_router({"store": {}, "call": {"hashChange": "#/requests/bogus?x=1"}})
+    assert out["finalHash"] == "#/requests?x=1"
+
+
+def test_boot_legacy_anchor_migrates(run_router):
+    """旧锚点收藏（#tab-xxx，无 '#/'）按旧 tab 迁移表解析并规范化地址。"""
+    out = run_router({"store": {}, "hash": "#tab-cloud"})
+    assert out["applied"] == ["tab-config"]
+    assert out["finalHash"] == "#/config/cloud"
+    assert out["iff_view"] == "config/cloud"
+
+
+def test_apply_key_recorded_only_after_success(run_router):
+    """applyTab 抛错时不得记录已应用键，同路由下一次 hashchange 必须可重试。"""
+    out = run_router({"store": {"failApplyTimes": 1},
+                      "call": {"hashChange": "#/status"}})
+    # boot 应用失败（1 次尝试），随后同 hashchange 重试成功（第 2 次尝试）
+    assert out["applied"] == ["tab-status", "tab-status"]
+
+
+def test_theme_storage_denied_boot_survives(run_store_router):
+    """存储禁用（SecurityError）时主题初始化不得中断 store+router 自举（A1 承诺在真实装配成立）。"""
+    out = run_store_router({"storage": {"throwOn": "get"}})
+    assert out["activePanels"] == ["tab-status"]
+    assert out["tab_active"] == "tab-status"
+
+
+def test_unlock_reconciles_dropped_hash(run_store_router):
+    """锁内浏览器 hashchange 被丢弃：解锁时必须对当前地址补一次应用（不新增历史项）。"""
+    out = run_store_router({
+        "hash": "#/config",
+        "calls": [
+            {"setLocked": True},
+            {"hashChange": "#/requests"},
+            {"setLocked": False},
+        ],
+    })
+    assert out["hash"] == "#/requests"
+    assert out["activePanels"] == ["tab-requests"]
+    assert out["tab_active"] == "tab-requests"
+    assert out["iff_view"] == "requests"
+
+
+def test_config_default_sub_alias_does_not_renotify(run_store_router):
+    """#/config 与 #/config/cloud 是同一有效子页：壳同、有效子页同 → 不再通知模块重渲染。"""
+    out = run_store_router({
+        "hash": "#/status",
+        "calls": [
+            {"hashChange": "#/config"},
+            {"hashChange": "#/config/cloud"},
+        ],
+    })
+    # [注册回放, /config, /config/cloud]：别名切换不得新增通知
+    assert out["notifySteps"] == [1, 2, 2]
+
+
+def test_view_groups_dispatch_matrix(run_store_router):
+    """VIEW_GROUPS 细化到内容节：模型页只该看引擎 KPI，用量页只该看用量节。"""
+    def check(h, groups):
+        out = run_store_router({"hash": h, "call": {"groupChecks": groups}})
+        return out["groups"]
+
+    got = check("#/models", ["tab-inference", "tab-monitor.kpis",
+                             "tab-monitor.log", "tab-monitor.usage"])
+    assert got == {"tab-inference": True, "tab-monitor.kpis": True,
+                   "tab-monitor.log": False, "tab-monitor.usage": False}
+    got = check("#/usage", ["tab-monitor.usage", "tab-monitor.log", "tab-monitor.kpis"])
+    assert got == {"tab-monitor.usage": True, "tab-monitor.log": False, "tab-monitor.kpis": False}
+    got = check("#/requests", ["tab-monitor.log", "tab-monitor.usage"])
+    assert got == {"tab-monitor.log": True, "tab-monitor.usage": False}
+    got = check("#/requests/switches", ["tab-monitor.log", "tab-monitor.usage"])
+    assert got == {"tab-monitor.log": True, "tab-monitor.usage": False}
+    got = check("#/requests/anomalies", ["tab-anomaly", "tab-monitor.log"])
+    assert got == {"tab-anomaly": True, "tab-monitor.log": False}
