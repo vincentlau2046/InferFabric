@@ -187,10 +187,20 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
               "tokens_in": 0, "tokens_out": 0,
               "usage_unknown_rows": 0, "cost_estimate": None,
               "cost_coverage": "unpriced"}
+    # D1：cache 份额与按路分解（同快照增量输出，兼容键不变）
+    totals["tokens_in_cached"] = 0
     models: dict[tuple, dict] = {}
     series = [{"bucket_start": edges[i], "bucket_end": edges[i + 1],
-               "requests": 0, "success": 0, "tokens_in": 0, "tokens_out": 0}
+               "requests": 0, "success": 0, "tokens_in": 0, "tokens_out": 0,
+               "local": {"requests": 0, "tokens_in": 0, "tokens_out": 0,
+                         "tokens_in_cached": 0, "cost": 0.0, "priced": False},
+               "cloud": {"requests": 0, "tokens_in": 0, "tokens_out": 0,
+                         "tokens_in_cached": 0, "cost": 0.0, "priced": False},
+               "unknown": {"requests": 0, "tokens_in": 0, "tokens_out": 0,
+                           "tokens_in_cached": 0, "cost": 0.0, "priced": False},
+               }
               for i in range(buckets)]
+    agents: dict[str, dict] = {}
     pools: dict[str, dict] = {}
     error_counts: dict[str, int] = {}
     pool_summary_rows = 0
@@ -238,14 +248,16 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
             is_success = isinstance(status, int) and 200 <= status < 300
             tin = int(row.get("tokens_in") or 0)
             tout = int(row.get("tokens_out") or 0)
+            cached = int(row.get("tokens_in_cached") or 0)
 
             totals["requests"] += 1
             if is_success:
                 totals["success"] += 1
             totals["tokens_in"] += tin
             totals["tokens_out"] += tout
+            totals["tokens_in_cached"] += cached
 
-            # series 桶（全量行都归桶，保证图桶合计 == 总量）
+            # series 桶（全量行都归桶，保证图桶合计 == 总量）+ D1 三路分解
             ts = row.get("timestamp")
             if isinstance(ts, (int, float)) and since <= ts < until:
                 b = series[bisect.bisect_right(edges, ts) - 1]
@@ -254,6 +266,35 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
                     b["success"] += 1
                 b["tokens_in"] += tin
                 b["tokens_out"] += tout
+                sub = b[loc]
+                sub["requests"] += 1
+                sub["tokens_in"] += tin
+                sub["tokens_out"] += tout
+                sub["tokens_in_cached"] += cached
+
+            # D1：agents 按既有客户端 ID（agent 字段）汇总；缺失 → 保留
+            # unidentified 分组（不丢弃、不伪造真实 ID）
+            agent_key = str(row.get("agent") or "") or "unidentified"
+            ag = agents.get(agent_key)
+            if ag is None:
+                ag = agents[agent_key] = {
+                    "agent": agent_key, "requests": 0, "success": 0,
+                    "tokens_in": 0, "tokens_out": 0, "tokens_in_cached": 0,
+                    "ttft_samples": [], "duration_samples": [],
+                    "cost": 0.0, "priced": False,
+                }
+            ag["requests"] += 1
+            if is_success:
+                ag["success"] += 1
+            ag["tokens_in"] += tin
+            ag["tokens_out"] += tout
+            ag["tokens_in_cached"] += cached
+            ttft_ag = row.get("ttft_ms")
+            if isinstance(ttft_ag, (int, float)) and ttft_ag > 0:
+                ag["ttft_samples"].append(float(ttft_ag))
+            dur_ag = row.get("duration_ms")
+            if isinstance(dur_ag, (int, float)) and dur_ag > 0:
+                ag["duration_samples"].append(float(dur_ag))
 
             # models 聚合（跨 provider 同名不混合：键含 location+provider）
             mkey = (loc, provider, model)
@@ -262,13 +303,16 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
                 m = models[mkey] = {
                     "location": loc, "provider": provider, "model": model,
                     "requests": 0, "success": 0, "tokens_in": 0, "tokens_out": 0,
+                    "tokens_in_cached": 0,
                     "ttft_samples": [], "duration_samples": [],
+                    "cost": 0.0, "priced": False,
                 }
             m["requests"] += 1
             if is_success:
                 m["success"] += 1
             m["tokens_in"] += tin
             m["tokens_out"] += tout
+            m["tokens_in_cached"] += cached
             ttft = row.get("ttft_ms")
             if isinstance(ttft, (int, float)) and ttft > 0:
                 m["ttft_samples"].append(float(ttft))
@@ -321,12 +365,21 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
                     p["fallback_count"] += int(summary.get("fallback_count") or 0)
 
             # 成本估算（终审 I5）：复用 cost_of_row 唯一计价入口
-            # （¥/1M tokens，仅云端行）；无价格配置 = unpriced（null 而非 0）
+            # （¥/1M tokens，仅云端行）；无价格配置 = unpriced（null 而非 0）。
+            # D1：模型/agent/桶位逐级归集，priced 标记区分「未配价」与「真 0」
             if prices:
                 c = cost_of_row(prices, row)
                 if c > 0:
                     cost += c
                     priced_tokens = True
+                    m["cost"] += c
+                    m["priced"] = True
+                    ag["cost"] += c
+                    ag["priced"] = True
+                    if isinstance(ts, (int, float)) and since <= ts < until:
+                        bsub = series[bisect.bisect_right(edges, ts) - 1][loc]
+                        bsub["cost"] += c
+                        bsub["priced"] = True
 
         if len(rows) < _PAGE_SIZE:
             break
@@ -339,11 +392,17 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
     if priced_tokens:
         totals["cost_estimate"] = round(cost, 6)
         totals["cost_coverage"] = "priced"
+    # D1：cache 份额 = Σcached/Σinput；分母无数据 → 无值（null，不冒认 0）。
+    # 份额不取整：展示层自行格式化（round 会破坏 17/30 类精确断言）
+    totals["cache_share"] = (totals["tokens_in_cached"] / totals["tokens_in"]) \
+        if totals["tokens_in"] > 0 else None
 
     model_rows = []
     for m in models.values():
         ttft = m.pop("ttft_samples")
         dur = m.pop("duration_samples")
+        m_cost = m.pop("cost")
+        m_priced = m.pop("priced")
         # 分位不做 1 位舍入：round(95.05,1) 因浮点表示回退 95.0，破坏
         # 线性插值契约；展示层自行格式化
         m["p50_ttft_ms"] = _percentile(ttft, 0.5)
@@ -353,8 +412,30 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
         m["p95_duration_ms"] = _percentile(dur, 0.95)
         m["duration_samples"] = len(dur)
         m["success_rate"] = round(m["success"] / m["requests"], 4) if m["requests"] else 0.0
+        # D1：cache 份额与模型级成本（未配价 → null，不归 0/免费）
+        m["cache_share"] = (m["tokens_in_cached"] / m["tokens_in"]) \
+            if m["tokens_in"] > 0 else None
+        m["cost_estimate"] = round(m_cost, 6) if m_priced else None
         model_rows.append(m)
     model_rows.sort(key=lambda m: (-m["requests"], m["model"]))
+
+    # D1：agents 行（按客户端 ID；unidentified 分组保留）
+    agent_rows = []
+    for ag in agents.values():
+        ttft = ag.pop("ttft_samples")
+        dur = ag.pop("duration_samples")
+        ag_cost = ag.pop("cost")
+        ag_priced = ag.pop("priced")
+        ag["p50_ttft_ms"] = _percentile(ttft, 0.5)
+        ag["p95_ttft_ms"] = _percentile(ttft, 0.95)
+        ag["p50_duration_ms"] = _percentile(dur, 0.5)
+        ag["p95_duration_ms"] = _percentile(dur, 0.95)
+        ag["success_rate"] = round(ag["success"] / ag["requests"], 4) if ag["requests"] else 0.0
+        ag["cache_share"] = (ag["tokens_in_cached"] / ag["tokens_in"]) \
+            if ag["tokens_in"] > 0 else None
+        ag["cost_estimate"] = round(ag_cost, 6) if ag_priced else None
+        agent_rows.append(ag)
+    agent_rows.sort(key=lambda a: (-a["requests"], a["agent"]))
 
     pool_rows = []
     for p in pools.values():
@@ -362,6 +443,12 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
         p["summary_coverage"] = round(cov, 4)
         pool_rows.append(p)
     pool_rows.sort(key=lambda p: -p["requests"])
+
+    # D1：series 桶位成本终值（priced 才有值）并剥离内部累加键
+    for b in series:
+        for loc in ("local", "cloud", "unknown"):
+            sub = b[loc]
+            sub["cost_estimate"] = round(sub.pop("cost"), 6) if sub.pop("priced") else None
 
     errors = [{"class": c, "count": n}
               for c, n in sorted(error_counts.items(), key=lambda kv: -kv[1])[:_ERROR_TOP_N]]
@@ -381,6 +468,7 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
         },
         "totals": totals,
         "models": model_rows,
+        "agents": agent_rows,
         "series": series,
         "pools": pool_rows,
         "errors": errors,
