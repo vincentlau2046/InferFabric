@@ -1209,6 +1209,10 @@
                         : ('已创建 Agent ' + body.id + '，热重载已生效' + extra), 'ok');
         closeClaimModal();
         _agentCache = null; getAgentStats();
+        // D2：用量页（usage.js）订阅此事件重取报告（裁决见 ledger——
+        // 2 行增量，无监听者时为 no-op）
+        try { window.dispatchEvent(new CustomEvent('iff-agents-changed')); }
+        catch (e) { /* 旧环境无 CustomEvent 降级 */ }
       });
   }
 
@@ -1223,8 +1227,11 @@
         })
           .then(function (r) { return r.json(); })
           .then(function (d) {
-            if (d.ok) { UI.toast('已删除 ' + id, 'ok'); _agentCache = null; getAgentStats(); }
-            else { UI.toast(d.error || '删除失败', 'error'); }
+            if (d.ok) {
+              UI.toast('已删除 ' + id, 'ok'); _agentCache = null; getAgentStats();
+              try { window.dispatchEvent(new CustomEvent('iff-agents-changed')); }
+              catch (e) { /* 旧环境降级 */ }
+            } else { UI.toast(d.error || '删除失败', 'error'); }
           });
       },
     });

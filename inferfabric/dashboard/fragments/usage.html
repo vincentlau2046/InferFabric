@@ -1,187 +1,116 @@
 <div class="tab-content" id="tab-usage">
-  <!-- 用量页壳（UX v3 A2）：原监控页用量图卡整体平移；
-       功耗/电费双轴图为临时内容，D 期电费 KPI 接通后撤除（避免中间版本丢电费入口）。 -->
+  <!-- 用量页（UX v3 D2）：一个窗口驱动整页——报告驱动 KPI/趋势/分解，
+       撤除 A2 临时驻留的旧监控卡（功耗双轴/Token 双卡/Agent 卡/延迟卡）。
+       窗口控件用 use-seg 独立类名，避免旧 monitor.js 全站分段委托误接。 -->
+  <style>
+    .use-seg { display: inline-flex; gap: 2px; background: var(--surface-2, rgba(128,128,128,.08)); border-radius: 8px; padding: 2px; }
+    .use-seg-btn { border: 0; background: transparent; color: var(--ink-2, #9aa5b5); font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+    .use-seg-btn.on { background: var(--accent, #b45a3c); color: #fff; }
+    .use-kpi-val { font-size: 22px; font-weight: 600; }
+    .use-kpi-sub { font-size: 12px; font-weight: 400; color: var(--ink-3, #8a93a3); }
+    .use-badge-warn { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: rgba(180,83,9,.15); color: var(--warn, #b45309); }
+  </style>
   <div class="if-grid">
 
-    <!-- 功耗 / 电费：单图双轴（临时驻留，D 撤除） -->
+    <!-- 窗口选择 + 报告元信息 -->
     <div class="col-12">
       <div class="if-card">
         <div class="if-card-hdr">
-          <span class="if-card-title">功耗 / 电费</span>
-          <span class="if-card-sub" id="monPowerSub">GPU 板卡功耗 · ¥1.00/度</span>
-          <div class="mon-seg" data-seg="pgran">
-            <button type="button" class="mon-seg-btn active" data-gran="hour">小时</button>
-            <button type="button" class="mon-seg-btn" data-gran="day">天</button>
-            <button type="button" class="mon-seg-btn" data-gran="week">周</button>
+          <span class="if-card-title">用量总览</span>
+          <span class="if-card-sub" id="useMetaLine"></span>
+          <div class="use-seg" role="group" aria-label="统计窗口">
+            <button type="button" class="use-seg-btn" id="useWin-1h" data-win="1h" aria-pressed="false">1 小时</button>
+            <button type="button" class="use-seg-btn on" id="useWin-24h" data-win="24h" aria-pressed="true">24 小时</button>
+            <button type="button" class="use-seg-btn" id="useWin-7d" data-win="7d" aria-pressed="false">7 天</button>
+            <button type="button" class="use-seg-btn" id="useWin-30d" data-win="30d" aria-pressed="false">30 天</button>
           </div>
         </div>
         <div class="if-card-body">
-          <div class="mon-power-hero" id="monPowerHero">
-            <span class="mon-power-hero-val mono" id="monPowerCost">¥0.00</span>
-            <span class="mon-power-hero-sub" id="monPowerMeta">累计 0 度 · 平均 — · 近 24h</span>
-          </div>
-          <div class="mon-chart-wrap">
-            <div id="monPowerChart" class="mon-chart mon-chart--power"></div>
-            <div id="monPowerEmpty" class="mon-chart-empty" style="display:none">后台每 60s 采集 GPU 板卡功耗——约 1 分钟后出现首个柱状数据</div>
-          </div>
+          <div id="useTruncBanner" class="bad" style="display:none"></div>
         </div>
       </div>
     </div>
 
   </div>
-
-  <!-- Token 用量：共享粒度控制条（data-seg=gran）驱动左右双卡 -->
-  <div class="if-grid">
-    <div class="col-12">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">Token 用量</span>
-          <span class="if-card-sub" id="monTokenSub">prompt/completion · 时间分桶</span>
-          <div class="mon-seg" data-seg="gran">
-            <button type="button" class="mon-seg-btn" data-gran="minute">分钟</button>
-            <button type="button" class="mon-seg-btn active" data-gran="hour">小时</button>
-            <button type="button" class="mon-seg-btn" data-gran="day">天</button>
-            <button type="button" class="mon-seg-btn" data-gran="week">周</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
   <div class="if-grid">
 
-    <!-- 本地模型卡（左）：右轴 = 窗口累计 token 量 -->
+    <!-- KPI ×4：请求 / Tokens / 估算成本 / KV 前缀缓存命中 -->
     <div class="col-6">
       <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">本地模型</span>
-          <span class="mon-token-total mono" id="monTokenLocalTotal">窗口累计 —</span>
-          <span class="mon-token-badge" id="monTokenLocalCacheHit"
-            title="缓存命中率（Cache Hit Rate）= 缓存命中 tokens / 总 prompt tokens（当前粒度窗口）。OpenAI 系取 prompt_tokens_details.cached_tokens；Anthropic 系取 cache_read_input_tokens / (input + cache_read + cache_creation)；口径统一">Cache Hit Rate —</span>
-        </div>
-        <div class="if-card-body">
-          <div class="mon-chart-wrap">
-            <div id="monTokenLocalChart" class="mon-chart"></div>
-            <div id="monTokenLocalEmpty" class="mon-chart-empty" style="display:none">暂无本地 Token 数据</div>
-          </div>
-        </div>
+        <div class="if-card-hdr"><span class="if-card-title">请求数</span></div>
+        <div class="if-card-body"><div class="use-kpi-val mono" id="useKpiReq">—</div></div>
       </div>
     </div>
-
-    <!-- 云端模型卡（右）：右轴 = 窗口累计费用 ¥（未配价模型计 0） -->
     <div class="col-6">
       <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">云端模型</span>
-          <span class="mon-token-total mono" id="monTokenCloudTotal">窗口累计 ¥0.00</span>
-          <span class="mon-token-badge" id="monTokenCloudCacheHit"
-            title="缓存命中率（Cache Hit Rate）= 缓存命中 tokens / 总 prompt tokens（当前粒度窗口）。OpenAI 系取 prompt_tokens_details.cached_tokens；Anthropic 系取 cache_read_input_tokens / (input + cache_read + cache_creation)；口径统一">Cache Hit Rate —</span>
-        </div>
-        <div class="if-card-body">
-          <div class="mon-chart-wrap">
-            <div id="monTokenCloudChart" class="mon-chart"></div>
-            <div id="monTokenCloudEmpty" class="mon-chart-empty" style="display:none">暂无云端 Token 数据（未配价的云端模型费用计 0）</div>
-          </div>
-        </div>
+        <div class="if-card-hdr"><span class="if-card-title">Tokens</span></div>
+        <div class="if-card-body"><div class="use-kpi-val mono" id="useKpiTok">—</div></div>
       </div>
     </div>
-
-  </div>
-
-  <!-- 客户端 / Agent 用量：图左表右（v6.5） -->
-  <div class="if-grid">
-    <div class="col-12">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">客户端 / Agent 用量</span>
-          <span class="if-card-sub" id="monAgentSub">按请求头识别 · 未识别可在下方认领</span>
-          <div class="mon-seg" data-seg="aggran">
-            <button type="button" class="mon-seg-btn" data-gran="minute">分钟</button>
-            <button type="button" class="mon-seg-btn active" data-gran="hour">小时</button>
-            <button type="button" class="mon-seg-btn" data-gran="day">天</button>
-            <button type="button" class="mon-seg-btn" data-gran="week">周</button>
-          </div>
-        </div>
-        <div class="if-agent-bar">
-          <div class="mon-seg" data-seg="agscope">
-            <button type="button" class="mon-seg-btn active" data-scope="all">全部</button>
-            <button type="button" class="mon-seg-btn" data-scope="local">本地</button>
-            <button type="button" class="mon-seg-btn" data-scope="cloud">云端</button>
-          </div>
-          <span class="mon-claim-badge" id="monAgentUnkBadge" style="display:none">
-            <svg><use href="#s-bolt"/></svg><span id="monAgentUnkNum">0</span><span class="mon-claim-label">未识别</span>
-          </span>
-          <button type="button" class="mon-mini-btn" id="monAgentManage" title="管理：删除">管理</button>
-        </div>
-        <div class="if-card-body if-agent-body">
-          <div class="if-agent-left">
-            <div class="mon-chart-wrap">
-              <div id="monAgentChart" class="mon-chart"></div>
-              <div id="monAgentEmpty" class="mon-chart-empty" style="display:none">暂无客户端数据——经代理发起请求后在此统计</div>
-            </div>
-          </div>
-          <div class="if-agent-right">
-            <div id="monAgentTable">
-              <div class="skeleton"><div class="skeleton-row"></div><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
-            </div>
-            <div id="monAgentUnassigned" style="display:none"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 模型延迟趋势：共享控制条（latwin/latq）+ TTFT/TPOT 双卡 -->
-  <div class="if-grid">
-    <div class="col-12">
-      <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">模型延迟趋势</span>
-          <span class="if-card-sub" id="monLatSub">时间分桶 · 桶内 P50</span>
-          <div class="mon-seg" data-seg="latwin">
-            <button type="button" class="mon-seg-btn" data-win="minute">分钟</button>
-            <button type="button" class="mon-seg-btn active" data-win="hour">小时</button>
-            <button type="button" class="mon-seg-btn" data-win="day">天</button>
-          </div>
-          <div class="mon-seg" data-seg="latq">
-            <button type="button" class="mon-seg-btn active" data-q="p50">P50</button>
-            <button type="button" class="mon-seg-btn" data-q="p50p95">P50+P95</button>
-          </div>
-        </div>
-        <div class="if-card-body">
-          <div class="mon-lat-chips" id="monLatChips"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="if-grid">
     <div class="col-6">
       <div class="if-card">
-        <div class="if-card-hdr">
-          <span class="if-card-title">TTFT 趋势</span>
-          <span class="if-card-sub" id="monTtftSub">ms · 近 24h · 每 1h</span>
-        </div>
-        <div class="if-card-body">
-          <div class="mon-chart-wrap">
-            <div id="monTtftChart" class="mon-chart"></div>
-            <div id="monTtftEmpty" class="mon-chart-empty" style="display:none">暂无 TTFT 数据（窗口内无成功请求）</div>
-          </div>
-        </div>
+        <div class="if-card-hdr"><span class="if-card-title">估算成本</span></div>
+        <div class="if-card-body"><div class="use-kpi-val mono" id="useKpiCost">—</div></div>
       </div>
     </div>
     <div class="col-6">
       <div class="if-card">
         <div class="if-card-hdr">
-          <span class="if-card-title">TPOT 趋势</span>
-          <span class="if-card-sub" id="monTpotSub">ms/token · 近 24h · 每 1h</span>
+          <span class="if-card-title">KV 前缀缓存命中</span>
+          <span class="if-card-sub" id="useKpiCacheLbl"></span>
         </div>
+        <div class="if-card-body"><div class="use-kpi-val mono" id="useKpiCache">—</div></div>
+      </div>
+    </div>
+
+    <!-- 请求趋势：本地/云端堆叠柱（蓝/琥珀）；unknown 另作覆盖说明 -->
+    <div class="col-12">
+      <div class="if-card">
+        <div class="if-card-hdr"><span class="if-card-title">请求趋势</span>
+          <span class="if-card-sub">本地 / 云端 · 报告桶</span></div>
         <div class="if-card-body">
           <div class="mon-chart-wrap">
-            <div id="monTpotChart" class="mon-chart"></div>
-            <div id="monTpotEmpty" class="mon-chart-empty" style="display:none">暂无 TPOT 数据（需流式请求）</div>
+            <div id="useTrendChart" class="mon-chart"></div>
+            <div id="useTrendEmpty" class="mon-chart-empty" style="display:none">窗口内暂无请求</div>
           </div>
+          <div class="use-kpi-sub" id="useTrendNote"></div>
         </div>
       </div>
     </div>
-  </div>
 
+    <!-- 模型分解 -->
+    <div class="col-12">
+      <div class="if-card">
+        <div class="if-card-hdr"><span class="if-card-title">模型分解</span>
+          <span class="if-card-sub">份额按 Tokens in · 未配价标「未计价」</span></div>
+        <div class="if-card-body"><div id="useModelTable"></div></div>
+      </div>
+    </div>
+
+    <!-- 客户端分解（认领路径复用全局认领弹窗） -->
+    <div class="col-12">
+      <div class="if-card">
+        <div class="if-card-hdr"><span class="if-card-title">客户端分解</span>
+          <span class="if-card-sub">未识别客户端可认领——识别后计入其用量</span></div>
+        <div class="if-card-body"><div id="useAgentTable"></div></div>
+      </div>
+    </div>
+
+    <!-- 电费估算：设备功耗（非整机电费）；云费单列，不求和 -->
+    <div class="col-12">
+      <div class="if-card">
+        <div class="if-card-hdr"><span class="if-card-title">电费估算</span>
+          <span class="if-card-sub" id="usePowerSub"></span></div>
+        <div class="if-card-body">
+          <div class="mon-power-hero">
+            <span class="mon-power-hero-val mono" id="usePowerTotals">—</span>
+          </div>
+          <div class="use-kpi-sub" id="useCloudCost"></div>
+          <div class="use-kpi-sub" id="usePowerNote"></div>
+          <div id="usePowerEmpty" class="mon-chart-empty" style="display:none">功耗采样暂不可用</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
 </div>

@@ -61,12 +61,13 @@ def test_icon_symbols_present():
 
 
 def test_js_modules_list():
-    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store；B2：requests 紧随 monitor）。"""
+    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store；B2：requests
+    紧随 monitor；D2：usage 紧随 requests）。"""
     import inferfabric.dashboard as dash
     assert getattr(dash, "JS_MODULES", None) == [
         "ui", "store", "router", "charts", "overview", "inference",
-        "monitor", "requests", "deploy", "cloud", "model-pools", "anomaly",
-        "packs", "security", "settings", "connect", "wizard",
+        "monitor", "requests", "usage", "deploy", "cloud", "model-pools",
+        "anomaly", "packs", "security", "settings", "connect", "wizard",
     ]
 
 
@@ -421,47 +422,29 @@ def test_theme_state_hooked_in_store():
 
 
 def test_monitor_structure():
-    """监控页 DOM 契约：7 个面板 id 必须在 get_html() 中出现（spec §4.3）。"""
-    import re as _re
+    """用量页 DOM 契约（D2 重写：报告驱动整页，撤除 A2 旧监控卡）。
+
+    D2 契约：窗口四档（1h/24h/7d/30d）+ KPI×4 + 趋势图 + 模型/客户端分解 +
+    电费卡（use* id）；旧 mon* 图卡（功耗双轴/Token 双卡/TTFT/TPOT）已由
+    usage.js 接管并撤除。reqTable/monHistTable/monKpis 分属请求/模型页，
+    仍须在 get_html() 中出现。"""
     html = _html()
     for panel_id in (
-        'id="monPowerChart"',   # 功耗 / 电费：单图双轴（柱=平均功耗 W，阶梯线=累计电量/电费 度=元）
-        'id="monTokenLocalChart"',  # Token 用量 · 本地引擎（vllm/sglang/ninfer…）
-        'id="monTokenCloudChart"',  # Token 用量 · 云端透传
-        'id="monTtftChart"',    # 延迟小倍数 · TTFT P50/P95（v6.0 双卡）
-        'id="monTpotChart"',    # 延迟小倍数 · TPOT P50/P95（v6.0 双卡）
-        'id="monKpis"',         # 五联 KPI
-        'id="reqTable"',        # 请求工作台表（B2：requests.js 接管，原 monLogTable 移除）
-        'id="monHistTable"',    # 切换历史表
+        'id="useWin-1h"', 'id="useWin-24h"', 'id="useWin-7d"', 'id="useWin-30d"',
+        'id="useKpiReq"', 'id="useKpiTok"', 'id="useKpiCost"', 'id="useKpiCache"',
+        'id="useTrendChart"', 'id="useTrendNote"',
+        'id="useModelTable"', 'id="useAgentTable"',
+        'id="usePowerTotals"', 'id="usePowerNote"',
+        'id="reqTable"',        # 请求工作台表（B2：requests.js 接管）
+        'id="monHistTable"',    # 切换历史表（monitor.js，请求/切换子页）
+        'id="monKpis"',         # 五联 KPI（模型页 tab-monitor.kpis，monitor.js）
     ):
-        assert panel_id in html, "missing monitor panel id: %s" % panel_id
-    # v6.4: 费用概览卡整体删除（滚动 24h 无参考价值）；Token 改左右双卡 +
-    # 共享粒度控制条（本地累计 token 量 / 云端累计费用 ¥）
-    assert 'id="monCostCard"' not in html, "费用概览卡必须已删除"
-    assert 'id="monTokenLocalTotal"' in html, "本地卡头缺窗口累计 token 读数"
-    assert 'id="monTokenCloudTotal"' in html, "云端卡头缺窗口累计费用读数"
-    assert 'data-seg="gran"' in html, "Token 共享粒度控制条缺失"
-    # 窗口/粒度切换按钮 data-win / data-gran 契约（display filter，单位语义统一 v6.3）
-    # 功耗/电费 pgran: 小时/天/周（月整体弃用）；Token gran: 分钟/小时/天/周；
-    # 延迟 latwin: 分钟/小时/天（数据仅 30d 不做周）
-    assert 'data-gran="hour"' in html and 'data-gran="day"' in html and 'data-gran="week"' in html
-    assert 'data-gran="month"' not in html, "month granularity must be dropped from Token card"
-    for gran in ('minute', 'hour', 'day', 'week'):
-        assert 'data-gran="%s"' % gran in html, "missing token granularity toggle: %s" % gran
-    # Token 四档按钮按单位升序排列（分钟 → 小时 → 天 → 周）——锚定分钟后紧邻的同卡按钮，
-    # 避免误匹配功耗卡（hour/day/week）在前的位置
-    assert _re.search(
-        r'data-gran="minute"[\s\S]*?data-gran="hour"[\s\S]*?data-gran="day"[\s\S]*?data-gran="week"',
-        html), "token granularity buttons must render in ascending unit order: 分钟/小时/天/周"
-    for win in ('minute', 'hour', 'day'):
-        assert 'data-win="%s"' % win in html, "missing latency window toggle: %s" % win
-    assert 'data-win="week"' not in html, "latency must NOT offer week (data only 30d)"
-    # v6.0: 延迟趋势双卡 — 共享控制条（窗口 latwin 单条不再镜像 + 分位 latq）+ 模型 chip 选择器
-    assert 'data-seg="latwin"' in html
-    assert 'data-seg="latq"' in html
-    assert 'id="monLatChips"' in html
-    assert 'id="monLatSub"' in html
-    assert 'id="monTtftEmpty"' in html and 'id="monTpotEmpty"' in html
+        assert panel_id in html, "missing usage/monitor panel id: %s" % panel_id
+    # D2 撤除的旧监控卡 id 不得残留（usage 页换新，旧 id 全部退场）
+    for gone in ('id="monPowerChart"', 'id="monTokenLocalChart"',
+                 'id="monTokenCloudChart"', 'id="monTtftChart"',
+                 'id="monTpotChart"'):
+        assert gone not in html, "D2 撤除的旧卡 id 仍存在: %s" % gone
 
 
 def test_monitor_js_present():
@@ -512,89 +495,51 @@ def test_monitor_token_curve_all_tiers_endpoint():
 
 
 def test_monitor_token_dual_cards():
-    """Token 用量左右双卡（v6.4，取代单卡上下堆叠 + 费用概览卡）。
+    """Token 用量显示契约（D2 重写：报告驱动，撤除 v6.4 双卡双轴图）。
 
-    布局：col-12 共享粒度控制条（data-seg=gran，驱动本地/云端双卡同粒度联动）
-    + col-6×2 双卡。每卡双轴图（{dualAxis:true} 受权例外，与功耗/电费卡同构，
-    流速↔存量积分对）：柱 = 每桶 Prompt/Completion 堆叠（左轴 tokens），
-    折线 = 窗口起点累积（右轴）——本地 = 累计 token 量（自己的 GPU 免费跑，
-    量有意义），云端 = 累计费用 ¥（按量付费，钱有意义；桶 cost 由
-    /api/token-curve 服务端按价格表计算）。费用概览卡整体删除。"""
-    import re as _re
-    js = (ROOT / "inferfabric" / "dashboard" / "js" / "monitor.js").read_text(encoding="utf-8")
+    D2：Token 总量 = KPI 卡（useKpiTok，tokens in/out/cached）+ 趋势堆叠图
+    （useTrendChart，本地蓝/云琥珀按请求数）+ 模型分解表（useModelTable，
+    份额按 Tokens in）。旧 v6.4 双卡 DOM（monToken*）已撤除；monitor.js 的
+    渲染函数留存为休眠代码（目标 id 不存在时全部 no-op，其余页面仍用其
+    认领/历史/KPI 路径）。"""
+    js = (ROOT / "inferfabric" / "dashboard" / "js" / "usage.js").read_text(encoding="utf-8")
     html = _html()
 
-    # 1. 费用概览卡彻底移除（渲染函数 + DOM 契约 + 内联 CSS 类）
-    assert "renderCostCard" not in js, "monitor.js 仍含费用概览卡渲染函数"
+    # 1. 费用概览卡彻底移除（v6.4 即删，D2 延续）
     assert "monCostCard" not in html and "monCostBody" not in html
     assert "mon-cost-total" not in html, "费用卡 CSS 类应随卡删除"
 
-    # 2. 左右双卡 DOM 契约（本地左 / 云端右，各卡头：窗口累计读数 + Cache Hit 徽章）
-    for el in ('id="monTokenLocalChart"', 'id="monTokenCloudChart"',
-               'id="monTokenLocalTotal"', 'id="monTokenCloudTotal"',
-               'id="monTokenLocalCacheHit"', 'id="monTokenCloudCacheHit"'):
-        assert el in html, "missing token dual-card contract id: %s" % el
-    # 旧上下堆叠容器不再存在
-    assert "mon-token-split" not in html, "旧双 scope 上下堆叠容器应已移除"
+    # 2. D2 Token 显示契约：KPI + 趋势 + 模型分解（报告驱动）
+    for el in ('id="useKpiTok"', 'id="useTrendChart"', 'id="useModelTable"'):
+        assert el in html, "missing D2 token contract id: %s" % el
+    # 旧 v6.4 双卡 DOM 撤除
+    for gone in ('id="monTokenLocalChart"', 'id="monTokenCloudChart"',
+                 'id="monTokenLocalTotal"', 'id="monTokenCloudTotal"',
+                 'id="monTokenLocalCacheHit"', 'id="monTokenCloudCacheHit"'):
+        assert gone not in html, "D2 撤除的旧双卡 id 仍存在: %s" % gone
 
-    # 3. 双轴受权：功耗卡 2 分支 + Token 双卡 1 处（scope 循环单 update 路径，
-    #    空态与正常态同一 yAxis 双轴结构，无需独立空态骨架分支）
-    assert js.count('{ dualAxis: true }') >= 3, (
-        "power card 2 branches + token dual card must sanction dual-axis "
-        "via { dualAxis: true } (>=3 occurrences in monitor.js)"
-    )
-    # 4. 云端累积费用：桶 cost 字段前缀和（cumCost）；本地累积 token（cumTok）
-    assert "cumCost" in js, "cloud cumulative cost prefix-sum missing"
-    assert "cumTok" in js, "local cumulative token prefix-sum missing"
-    assert _re.search(r"b\.cost\s*\|\|\s*0", js), \
-        "cumCost must read bucket cost field (b.cost || 0)"
-    # 5. 右轴 = 累积（position:'right'）：功耗卡 2 处 + Token 卡 1 处
-    assert js.count("position: 'right'") >= 3, (
-        "cumulative right axis (position:'right') must appear on power (2) + token (1)"
-    )
-    # 6. 统一色系（v7.0）：语义→色号映射跨卡一致，柱 Prompt 蓝[0] / Completion 青[2]
-    #    / 累计线 琥珀[1]。「累积/存量」线 = palette[1] 琥珀（跨卡锚点，暖色与冷色柱
-    #    天然分层）；「分量/流速」柱跳过琥珀[1] 避免与累计线同色。蓝↔青全对 ΔE 16.3
-    #    双主题过 15。趋势卡逐模型色走 _dataColors()（跳过琥珀，[蓝,青,绿,粉]）。
-    assert "_cumColor" in js, "token cumulative line must pin color via _cumColor()"
-    assert _re.search(r"_paletteColor\(1,\s*'#b45309'\)", js), (
-        "_cumColor must resolve palette index 1 (amber #b45309, matches power card)"
-    )
-    assert _re.search(r"lineStyle:\s*\{\s*color:\s*_cumColor\(\)\s*\}", js), (
-        "token cumulative line must pin lineStyle.color (line stroke) — "
-        "itemStyle alone leaves the line stroke on auto palette"
-    )
-    assert _re.search(r"itemStyle:\s*\{\s*color:\s*_cumColor\(\)\s*\}", js), (
-        "token cumulative line series must carry itemStyle.color=_cumColor()"
-    )
-    assert _re.search(r"itemStyle:\s*\{\s*color:\s*_paletteColor\(0,\s*'#2563eb'\)\s*\}", js), (
-        "token Prompt bar must pin itemStyle.color to palette[0] blue — "
-        "cross-card consistent with power card bar (both auto/pinned blue[0])"
-    )
-    assert _re.search(r"itemStyle:\s*\{\s*color:\s*_paletteColor\(2,\s*'#0891b2'\)\s*\}", js), (
-        "token Completion bar must pin itemStyle.color to palette[2] cyan — "
-        "skips amber[1] reserved for the cumulative line"
-    )
-    # v7.0: 趋势卡色源统一走 PALETTES（_dataColors 跳过琥珀[1]），_MODEL_COLORS 已废弃删除
-    assert "_MODEL_COLORS" not in js, (
-        "v7.0: _MODEL_COLORS must be removed — trend card colors now via _dataColors()/PALETTES"
-    )
-    assert "_dataColors" in js, "v7.0: _dataColors() must supply trend card rank colors"
-    assert _re.search(r"\[p\[0\],\s*p\[2\],\s*p\[3\],\s*p\[4\]\]", js), (
-        "_dataColors must return [blue, cyan, green, pink] — skipping amber[1]"
-    )
+    # 3. 趋势图颜色钉住：本地=调色板[0] 蓝 / 云端=[1] 琥珀（指定蓝/琥珀）
+    assert "COLOR_LOCAL" in js and "COLOR_CLOUD" in js
+    assert "'#2563eb'" in js and "'#b45309'" in js
+    # 堆叠柱 + 整替（series 数固定 2，防幽灵 series）
+    assert "stack: 'trend'" in js
+    assert "replaceSeries: true" in js
+    # 4. KV 份额语义：KPI 明示「非响应缓存命中率」（D2 契约：两命中率不混）
+    assert "非响应缓存命中率" in js
 
 
 def test_monitor_latency_cards():
-    """v6.0 延迟双卡趋势契约：TTFT/TPOT 各单 y 轴（两指标量纲差 ~2 个数量级，禁双 y 轴，
-    spec 反模式 #1）；窗口数据走 GET /api/latency（Task 2 端点，只读 display filter）；
-    图表/表格视图切换（data-view）已移除。"""
-    js = (ROOT / "inferfabric" / "dashboard" / "js" / "monitor.js").read_text(encoding="utf-8")
-    assert "monTtftChart" in js and "monTpotChart" in js
-    assert "/api/latency?window=" in js      # minute/hour/day 窗口取数（GET-only）
-    assert "data-view" not in js             # 图表/表格视图切换已移除
+    """延迟显示契约（D2 重写）：独立 TTFT/TPOT 趋势卡撤除，延迟进模型分解表
+    （useModelTable 表头含 TTFT P50/P95；p95 亦在列）。monitor.js 的延迟渲染
+    留存为休眠代码（其余页面 KPI/历史仍用其模块）。"""
+    js = (ROOT / "inferfabric" / "dashboard" / "js" / "usage.js").read_text(encoding="utf-8")
     html = _html()
-    assert 'id="monTtftChart"' in html and 'id="monTpotChart"' in html
+    # D2：模型分解表承载 per-model p50/p95
+    assert "fmtMs(m.p50_ttft_ms)" in js and "fmtMs(m.p95_ttft_ms)" in js
+    assert 'id="useModelTable"' in html
+    assert "TTFT P50" in html and "P95" in html
+    # 旧独立趋势卡 DOM 撤除
+    assert 'id="monTtftChart"' not in html and 'id="monTpotChart"' not in html
 
 
 def test_monitor_readonly():
@@ -631,29 +576,18 @@ def test_monitor_readonly():
 
 
 def test_monitor_latency_trend():
-    """v6.0 延迟趋势 DOM/JS 契约：共享控制条（窗口 latwin + 分位 latq）+ 模型 chip
-    选择器（#monLatChips）+ TTFT/TPOT 双趋势卡（#monTtftChart/#monTpotChart 保留）；
-    只读——fragment 无 <form。"""
+    """用量页窗口/只读契约（D2 重写）：窗口四档 use-seg（独立类名，不与
+    monitor.js 的 .mon-seg-btn 全站委托串线）；fragment 无 <form（只读）。"""
     frag = (_DASHBOARD_DIR / "fragments" / "usage.html").read_text(encoding="utf-8")
-    js = (ROOT / "inferfabric" / "dashboard" / "js" / "monitor.js").read_text(encoding="utf-8")
-    # 控制条契约
-    assert 'id="monLatChips"' in frag
-    assert 'data-seg="latq"' in frag
-    assert 'id="monLatSub"' in frag
-    # 趋势双卡容器仍在
-    assert 'id="monTtftChart"' in frag and 'id="monTpotChart"' in frag
-    assert 'id="monTtftSub"' in frag and 'id="monTpotSub"' in frag
-    # 视图切换/表格已移除
-    assert 'data-seg="lattf"' not in frag and 'data-seg="latpt"' not in frag
-    assert 'monTtftTable' not in frag and 'monTpotTable' not in frag
-    # JS 侧：/api/latency 取数（GET-only）+ chip / 分位切换接线
-    assert "/api/latency?window=" in js
-    assert "monLatChips" in js and "data-model" in js
-    assert "'latq'" in js
-    # v6.0：中间空桶桥接（视觉平滑、不造数据点；首尾空不延伸）
-    assert "connectNulls: true" in js
-    # 默认选中全部在用模型（后端已按请求数截断 ≤5），不再固定前 4
-    assert "_latSel = chips.slice()" in js
+    js = (ROOT / "inferfabric" / "dashboard" / "js" / "usage.js").read_text(encoding="utf-8")
+    # D2 窗口控件：use-seg（1h/24h/7d/30d），aria-pressed 状态
+    for win in ('1h', '24h', '7d', '30d'):
+        assert 'id="useWin-%s"' % win in frag, "missing usage window toggle: %s" % win
+    assert 'class="use-seg' in frag
+    # 不与 monitor.js 的 .mon-seg-btn 委托串线（新页不得复用该类）
+    assert 'mon-seg-btn' not in frag
+    # JS 侧：窗口→gran 映射 + 窗口按钮接线
+    assert "WIN_GRAN" in js and "useWin-" in js
     # 只读：无 <form
     assert "<form" not in frag
 

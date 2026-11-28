@@ -166,3 +166,227 @@ def test_endpoint_bad_window_400(seeded_db):
     assert h._send_json.call_args.args[-1] == 400 or \
         h._send_json.call_args.kwargs.get("status") == 400 or \
         "error" in args[0]
+
+
+# ═══════════════════════════════════════════════════════════════
+# D1：同快照聚合增量（cache 份额 / 模型成本 / agents / series 三路）
+# ═══════════════════════════════════════════════════════════════
+
+
+def _drow(now, req_id, model, *, agent="", cached=0, tin=10, tout=20, **kw):
+    # 默认路由对齐生产写法 responses_bridge.py:309 `local:<model_name>`
+    kw.setdefault("route", f"local:{model}")
+    r = _row(now, req_id, model, **kw)
+    r["tokens_in"] = tin
+    r["tokens_out"] = tout   # 终审修复轮：tout 此前是死参（收下不写回）
+    r["tokens_in_cached"] = cached
+    r["agent"] = agent
+    return r
+
+
+@pytest.fixture()
+def d1_db(tmp_path):
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([
+        # 本地 glm-5：3 行（cached 5/10/0）
+        _drow(now - 60, "b1", "glm-5", agent="alice", cached=5),
+        _drow(now - 120, "b2", "glm-5", agent="alice", cached=10),
+        _drow(now - 180, "b3", "glm-5", agent="bob"),
+        # 云端 zhipu 同名 glm-5（location+provider 身份分离）
+        _drow(now - 60, "b4", "glm-5", agent="alice", cached=2,
+              route="cloud:zhipu", cloud_provider="zhipu"),
+        # 未识别客户端（agent 空）+ 独立模型
+        _drow(now - 60, "b5", "qwen3", agent="", cached=1),
+    ])
+    return db, now
+
+
+def test_d1_compat_keys_unchanged(d1_db):
+    """既有顶层与 totals/models 键集不变（D2 消费面兼容钉住）。"""
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    for k in ("contract", "window", "scope", "since", "until", "collected_at",
+              "coverage", "totals", "models", "series", "pools", "errors"):
+        assert k in report, k
+    for k in ("requests", "success", "success_rate", "tokens_in", "tokens_out",
+              "usage_unknown_rows", "cost_estimate", "cost_coverage"):
+        assert k in report["totals"], k
+    m = report["models"][0]
+    for k in ("location", "provider", "model", "requests", "success",
+              "tokens_in", "tokens_out", "p50_ttft_ms", "p95_ttft_ms",
+              "ttft_samples", "p50_duration_ms", "p95_duration_ms",
+              "duration_samples", "success_rate"):
+        assert k in m, k
+    b = report["series"][0]
+    for k in ("bucket_start", "bucket_end", "requests", "success",
+              "tokens_in", "tokens_out"):
+        assert k in b, k
+
+
+def test_d1_cache_share_totals_and_models(d1_db):
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    t = report["totals"]
+    assert t["tokens_in_cached"] == 5 + 10 + 0 + 2 + 1
+    assert abs(t["cache_share"] - t["tokens_in_cached"] / t["tokens_in"]) < 1e-9
+    models = {(m["location"], m["model"]): m for m in report["models"]}
+    glm_local = models[("local", "glm-5")]
+    assert glm_local["tokens_in_cached"] == 15
+    assert abs(glm_local["cache_share"] - 15 / 30) < 1e-9
+
+
+def test_d1_cache_share_null_without_denominator(tmp_path):
+    """分母无数据 → 无值（null），不冒认 0。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([_drow(now - 60, "c1", "glm-5", tin=0, tout=0)])
+    report = build_monitor_report(db, window="1h", until=now)
+    assert report["totals"]["cache_share"] is None
+    m = report["models"][0]
+    assert m["cache_share"] is None
+
+
+def test_d1_same_name_different_provider_separate(d1_db):
+    """同名模型跨厂商不混合（既有身份规则在增量输出下保持）。"""
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    models = {(m["location"], m["model"]): m for m in report["models"]}
+    assert models[("local", "glm-5")]["requests"] == 3
+    assert models[("cloud", "glm-5")]["requests"] == 1
+
+
+def test_d1_model_cost_estimate_priced_vs_unpriced(d1_db):
+    """模型补 cost_estimate：已配价云端行有值；本地/未配价 → null（不归 0）。"""
+    from inferfabric.metrics_aggregator import CloudModelPrice
+    db, now = d1_db
+    prices = {"glm-5": CloudModelPrice(price_input=2.0, price_output=8.0)}
+    report = build_monitor_report(db, window="1h", until=now, prices=prices)
+    models = {(m["location"], m["model"]): m for m in report["models"]}
+    cloud = models[("cloud", "glm-5")]
+    local = models[("local", "glm-5")]
+    # 云端 glm-5 单行：tin=10, tout=20 → 10/1e6*2 + 20/1e6*8 = 0.00018
+    assert abs(cloud["cost_estimate"] - 0.00018) < 1e-9
+    assert local["cost_estimate"] is None
+    assert models[("local", "qwen3")]["cost_estimate"] is None
+    # totals 联动不变
+    assert abs(report["totals"]["cost_estimate"] - 0.00018) < 1e-9
+    assert report["totals"]["cost_coverage"] == "priced"
+
+
+def test_d1_agents_grouping_with_unidentified(d1_db):
+    """agents[] 按既有客户端 ID（agent 字段）汇总；空 → 保留 unidentified 分组。"""
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    agents = {a["agent"]: a for a in report["agents"]}
+    assert set(agents) == {"alice", "bob", "unidentified"}
+    alice = agents["alice"]
+    assert alice["requests"] == 3
+    assert alice["tokens_in_cached"] == 5 + 10 + 2
+    assert abs(alice["cache_share"] - 17 / 30) < 1e-9
+    assert agents["bob"]["requests"] == 1
+    assert agents["unidentified"]["requests"] == 1
+
+
+def test_d1_agents_respect_scope(d1_db):
+    db, now = d1_db
+    local = build_monitor_report(db, window="1h", until=now, scope="local")
+    agents = {a["agent"]: a for a in local["agents"]}
+    assert agents["alice"]["requests"] == 2      # 云端行被 scope 过滤
+    assert agents["unidentified"]["requests"] == 1
+
+
+def test_d1_series_location_breakdown(d1_db):
+    """series[] 每桶增 local/cloud/unknown 三路统计；三路合计 == 桶总量。"""
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    b = report["series"][-1]   # 全部行都落在最后一个桶
+    for loc in ("local", "cloud", "unknown"):
+        d = b[loc]
+        for k in ("requests", "tokens_in", "tokens_out", "tokens_in_cached",
+                  "cost_estimate"):
+            assert k in d, (loc, k)
+    assert sum(b[loc]["requests"] for loc in ("local", "cloud", "unknown")) == 5
+    assert b["requests"] == 5
+    assert b["local"]["tokens_in_cached"] == 16
+    assert b["cloud"]["tokens_in_cached"] == 2
+    assert b["local"]["cost_estimate"] is None
+
+
+def test_d1_series_cost_with_prices(d1_db):
+    from inferfabric.metrics_aggregator import CloudModelPrice
+    db, now = d1_db
+    prices = {"glm-5": CloudModelPrice(price_input=2.0, price_output=8.0)}
+    report = build_monitor_report(db, window="1h", until=now, prices=prices)
+    b = report["series"][-1]
+    assert abs(b["cloud"]["cost_estimate"] - 0.00018) < 1e-9
+    assert b["local"]["cost_estimate"] is None   # 本地不计价，不冒认累计
+
+
+def test_d1_empty_window_nulls(tmp_path):
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    report = build_monitor_report(db, window="1h", until=now)
+    assert report["agents"] == []
+    assert report["totals"]["cache_share"] is None
+    assert report["totals"]["tokens_in_cached"] == 0
+
+
+def test_d1_scan_budget_not_regressed(d1_db):
+    """增量字段不破坏键集分页/截断契约（上限断言：全量扫完 truncated=False）。"""
+    db, now = d1_db
+    report = build_monitor_report(db, window="1h", until=now)
+    assert report["coverage"]["truncated"] is False
+    assert report["coverage"]["rows_scanned"] == 5
+
+
+def test_d1_priced_zero_cost_cloud_row_not_unpriced(tmp_path):
+    """终审 I4：计价证据 = cloud_provider 非空 且 model ∈ prices（与
+    cost_of_row 同判据，配价即证据）；已配价但本窗口 token 全 0 → 成本
+    真 0（priced / cost_estimate=0.0），不误标 unpriced。"""
+    from inferfabric.metrics_aggregator import CloudModelPrice
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([
+        _drow(now - 60, "z1", "glm-5", route="cloud:zhipu",
+              cloud_provider="zhipu", tin=0, tout=0),
+    ])
+    prices = {"glm-5": CloudModelPrice(price_input=2.0, price_output=8.0)}
+    report = build_monitor_report(db, window="1h", until=now, prices=prices)
+    assert report["totals"]["cost_coverage"] == "priced"
+    assert report["totals"]["cost_estimate"] == 0.0
+    assert report["models"][0]["cost_estimate"] == 0.0
+    # 桶位同步：cloud 子桶 priced → cost_estimate 0.0（不是 null）
+    assert report["series"][-1]["cloud"]["cost_estimate"] == 0.0
+
+
+def test_d1_series_sub_contract_keys_no_internal(tmp_path):
+    """终审 M1：series 三路子桶对外键集恰为契约五键（内部 cost/priced
+    剥离；unpriced 桶不得残留内部 cost: 0.0——形状必须与 priced 桶一致）。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([_drow(now - 60, "k1", "glm-5")])
+    report = build_monitor_report(db, window="1h", until=now)
+    contract_keys = {"requests", "tokens_in", "tokens_out",
+                     "tokens_in_cached", "cost_estimate"}
+    for b in report["series"]:
+        for loc in ("local", "cloud", "unknown"):
+            assert set(b[loc]) == contract_keys, (loc, sorted(b[loc]))
+
+
+def test_d1_agent_unknown_key_passthrough(tmp_path):
+    """终审 I1（服务端钉住）：生产「分类器未命中」键 unknown 原样成组
+    （不并入 unidentified——认领路径按该键走 monitor.js 专用分支）；
+    仅空串归 unidentified（历史/漏点）。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([
+        _drow(now - 60, "u1", "glm-5", agent="unknown"),
+        _drow(now - 120, "u2", "glm-5", agent="unknown"),
+        _drow(now - 180, "u3", "glm-5", agent=""),
+    ])
+    report = build_monitor_report(db, window="1h", until=now)
+    agents = {a["agent"]: a for a in report["agents"]}
+    assert set(agents) == {"unknown", "unidentified"}
+    assert agents["unknown"]["requests"] == 2
+    assert agents["unidentified"]["requests"] == 1
