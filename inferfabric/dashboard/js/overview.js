@@ -29,6 +29,14 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
+  /* F-F (7.12.20): 警告计数缓存 —— 15s TTL + 在途去重 + 已取值先回填，
+   * 避免每次轮询（3s）重复拉 /api/anomalies 且警告数闪回「—」。 */
+  var _warnCount = null;
+  var _warnFetchedAt = 0;
+  var _warnInflight = false;
+  var _warnInflightSince = 0;
+  var _warnFailures = 0;
+
   /* 异常拉取节流：避免每 3s 轮询都打 /api/anomalies */
   var _lastAnomFetch = 0;
   var _anomCache = null;
@@ -133,6 +141,9 @@
         var seg = $(id);
         if (seg) seg.style.display = capOk ? '' : 'none';
       }
+      // 7.12.20 (F-E): 内存段同受能力门控（telemetry 卡已门控，rail 保持一致；
+      // 未声明 memory 的后端不再出现「内存 —」占位）。
+      segVisible('trSegMem', !!caps.memory);
       segVisible('trSegUtil', !!caps.utilization);
       segVisible('trSegPwr', !!caps.power);
       segVisible('trSegTemp', !!caps.temperature);
@@ -450,9 +461,11 @@
       var memLabel = (kind === 'unified') ? '统一内存'
         : (kind === 'vram' ? 'VRAM' : '设备内存');
       var used = snap.memory_used_mb, total = snap.memory_total_mb;
+      // 7.12.20 (F-E): total 未知时 used 也要带单位（"12.1 GB"而非裸"12.1"）
       var memVal = (used == null) ? NA_HTML
         : UI.fmtGB(used) + ((total != null && total > 0)
-          ? ' <span class="muted">/ ' + UI.fmtGB(total) + ' GB</span>' : '');
+          ? ' / ' + UI.fmtGB(total) + ' <span class="muted">GB</span>'
+          : ' <span class="muted">GB</span>');
       rows += teleRow(memLabel, memVal);
       // 推理预算单列：不是实时剩余量、物理总量或启动承诺
       var budget = snap.memory_budget_mb;
@@ -544,18 +557,52 @@
 
     // 已保留警告（severity=warning 环形缓冲）— F6: limit=500 取环形
     // 全量；回调时按 id 重取节点（渲染可能在响应前重建过骨架）。
-    fetch('/api/anomalies?severity=warning&limit=500', { cache: 'no-store' })
-      .then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      })
-      .then(function (data) {
-        var el2 = $('ovWarnCount');
-        if (el2) el2.textContent = UI.fmtNum(
-          (data && data.count != null) ? data.count
-            : ((data && data.events && data.events.length) || 0));
-      })
-      .catch(function () { var el2 = $('ovWarnCount'); if (el2) el2.textContent = '—'; });
+    // 7.12.20 (F-F)：15s TTL + 在途去重 + 已取值先回填——每 3s 轮询不再
+    // 重复拉取，警告数也不再先「—」后填回（闪烁）。
+    var warnEl = $('ovWarnCount');
+    if (warnEl && _warnCount != null) {
+      warnEl.textContent = UI.fmtNum(_warnCount);
+      // 连续失败 ≥2 次 → 标记陈旧（缓存值不再冒充实时）
+      if (_warnFailures >= 2) {
+        warnEl.className = 'mono muted';
+        warnEl.title = '警告数刷新失败，显示的是上次成功值';
+      }
+    }
+    var nowMs = Date.now();
+    // 30s 接管：请求挂死（服务端接受但不回包）不得让计数永久冻结
+    if (_warnInflight && (nowMs - _warnInflightSince > 30000)) {
+      _warnInflight = false;
+      _warnFetchedAt = 0;
+    }
+    if (!_warnInflight && (nowMs - _warnFetchedAt > 15000)) {
+      _warnFetchedAt = nowMs;
+      _warnInflight = true;
+      _warnInflightSince = nowMs;
+      fetch('/api/anomalies?severity=warning&limit=500', { cache: 'no-store' })
+        .then(function (res) {
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          _warnInflight = false;
+          _warnFailures = 0;
+          _warnCount = (data && data.count != null) ? data.count
+            : ((data && data.events && data.events.length) || 0);
+          var el2 = $('ovWarnCount');
+          if (el2) {
+            el2.textContent = UI.fmtNum(_warnCount);
+            el2.className = 'mono';
+            el2.title = '';
+          }
+        })
+        .catch(function () {
+          _warnInflight = false;
+          _warnFailures += 1;
+          _warnFetchedAt = 0;   // 下一轮重试；保留已缓存值，不闪「—」
+          var el2 = $('ovWarnCount');
+          if (el2 && _warnCount == null) el2.textContent = '—';
+        });
+    }
 
     // 空闲快捷项：history 中成功到达、仍在目录的最近三个去重模型。
     // F1: 真实行形状 = {from,to,...}（db.py），状态须显式成功，且模型

@@ -130,6 +130,8 @@ class StateStore {
   /* ── API polling (single source of truth: /api/snapshot) ── */
   async fetchSnapshot(force = false) {
     try {
+      this._reqSeq = (this._reqSeq || 0) + 1;
+      const seq = this._reqSeq;
       const headers = {};
       if (this._etag && !force) headers['If-None-Match'] = this._etag;
       const res = await fetch('/api/snapshot', { headers, cache: 'no-store' });
@@ -138,6 +140,24 @@ class StateStore {
         // Control plane unchanged — keep last state, update sync meta only.
         // lastOk = 最近一次成功响应（304 也算"在线"）；ts 仍是最近一次 200 数据时间。
         // 两者分离：稳态下连续 304 不再触发"已断线"（C1 附带：store.js:353 误报）。
+        // 7.12.20 (F-C): 迟到的旧 304 不得重锚采样年龄——否则新鲜度徽章会被
+        // 旧请求的较大年龄拉回退（修好 ETag 后才会显形）。
+        // 但「被更新请求取代」≠「未收到应答」：连通性证据依然有效，只更新
+        // 在线元数据（持续 >3s 迟延时若连 lastOk 一起丢，顶栏会假报
+        //「已断线」、徽章假过期——终审 Important）。
+        if (seq !== this._reqSeq) {
+          console.warn('[state] out-of-order 304 dropped (age not re-anchored)');
+          this.set('api_error', null);
+          this.set('sync_meta', {
+            etag: this._etag,
+            rev: (this._etag || '').slice(1, 9) || '',
+            ts: this._lastTs,
+            lastOk: Date.now() / 1000,
+            changed: false,
+            stale: false,
+          });
+          return null;
+        }
         this.set('api_error', null);
         // C: 304 带年龄头 → 服务端真值重锚（同一份采样在变老）；无头 → 保持现状
         const age304 = this._readSampleAge(res);
@@ -163,13 +183,17 @@ class StateStore {
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;
       if (stale) {
         console.warn('[state] out-of-order snapshot dropped (ts', snap.ts, '<= last', this._lastTs);
+        // 7.12.20 (F-B): 丢弃乱序响应 ≠ 断连——API 刚刚应答过。置 stale
+        // 会让顶栏「已断线」/侧点 err 假报警（真断连由 catch 的 api_error
+        // 表达）；lastOk 同步刷新供 6s 在线判定。
         this.set('api_error', null);
         this.set('sync_meta', {
           etag: this._etag,
           rev: (this._etag || '').slice(1, 9) || '',
           ts: this._lastTs,
+          lastOk: Date.now() / 1000,
           changed: false,
-          stale: true,
+          stale: false,
         });
         return snap;
       }
