@@ -248,6 +248,147 @@ class TestExpensiveCache:
 
 
 # ═══════════════════════════════════════════════════════════════
+# C 期：device ETag 语义钉住 + X-IFF-Device-Sample-Age
+# ═══════════════════════════════════════════════════════════════
+
+
+class _FakeDeviceTel:
+    """可控 snapshot/capabilities 的设备遥测桩（钉住 device 值/能力/时间 ETag 语义）。"""
+
+    def __init__(self, ts=None, used=None, caps=None):
+        from inferfabric.platform.telemetry import DeviceCapabilities
+        self.ts = ts if ts is not None else time.time()
+        self.used = used
+        self.caps = caps or DeviceCapabilities(memory=True, pressure=True)
+
+    def snapshot(self):
+        from inferfabric.platform.telemetry import DeviceSnapshot
+        return DeviceSnapshot(
+            platform="darwin", accelerator="apple_silicon", memory_kind="unified",
+            memory_used_mb=self.used, memory_total_mb=32768, memory_budget_mb=24576,
+            utilization_pct=None, power_w=None, temperature_c=None, clock_mhz=None,
+            pressure_level=1, timestamp=self.ts, sources={},
+        )
+
+    def capabilities(self):
+        return self.caps
+
+
+def _make_pm_with_device(tel):
+    pm = _make_pm()
+    pm.telemetry.device_telemetry = tel
+    pm.telemetry.get_device_snapshot = tel.snapshot
+    return pm
+
+
+def _hdr(h, name):
+    """取最近一次响应中指定头的值；不存在返回 None。"""
+    vals = [v for k, v in h._headers if k.lower() == name.lower()]
+    return vals[-1] if vals else None
+
+
+class TestDeviceEtagPinning:
+    """契约 §C1：device 值/能力变化 → ETag 失效；仅采样时间变化 → 可 304。"""
+
+    def test_device_value_change_changes_etag(self):
+        tel = _FakeDeviceTel(used=1000)
+        pm = _make_pm_with_device(tel)
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+        etag1 = _last_etag(h1)
+
+        tel.used = 2000
+        h2 = _make_handler()
+        h2._handle_snapshot(pm)
+        assert _last_etag(h2) != etag1, "device 值变化必须失效 ETag"
+
+    def test_device_capability_change_changes_etag(self):
+        from inferfabric.platform.telemetry import DeviceCapabilities
+        tel = _FakeDeviceTel(caps=DeviceCapabilities(memory=True))
+        pm = _make_pm_with_device(tel)
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+        etag1 = _last_etag(h1)
+
+        tel.caps = DeviceCapabilities(memory=True, pressure=True)
+        h2 = _make_handler()
+        h2._handle_snapshot(pm)
+        assert _last_etag(h2) != etag1, "能力变化必须失效 ETag"
+
+    def test_device_timestamp_only_change_same_etag(self):
+        """T5 语义：仅采样时间变化（值/来源/能力全同）→ 同 ETag → 304 可命中。"""
+        tel = _FakeDeviceTel(used=1000, ts=1000.0)
+        pm = _make_pm_with_device(tel)
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+        etag1 = _last_etag(h1)
+
+        tel.ts = 2000.0
+        h2 = _make_handler(headers={"If-None-Match": etag1})
+        h2._handle_snapshot(pm)
+        assert _last_status(h2) == 304, "仅采样时间变化必须仍可 304"
+
+
+class TestSampleAgeHeader:
+    """契约 §C2：200/304 均带 X-IFF-Device-Sample-Age（非负整数秒）；
+    无可信时间戳 → 头省略（前端标「新鲜度未确认」）。"""
+
+    HEADER = "X-IFF-Device-Sample-Age"
+
+    def test_present_on_200_and_matches_sample_age(self):
+        tel = _FakeDeviceTel(ts=time.time() - 42.0)
+        pm = _make_pm_with_device(tel)
+        h = _make_handler()
+        h._handle_snapshot(pm)
+        assert _last_status(h) == 200
+        age = _hdr(h, self.HEADER)
+        assert age is not None, "200 必须带采样年龄头"
+        assert 42 <= int(age) <= 43, f"年龄应为 ~42s, got {age}"
+
+    def test_present_on_304_and_monotonic(self):
+        tel = _FakeDeviceTel(ts=time.time() - 10.0)
+        pm = _make_pm_with_device(tel)
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+        etag = _last_etag(h1)
+        age1 = int(_hdr(h1, self.HEADER))
+
+        tel.ts = time.time() - 70.0  # 同源缓存继续被消费，采样在变老
+        h2 = _make_handler(headers={"If-None-Match": etag})
+        h2._handle_snapshot(pm)
+        assert _last_status(h2) == 304
+        age2 = _hdr(h2, self.HEADER)
+        assert age2 is not None, "304 也必须带采样年龄头（不假定 304 即新采样）"
+        assert int(age2) >= age1, "304 上的年龄不得早于 200 时（同一份采样在变老）"
+
+    def test_future_timestamp_clamped_non_negative(self):
+        tel = _FakeDeviceTel(ts=time.time() + 500.0)  # 时钟偏斜
+        pm = _make_pm_with_device(tel)
+        h = _make_handler()
+        h._handle_snapshot(pm)
+        age = _hdr(h, self.HEADER)
+        assert age is not None
+        assert int(age) == 0, "未来时间戳必须截断为 0（非负整数秒）"
+
+    def test_absent_without_trustworthy_timestamp(self):
+        from inferfabric.platform.telemetry import DeviceSnapshot
+        tel = _FakeDeviceTel()
+        # timestamp=None（数据契约外但防御）：省略头而非伪造 0
+        broken = DeviceSnapshot(
+            platform="darwin", accelerator="apple_silicon", memory_kind="unified",
+            memory_used_mb=1, memory_total_mb=2, memory_budget_mb=1,
+            utilization_pct=None, power_w=None, temperature_c=None, clock_mhz=None,
+            pressure_level=1, timestamp=None, sources={},
+        )
+        pm = _make_pm_with_device(tel)
+        pm.telemetry.get_device_snapshot = lambda: broken
+        h = _make_handler()
+        h._handle_snapshot(pm)
+        assert _last_status(h) == 200
+        assert _hdr(h, self.HEADER) is None, "无可信时间戳必须省略头（前端标未确认）"
+
+
+# ═══════════════════════════════════════════════════════════════
 # C1+C2 集成：_handle_snapshot 304 不重跑昂贵采集
 # ═══════════════════════════════════════════════════════════════
 

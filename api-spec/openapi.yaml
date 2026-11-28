@@ -881,9 +881,14 @@ paths:
           description: Full snapshot
           headers:
             ETag:
-              description: Content hash of the control plane (status + models)
+              description: Content hash of the control plane (all field groups; device values/capabilities invalidate, device sampling timestamp alone does not)
               schema:
                 type: string
+            X-IFF-Device-Sample-Age:
+              description: Age in whole seconds (non-negative) of the served device sample at send time — present on 200 and 304 alike; omitted when no trustworthy sample timestamp exists (treat freshness as unconfirmed, never assume 304 means a fresh sample)
+              schema:
+                type: integer
+                minimum: 0
             Cache-Control:
               schema:
                 type: string
@@ -891,12 +896,75 @@ paths:
             application/json:
               schema:
                 $ref: ./components/schemas.yaml#/SnapshotResponse
+              examples:
+                deviceApple:
+                  summary: Apple Silicon — unified memory + pressure, no NVIDIA metrics
+                  value:
+                    device:
+                      snapshot:
+                        platform: darwin
+                        accelerator: apple_silicon
+                        memory_kind: unified
+                        memory_used_mb: 12345
+                        memory_total_mb: 32768
+                        memory_budget_mb: 24576
+                        utilization_pct: null
+                        power_w: null
+                        temperature_c: null
+                        clock_mhz: null
+                        pressure_level: 1
+                        timestamp: 1764300000.0
+                        sources:
+                          memory_used_mb: vm_stat
+                          memory_total_mb: sysctl
+                          pressure_level: memorystatus
+                      capabilities:
+                        memory: true
+                        utilization: false
+                        power: false
+                        temperature: false
+                        clock: false
+                        pressure: true
+                        reset: false
+                deviceNvidia:
+                  summary: Linux + NVIDIA — five GPU metrics, aggregated
+                  value:
+                    device:
+                      snapshot:
+                        platform: linux
+                        accelerator: nvidia
+                        memory_kind: vram
+                        memory_used_mb: 8192
+                        memory_total_mb: 32768
+                        memory_budget_mb: 28672
+                        utilization_pct: 12.0
+                        power_w: 96.0
+                        temperature_c: 48.5
+                        clock_mhz: 2595
+                        pressure_level: null
+                        timestamp: 1764300000.0
+                        sources:
+                          memory_used_mb: nvidia-smi
+                          utilization_pct: nvidia-smi
+                      capabilities:
+                        memory: true
+                        utilization: true
+                        power: true
+                        temperature: true
+                        clock: true
+                        pressure: false
+                        reset: true
         "304":
           description: Not modified — control plane unchanged, client keeps last state
           headers:
             ETag:
               schema:
                 type: string
+            X-IFF-Device-Sample-Age:
+              description: Same contract as the 200 header — do NOT interpret 304 as a fresh sample
+              schema:
+                type: integer
+                minimum: 0
         "500":
           $ref: '#/components/responses/ServerError'
 

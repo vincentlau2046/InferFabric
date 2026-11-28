@@ -265,6 +265,47 @@ def test_snapshot_304_etag(monkeypatch):
     ex.shutdown(wait=True)
 
 
+def test_sample_age_header_propagates(monkeypatch):
+    """C 期契约 §C2：X-IFF-Device-Sample-Age 必须经 async 边缘完整透传
+    （200 与 304 都带；strip 集不得吞掉自定义 X- 头）。"""
+    AGE = "42"
+    ETAG = '"v1"'
+
+    def stub(h, pm):
+        if h.headers.get("If-None-Match") == ETAG:
+            h.send_response(304)
+            h.send_header("ETag", ETAG)
+            h.send_header("X-IFF-Device-Sample-Age", AGE)
+            h.end_headers()
+            return
+        body = b'{"snapshot": 1}'
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json; charset=utf-8")
+        h.send_header("ETag", ETAG)
+        h.send_header("X-IFF-Device-Sample-Age", AGE)
+        h.send_header("Cache-Control", "no-store")
+        h.end_headers()
+        h.wfile.write(body)
+        h.wfile.flush()
+
+    _start("/api/snapshot", stub, monkeypatch, "GET")
+    ex = _executor()
+
+    async def scenario():
+        app = aserver.build_app(_fake_pm(), ex, MagicMock())
+        async with TestClient(TestServer(app)) as client:
+            r1 = await client.get("/api/snapshot")
+            assert r1.status == 200
+            assert r1.headers.get("X-IFF-Device-Sample-Age") == AGE
+            r2 = await client.get("/api/snapshot", headers={"If-None-Match": ETAG})
+            assert r2.status == 304
+            assert r2.headers.get("X-IFF-Device-Sample-Age") == AGE, \
+                "304 也必须透传采样年龄头"
+
+    _run(scenario())
+    ex.shutdown(wait=True)
+
+
 # ═══════════════════════════════════════════════════════════════
 # 请求体
 # ═══════════════════════════════════════════════════════════════
