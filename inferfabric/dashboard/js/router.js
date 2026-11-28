@@ -85,9 +85,9 @@
   function toHash(view, sub, params) {
     var h = '#/' + view + (sub ? '/' + sub : '');
     if (params) {
-      var pairs = Object.keys(params).map(function (k) {
+      var pairs = Object.keys(params).filter(Boolean).map(function (k) {
         return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
-      }).filter(function (p) { return p.length && p.charAt(p.length - 1) !== '='; });
+      });
       if (pairs.length) h += '?' + pairs.join('&');
     }
     return h;

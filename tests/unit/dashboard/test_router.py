@@ -347,7 +347,7 @@ function makeEl(attrs) {
     classList: {
       add: (c) => classes.add(c),
       remove: (c) => classes.delete(c),
-      toggle: (c) => { classes.has(c) ? classes.delete(c) : classes.add(c); },
+      toggle: (c, on = !classes.has(c)) => { if (on) classes.add(c); else classes.delete(c); },
       contains: (c) => classes.has(c),
     },
     setAttribute: (k, v) => { attribs[k] = v; },
@@ -363,7 +363,10 @@ function makeEl(attrs) {
 
 const panels = {
   'tab-status': makeEl(), 'tab-requests': makeEl(), 'tab-usage': makeEl(),
+  'tab-config': makeEl(), 'tab-models': makeEl(),
 };
+const configSections = ['cloud', 'auth'].map(sub => makeEl({'data-sub': sub}));
+panels['tab-config'].querySelectorAll = (sel) => sel === '[data-sub]' ? configSections : [];
 const btnStatus = makeEl({ 'data-tab': 'tab-status' });
 const btnRequests = makeEl({ 'data-tab': 'tab-requests' });
 const navButtons = [btnStatus, btnRequests];
@@ -394,15 +397,21 @@ const window = {
 const ctx = {
   window, document, location, localStorage: storage, console,
   setTimeout: () => {}, setInterval: () => {}, clearInterval: () => {},
-  fetch: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  fetch: async () => ({ ok: true, status: 200, json: async () => input.snapshots?.shift() || {} }),
 };
 vm.runInNewContext(fs.readFileSync(process.argv[2], 'utf8'), ctx);   // store.js
 vm.runInNewContext(fs.readFileSync(process.argv[3], 'utf8'), ctx);   // router.js
 assert.ok(window.store && window.ifRouter, 'store and router must both load');
+async function run() {
 let notifyCount = 0;
-window.store.on('tab_active', function () { notifyCount += 1; });
+const observedModels = [];
+window.store.on('tab_active', function (tab) {
+  notifyCount += 1;
+  if (tab === 'tab-models') observedModels.push(window.store.get('active_services') || []);
+});
 const notifySteps = [notifyCount];   // 注册即回放当前值一次
 for (const step of (input.calls || [])) {
+  if (step.fetchSnapshot) await window.store.fetchSnapshot();
   if (step.setLocked !== undefined) window.store.setSwitchLocked(step.setLocked);
   if (step.hashChange) { hashValue = step.hashChange; if (hashListener) hashListener(); }
   notifySteps.push(notifyCount);
@@ -419,7 +428,9 @@ if (input.tab) {
 var outGroups = (typeof outGroups !== 'undefined') ? outGroups : null;
 const out = {
   callResult: (typeof outCall !== 'undefined') ? outCall : null,
-  notifySteps: notifySteps,
+  notifySteps,
+  observedModels,
+  configSub: configSections.filter(el => el.classList.contains('on')).map(el => el.getAttribute('data-sub')),
   groups: outGroups,
   hash: hashValue,
   tab_active: window.store.get('tab_active'),
@@ -429,6 +440,8 @@ const out = {
 };
 try { out.iff_view = storage.getItem('iff_view'); } catch (e) { out.iff_view = null; }
 console.log(JSON.stringify(out));
+}
+run().catch(e => { console.error(e); process.exitCode = 1; });
 """
 
 
@@ -552,6 +565,33 @@ def test_config_default_sub_alias_does_not_renotify(run_store_router):
     })
     # [注册回放, /config, /config/cloud]：别名切换不得新增通知
     assert out["notifySteps"] == [1, 2, 2]
+    assert out["configSub"] == ["cloud"]
+
+
+def test_actual_config_subpage_change_updates_visibility_and_notifies(run_store_router):
+    out = run_store_router({"hash": "#/config/cloud", "calls": [{"hashChange": "#/config/auth"}]})
+    assert out["notifySteps"] == [1, 2]
+    assert out["configSub"] == ["auth"]
+
+
+def test_unlock_uses_completed_snapshot_when_resuming_model_page(run_store_router):
+    out = run_store_router({
+        "hash": "#/status",
+        "snapshots": [
+            {"ts": 1, "status": {"switch_target": "next", "active_services": ["previous"]}},
+            {"ts": 2, "status": {"active_services": ["next"]}},
+        ],
+        "calls": [{"fetchSnapshot": True}, {"hashChange": "#/models"}, {"fetchSnapshot": True}],
+    })
+    assert out["notifySteps"] == [1, 1, 1, 2]
+    assert out["observedModels"] == [["next"]]
+
+
+def test_canonical_boot_preserves_explicit_empty_filter(run_router):
+    hash_value = "#/requests?model=&status=4xx"
+    out = run_router({"hash": hash_value, "store": {}})
+    assert out["finalHash"] == hash_value
+    assert out["iff_view"] == "requests"
 
 
 def test_view_groups_dispatch_matrix(run_store_router):

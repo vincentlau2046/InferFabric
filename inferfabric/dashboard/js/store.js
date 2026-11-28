@@ -176,7 +176,6 @@ class StateStore {
           uptime: sys.uptime_seconds || 0,
         },
         version: status.version || sys.version || '',
-        switch_target: status.switch_target || null,
         // Raw passthrough for legacy consumers
         active_services: status.active_services || [],
         services_info:   status.services_info || {},
@@ -197,6 +196,8 @@ class StateStore {
       this.set('request_log', snap.request_log || []);
       this.set('metrics_24h', snap.metrics_24h || {});
       this.set('local_models', snap.local_models || { discovered: [], configured: [] });
+      // 解锁会同步恢复浏览器目标页，须等本份快照的数据全部就位。
+      this.set('switch_target', status.switch_target || null);
       this.set('sync_meta', {
         etag: this._etag,
         rev: (this._etag || '').slice(1, 9) || '',

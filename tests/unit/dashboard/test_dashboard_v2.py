@@ -899,14 +899,10 @@ def test_monitor_power_card_contract():
     if 'method:"POST"' in js or 'method: "POST"' in js:
         raise AssertionError("monitor.js power fetch must be GET-only (read-only monitor tab)")
 
-    # 3. 前端 5min TTL + 已渲染档位守卫（snapshot 3s 轮询不得触发重绘）
+    # 3. 前端 5min TTL；缓存不变时不重绘由 test_monitor_activation 行为测试覆盖。
     assert re.search(r'_POWER_TTL\s*=\s*300000', js), (
         "monitor.js frontend power cache must be 5min TTL (300000ms) to honor "
         "「不要刷新太快」"
-    )
-    assert re.search(r'_pgranRendered\s*===?\s*_pgran', js), (
-        "monitor.js must guard re-render with a per-gran rendered marker so 3s "
-        "snapshot polls don't redraw the power chart"
     )
 
     # 4. 双轴显式受权：dualAxis:true（charts.js 唯一放行点）+ 右轴累计电量。

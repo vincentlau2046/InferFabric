@@ -68,7 +68,7 @@
   var _engineCache = null;
   var _engineModel = null;
   var _lastEngineFetch = 0;
-  var _engineInflight = null;    // {model} — 同模型在途去重（forceRefresh 双触发）
+  var _engineInflight = new Set(); // 模型间各自跟踪在途请求，不相互清除。
   var ENGINE_TTL = 15000;        // 15s
 
   // Token 卡四档统一节流 + 数据源（单位语义统一 v6.3）：
@@ -217,12 +217,12 @@
         })
         .then(function (data) {
           _pgranCache[gran] = { data: data || {}, at: Date.now() };
-          if (usageActive()) drawPower();
+          if (usageActive() && gran === _pgran) renderPowerCard();
         })
         .catch(function (e) { console.warn('[monitor] /api/device_power fetch failed:', e); })
         .then(function () { _pgranInflight[gran] = false; });
     }
-    return c ? c.data : {};
+    return c ? c.data : undefined;
   }
 
   function _pgranTooltip(params) {
@@ -245,9 +245,8 @@
     return '<div><b>' + label + '</b></div>' + rows;
   }
 
-  function drawPower() {
+  function drawPower(data) {
     ensureCharts();
-    var data = getPgranSeries(_pgran);
     var buckets = (data && data.buckets) || [];
     var totals = (data && data.totals) || {};
     var available = !!(data && data.available);
@@ -329,13 +328,12 @@
   }
 
   function renderPowerCard() {
-    // 热缓存 + 本档已渲染 → 数据没变，跳过重绘（3s 轮询不闪图）；
-    // 只读路径（getPgranSeries 内部 TTL 过期 → fetch → 落地 drawPower()）。
-    ensureCharts();
-    var c = _pgranCache[_pgran];
-    if (c && (Date.now() - c.at) < _POWER_TTL && _pgranRendered === _pgran) return;
-    drawPower();
-    _pgranRendered = _pgran;
+    // 比较实际画过的响应对象，离页时到达的新缓存会在回页后画出。
+    // getPgranSeries 仍在 TTL 到期时发请求；缓存未变不重复绘图。
+    var data = getPgranSeries(_pgran);
+    if (_pgranRendered === data) return;
+    drawPower(data);
+    _pgranRendered = data;
   }
 
   /* ── 2. Token 用量：左右双卡双轴（v6.4 取代上下堆叠 + 费用概览卡）──
@@ -852,37 +850,30 @@
       '</div>';
   }
 
+  function activeKpiModel() {
+    return (store.get('active_services') || [])[0];
+  }
+
   function renderKpis() {
     var el = $('monKpis');
     if (!el) return;
-
-    var now = Date.now();
-    if (_engineCache && now - _lastEngineFetch < ENGINE_TTL) {
-      drawKpis(_engineCache);
-      return;
-    }
-
-    var active = store.get('active_services') || [];
-    if (!active.length) {
+    var model = activeKpiModel();
+    var mLabel = $('monKpiModel');
+    if (mLabel) mLabel.textContent = model ? shortName(model) : '';
+    if (!model) {
       _engineCache = null;
       _engineModel = null;
       el.innerHTML = '<div class="if-empty">无活跃模型 — 到模型页启动一个</div>';
-      var mLabel = $('monKpiModel');
-      if (mLabel) mLabel.textContent = '';
       return;
     }
-    var model = active[0];
-    var mLabel = $('monKpiModel');
-    if (mLabel) mLabel.textContent = shortName(model);
 
-    // 模型未变且有缓存 → 直接用
-    if (_engineModel === model && _engineCache && now - _lastEngineFetch < ENGINE_TTL) {
+    if (_engineModel === model && _engineCache && Date.now() - _lastEngineFetch < ENGINE_TTL) {
       drawKpis(_engineCache);
       return;
     }
 
-    if (_engineInflight && _engineInflight.model === model) return;   // 在途去重
-    _engineInflight = { model: model };
+    if (_engineInflight.has(model)) return;
+    _engineInflight.add(model);
     UI.skeleton(el, 3);
     // GET only — no method specified = GET (read-only constraint)
     fetch('/api/engine_metrics?model=' + encodeURIComponent(model), {
@@ -893,16 +884,16 @@
         return res.json();
       })
       .then(function (data) {
-        _engineInflight = null;
+        if (activeKpiModel() !== model) return;
         _engineCache = data;
         _engineModel = model;
         _lastEngineFetch = Date.now();
-        drawKpis(data);
+        if (kpisActive()) drawKpis(data);
       })
       .catch(function () {
-        _engineInflight = null;
-        el.innerHTML = '<div class="if-empty">引擎指标暂不可用</div>';
-      });
+        if (activeKpiModel() === model && kpisActive()) drawKpis(null);
+      })
+      .finally(function () { _engineInflight.delete(model); });
   }
 
   /* ── 5. 请求日志表 ── */
