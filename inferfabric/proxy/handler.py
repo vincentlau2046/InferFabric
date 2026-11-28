@@ -147,6 +147,22 @@ def _snapshot_etag(payload: dict) -> str:
                 content["device"] = env
             else:
                 content["system"] = {**holder, "device": env}
+    # C1 fix (7.12.20): system 顶层有每请求重算的纯钟/负载仪表字段——
+    # uptime_seconds（读 /proc/uptime，每秒 +1）、cpu_percent（1 分钟
+    # loadavg，0.1 位抖动）、ram_used_gb（0.1GB 分辨率，活跃机常跨格）。
+    # 它们进哈希会让 ≥1s 间隔的轮询恒得新 ETag → 304 在 3s 轮询节奏下
+    # 端到端不可达（ETag 机制空转），而 dashboard 并不渲染 uptime。
+    # 哈希口径排除纯钟字段、仪表值按整数量化；payload 保真不变（响应体
+    # 仍是原始精度）。
+    sys_holder = content.get("system")
+    if isinstance(sys_holder, dict):
+        sys_norm = dict(sys_holder)
+        sys_norm.pop("uptime_seconds", None)
+        for gauge in ("cpu_percent", "ram_used_gb"):
+            v = sys_norm.get(gauge)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                sys_norm[gauge] = int(round(v))
+        content["system"] = sys_norm
     raw = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 

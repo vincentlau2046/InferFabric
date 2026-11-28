@@ -123,6 +123,10 @@ window.window = window;
 let snapshotFetches = 0, warnFetches = 0, anomFetches = 0;
 const warnUrls = [];
 const postCalls = [];
+// 7.12.20: 可挂起响应（wait:true → 由 flush 步骤按序放行），用于乱序 304 用例
+const pendingFns = [];
+const startedFetches = [];
+const captures = [];
 function mkRes(spec) {
   const hmap = {};
   for (const [k, v] of Object.entries(spec.headers || {})) hmap[k.toLowerCase()] = v;
@@ -147,6 +151,9 @@ const fetch = (url) => {
     snapshotFetches += 1;
     const spec = snapQueue.length ? snapQueue.shift()
       : (input.snapshotJson ? { json: input.snapshotJson } : {});
+    if (spec.wait) {
+      return new Promise((resolve) => { pendingFns.push(() => resolve(mkRes(spec))); });
+    }
     return Promise.resolve(mkRes(spec));
   }
   if (u.indexOf('/api/anomalies') === 0) {
@@ -190,6 +197,20 @@ async function run() {
   for (const step of (input.steps || [])) {
     if (step.seedStore) for (const [k, v] of Object.entries(step.seedStore)) window.store.set(k, v);
     if (step.fetchSnapshot) await window.store.fetchSnapshot(!!step.force);
+    if (step.startFetch) startedFetches.push(window.store.fetchSnapshot(!!step.force));
+    if (step.flush) {
+      await drain();
+      const n = (typeof step.flush === 'number') ? step.flush : pendingFns.length;
+      pendingFns.splice(0, n).forEach((f) => f());
+      await drain(20);
+    }
+    if (step.capture) {
+      captures.push({
+        syncMeta: window.store.get('sync_meta') || null,
+        deviceSample: window.store.get('device_sample') || null,
+        apiError: window.store.get('api_error') || null,
+      });
+    }
     if (step.renderOverview) window.tabRenderers['tab-overview']();
     if (step.ops) await window.doSystemOps(step.ops);
     if (step.modelAction) await window.doModelAction(step.modelAction[0], step.modelAction[1]);
@@ -227,12 +248,15 @@ async function run() {
     deviceSample: window.store.get('device_sample') || null,
     sampleAge: (typeof window.store.deviceSampleAge === 'function') ? window.store.deviceSampleAge() : 'NO_METHOD',
     etag: window.store._etag === undefined ? 'NO_FIELD' : window.store._etag,
+    syncMeta: window.store.get('sync_meta') || null,
+    apiError: window.store.get('api_error') || null,
     tabActive: window.store.get('tab_active') || null,
     rail: {
       vram: el('trVram').textContent,
       memLabel: memSeg.querySelector('.tr-label').textContent,
       memUnit: memSeg.querySelector('.tr-unit').textContent,
       fillWidth: el('trVramFill').style.width,
+      segMem: segDisp('trSegMem'),
       segUtil: segDisp('trSegUtil'), segPwr: segDisp('trSegPwr'),
       segTemp: segDisp('trSegTemp'), segClock: segDisp('trSegClock'),
     },
@@ -240,6 +264,7 @@ async function run() {
     postCalls, snapshotFetches, warnFetches, anomFetches, warnUrls,
     intervalCount: intervals.length,
   };
+  out.captures = captures;
   console.log(JSON.stringify(out));
 }
 run().catch((e) => { console.error(e && e.stack || e); process.exitCode = 1; });
@@ -860,3 +885,84 @@ def test_spark_caption_not_today_when_last_bucket_stale(tmp_path):
     })
     assert "今日" not in (out["spark"] or ""), out["spark"]
     assert "2020-01-01" in (out["spark"] or ""), "尾点日期应可见"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 7.12.20 修复轮（#91 合并态补验：F-B / F-C / F-E / F-F）
+# ═══════════════════════════════════════════════════════════════
+
+def test_dropped_out_of_order_response_not_marked_stale(tmp_path):
+    """F-B：乱序丢弃 ≠ 断连 —— 丢弃路径不得置 sync_meta.stale（否则顶栏
+    「已断线」假报警），且 lastOk 须刷新（API 刚刚应答过）。"""
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [
+            {"json": {"ts": 2000, "etag": "\"B\""}, "headers": {"X-IFF-Device-Sample-Age": "5"}},
+            {"json": {"ts": 1000, "etag": "\"A\""}, "headers": {"X-IFF-Device-Sample-Age": "0"}},
+        ],
+        "steps": [{"fetchSnapshot": True}, {"fetchSnapshot": True}],
+    })
+    meta = out["syncMeta"] or {}
+    assert meta.get("stale") is False, "乱序丢弃不得显示已断线: %r" % (meta,)
+    assert out["apiError"] is None, out["apiError"]
+    assert meta.get("lastOk"), "lastOk 应刷新（丢弃也是成功应答）"
+
+def test_late_304_does_not_reanchor_sample_age(tmp_path):
+    """F-C：迟到的旧 304 不得重锚采样年龄（否则新鲜度徽章被旧请求拉回退）。"""
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [
+            {"status": 304, "wait": True, "headers": {"X-IFF-Device-Sample-Age": "9"}},
+            {"json": {"ts": 2000, "etag": "\"B\""}, "headers": {"X-IFF-Device-Sample-Age": "2"}},
+        ],
+        "steps": [{"startFetch": True}, {"fetchSnapshot": True}, {"flush": True}],
+    })
+    assert out["deviceSample"] and out["deviceSample"]["age"] == 2, out["deviceSample"]
+    assert out["sampleAge"] < 5, "旧 304 的年龄 9 不得覆盖新锚 2: %r" % out["sampleAge"]
+
+def test_rail_segmem_hidden_without_memory_capability(tmp_path):
+    """F-E：未声明 memory 能力 → rail 内存段不占位（与遥测卡门控一致）。"""
+    dev = _nvidia_dev()
+    dev["capabilities"]["memory"] = False
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": dev, "sync_meta": {"changed": True}}}],
+    })
+    assert out["rail"]["segMem"] == "none", out["rail"]
+
+def test_telemetry_used_without_total_has_unit(tmp_path):
+    """F-E：total 未知、used 已知 → 内存行也必须带单位（不得裸「12.1」）。"""
+    dev = _nvidia_dev()
+    dev["snapshot"]["memory_total_mb"] = None
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": dev}, "renderOverview": True}],
+    })
+    assert '<dd class="mono">8.0 <span' in out["teleHTML"], \
+        "used 无 total 时缺 GB 单位: %r" % out["teleHTML"]
+
+def test_warning_count_fetched_once_per_ttl(tmp_path):
+    """F-F：3s 轮询渲染不得每次都拉 /api/anomalies（15s TTL + 在途去重），
+    且已取到的警告数不得闪回「—」。"""
+    out = _run_harness(tmp_path, {
+        "anomaliesWarnJson": {"count": 7, "events": [{"id": 1}, {"id": 2}]},
+        "steps": [{"renderOverview": True}, {"renderOverview": True},
+                  {"renderOverview": True}],
+    })
+    assert out["warnFetches"] == 1, "TTL 内重复拉取: %r 次" % out["warnFetches"]
+    assert "7" in (out["warnCount"] or ""), out["warnCount"]
+
+def test_superseded_304_still_reports_online(tmp_path):
+    """终审 Important：被更新请求取代的迟到 304 不重锚采样年龄，但连通性
+    证据仍须更新（lastOk/在线）——持续 >3s 迟延时不得假报「已断线」。"""
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [
+            {"status": 304, "wait": True, "headers": {"X-IFF-Device-Sample-Age": "9"}},
+            {"status": 304, "wait": True, "headers": {"X-IFF-Device-Sample-Age": "3"}},
+        ],
+        "steps": [
+            {"startFetch": True}, {"startFetch": True},
+            {"flush": 1}, {"capture": True},     # 旧 304 先回（被新请求取代）
+            {"flush": True}, {"capture": True},  # 新 304 回
+        ],
+    })
+    cap0 = out["captures"][0]
+    assert cap0["apiError"] is None, cap0
+    assert (cap0["syncMeta"] or {}).get("stale") is False, cap0
+    assert (cap0["syncMeta"] or {}).get("lastOk"), "旧 304 也须刷新 lastOk: %r" % (cap0,)
