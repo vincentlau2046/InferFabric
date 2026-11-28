@@ -47,6 +47,7 @@ class StateStore {
     // Snapshot sync metadata
     this._etag = null;   // last etag received from /api/snapshot
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
+    this._sampleFloor = null; // F3: 单调下限 —— 新锚重置，锚间只升不降
   }
 
   /* ── C 期：设备采样年龄（契约 §C2：三时钟分开）──
@@ -64,6 +65,8 @@ class StateStore {
   }
 
   _setSampleAge(age) {
+    // F3: 新锚重置单调下限（新采样到达允许合法下降）
+    this._sampleFloor = (age == null) ? null : age;
     this.set('device_sample', age == null
       ? { age: null, at: null }
       : { age: age, at: Date.now() / 1000 });
@@ -72,7 +75,12 @@ class StateStore {
   deviceSampleAge() {
     const s = this.get('device_sample');
     if (!s || s.age == null || s.at == null) return null;
-    return Math.max(0, s.age + Math.max(0, Date.now() / 1000 - s.at));
+    const computed = s.age + Math.max(0, Date.now() / 1000 - s.at);
+    // F3: 墙钟（Date.now）非单调 —— 锚间读数只升不降；新锚已重置下限
+    if (this._sampleFloor == null || computed > this._sampleFloor) {
+      this._sampleFloor = computed;
+    }
+    return this._sampleFloor;
   }
 
   /* ── Core pub/sub ── */
@@ -146,17 +154,16 @@ class StateStore {
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snap = await res.json();
-      // C: 200 重新锚定采样年龄；无头 → 未确认（覆盖旧值）
-      this._setSampleAge(this._readSampleAge(res));
 
       // Out-of-order guard: drop stale responses (ts regressed).
+      // F2: 被丢弃的响应不得改写正在显示样本的 etag/采样年龄 ——
+      // staleness 先判，提交只发生在非 stale 路径（显示中的样本继续按原锚变老）。
+      const incomingEtag = snap.etag || null;
+      const incomingAge = this._readSampleAge(res);
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;
-      this._etag = snap.etag || null;
-      this._lastTs = Math.max(this._lastTs, snap.ts || 0);
-      this.set('api_error', null);
-
       if (stale) {
         console.warn('[state] out-of-order snapshot dropped (ts', snap.ts, '<= last', this._lastTs);
+        this.set('api_error', null);
         this.set('sync_meta', {
           etag: this._etag,
           rev: (this._etag || '').slice(1, 9) || '',
@@ -166,6 +173,11 @@ class StateStore {
         });
         return snap;
       }
+      // C: 200 重新锚定采样年龄；无头 → 未确认（覆盖旧值）
+      this._etag = incomingEtag;
+      this._setSampleAge(incomingAge);
+      this._lastTs = Math.max(this._lastTs, snap.ts || 0);
+      this.set('api_error', null);
 
       const status = snap.status || {};
       const sys = snap.system || {};

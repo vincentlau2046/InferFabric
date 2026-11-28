@@ -92,26 +92,52 @@
 
   /* ── 1. GPU 遥测带（全局 shell 元素，每个快照都刷新，不限定 tab） ── */
   function renderRail() {
-    var gpu = store.get('gpu') || {};
     var util = store.get('gpu_util') || {};
-    // DeviceTelemetry T5: memory_kind 驱动标签与语义；null = 不可用 → '—'
-    // 或不填充，绝不画 0。量级条无固定设备额定上限（已改为 no-scale 空态）。
-    var kind = store.get('memory_kind') || 'unknown';
+    var dev = store.get('device');
+    var devSnap = dev && dev.snapshot;
+    var caps = (dev && dev.capabilities) || store.get('capabilities') || {};
+    var kind = (devSnap && devSnap.memory_kind) || store.get('memory_kind') || 'unknown';
+    // device 信封在场 = 快照供数可用（F5）
+    var snapFed = !!(devSnap && typeof devSnap === 'object');
 
-    var used = gpu.used, total = gpu.total;
-    var vramPct = (gpu.pct != null) ? gpu.pct : 0;
+    // F5: 内存段真值 —— device 快照优先（统一内存 = 物理总量，非推理
+    // 预算；used 缺失但总量可信 → 「— / 总量」）；旧响应无 device →
+    // 回退 legacy gpu 映射（行为不变）。
+    var used, total;
+    if (snapFed) {
+      used = devSnap.memory_used_mb;
+      total = devSnap.memory_total_mb;
+    } else {
+      var gpu = store.get('gpu') || {};
+      used = gpu.used;
+      total = gpu.total;
+    }
+
     var vram = $('trVram');
     if (vram) {
       vram.textContent = (used == null) ? '—' : UI.fmtGB(used);
-      var seg = vram.closest ? vram.closest('.tr-seg') : null;
-      if (seg) {
-        var lbl = seg.querySelector('.tr-label');
-        if (lbl) lbl.textContent = (kind === 'unified') ? '统一内存' : 'VRAM';
-        var unit = seg.querySelector('.tr-unit');
-        if (unit) unit.textContent = (total != null) ? ('/ ' + UI.fmtGB(total)) : '';
+      var segMem = $('trSegMem');
+      if (segMem) {
+        var lbl = segMem.querySelector('.tr-label');
+        if (lbl) lbl.textContent = (kind === 'unified') ? '统一内存' : (kind === 'vram' ? 'VRAM' : '内存');
+        var unit = segMem.querySelector('.tr-unit');
+        if (unit) unit.textContent = (total != null && total > 0) ? ('/ ' + UI.fmtGB(total)) : '';
       }
     }
-    setFill('trVramFill', vramPct);
+    setFill('trVramFill', (used != null && total > 0) ? (used / total * 100) : 0);
+
+    // F5: device 信封在场 → 未声明能力的段不占位；旧响应不做能力
+    // 隐藏（无能力信息可依，保持既有行为）。
+    if (snapFed) {
+      function segVisible(id, capOk) {
+        var seg = $(id);
+        if (seg) seg.style.display = capOk ? '' : 'none';
+      }
+      segVisible('trSegUtil', !!caps.utilization);
+      segVisible('trSegPwr', !!caps.power);
+      segVisible('trSegTemp', !!caps.temperature);
+      segVisible('trSegClock', !!caps.clock);
+    }
 
     var utilPct = (util.pct == null) ? null : util.pct;
     var utilEl = $('trUtil');
@@ -257,7 +283,8 @@
         var models = scopeData[date] || {};
         var total = 0;
         for (var m in models) {
-          if (models[m] && models[m].requests) total += models[m].requests;
+          var q = models[m] && Number(models[m].requests);
+          if (Number.isFinite(q) && q > 0) total += Math.floor(q);
         }
         byDate[date] = (byDate[date] || 0) + total;
       }
@@ -290,13 +317,16 @@
       ptsArr.push(x.toFixed(1) + ',' + y.toFixed(1));
     }
     var pts = ptsArr.join(' ');
-    var todayTotal = recent[recent.length - 1].total;
+    // F12: 尾点日期 == UTC 今日才写「今日」，否则写尾点日期（不冒充当天）
+    var lastDay = recent[recent.length - 1];
+    var todayTotal = lastDay.total;
+    var capLabel = (lastDay.date === utcToday()) ? '今日' : escHtml(lastDay.date);
 
     body.innerHTML =
       '<svg class="ov-spark" viewBox="0 0 240 60" preserveAspectRatio="none" aria-label="请求趋势 sparkline">' +
         '<polyline class="spark-line" points="' + pts + '"/>' +
       '</svg>' +
-      '<div class="spark-caption"><b>' + UI.fmtNum(todayTotal) + '</b> <span class="muted">req · 今日</span></div>';
+      '<div class="spark-caption"><b>' + UI.fmtNum(todayTotal) + '</b> <span class="muted">req · ' + capLabel + '</span></div>';
   }
 
   /* ── 4. 最近异常 top3 ── */
@@ -387,17 +417,22 @@
     return '<div class="ov-stat"><dt>' + label + '</dt><dd class="mono">' + valueHtml + '</dd></div>';
   }
 
+  /* F4: 新鲜度徽章按本地时钟自走（1s）—— 轮询在途/挂起时走表不冻结
+   * （徽章是「同一份采样在变老」的本地累加，不依赖下一次响应）。 */
+  function updateFreshBadge() {
+    var fresh = $('ovTeleFresh');
+    if (!fresh) return;
+    var age = store.deviceSampleAge ? store.deviceSampleAge() : null;
+    if (age == null) fresh.textContent = '新鲜度未确认';
+    else if (age > 30) fresh.textContent = '读数已过期 ' + Math.floor(age) + 's';
+    else fresh.textContent = '采样 ' + Math.floor(age) + 's 前';
+  }
+
   function renderTelemetry() {
     var card = $('ovTelemetry');
     if (!card) return;
     var body = $('ovTeleBody');
-    var fresh = $('ovTeleFresh');
-    if (fresh) {
-      var age = store.deviceSampleAge ? store.deviceSampleAge() : null;
-      if (age == null) fresh.textContent = '新鲜度未确认';
-      else if (age > 30) fresh.textContent = '读数已过期 ' + Math.floor(age) + 's';
-      else fresh.textContent = '采样 ' + Math.floor(age) + 's 前';
-    }
+    updateFreshBadge();
     if (!body) return;
 
     var dev = store.get('device');
@@ -491,46 +526,58 @@
     var swLine = $('ovSwitchLine');
     if (swLine) swLine.textContent = target ? ('切换中 → ' + target) : '';
 
-    // UTC 当天请求数
+    // UTC 当天请求数（F12: 数值强制按数累加，字符串数字不得拼接）
     var today = utcToday();
     var stats = store.get('token_stats') || {};
     var n = 0;
     for (var scope in stats) {
       var day = stats[scope] && stats[scope][today];
       if (day && typeof day === 'object') {
-        for (var m in day) if (day[m] && day[m].requests) n += day[m].requests;
+        for (var m in day) {
+          var q = day[m] && Number(day[m].requests);
+          if (Number.isFinite(q) && q > 0) n += Math.floor(q);
+        }
       }
     }
     var reqEl = $('ovReqToday');
     if (reqEl) reqEl.textContent = UI.fmtNum(n);
 
-    // 已保留警告（severity=warning 环形缓冲）
-    var warnEl = $('ovWarnCount');
-    fetch('/api/anomalies?severity=warning&limit=100', { cache: 'no-store' })
+    // 已保留警告（severity=warning 环形缓冲）— F6: limit=500 取环形
+    // 全量；回调时按 id 重取节点（渲染可能在响应前重建过骨架）。
+    fetch('/api/anomalies?severity=warning&limit=500', { cache: 'no-store' })
       .then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       })
       .then(function (data) {
-        if (warnEl) warnEl.textContent = UI.fmtNum(
+        var el2 = $('ovWarnCount');
+        if (el2) el2.textContent = UI.fmtNum(
           (data && data.count != null) ? data.count
             : ((data && data.events && data.events.length) || 0));
       })
-      .catch(function () { if (warnEl) warnEl.textContent = '—'; });
+      .catch(function () { var el2 = $('ovWarnCount'); if (el2) el2.textContent = '—'; });
 
-    // 空闲快捷项：history 中成功到达、仍可切换的最近三个去重模型
+    // 空闲快捷项：history 中成功到达、仍在目录的最近三个去重模型。
+    // F1: 真实行形状 = {from,to,...}（db.py），状态须显式成功，且模型
+    // 仍可切换（在 models 目录中）才可推荐。
     var sc = $('ovIdleShortcuts');
     if (sc) {
       var active = store.get('active_services') || [];
       if (!active.length) {
         var hist = store.get('history') || [];
+        var models = store.get('models') || [];
         var seen = {}, picks = [];
         for (var i = 0; i < hist.length && picks.length < 3; i++) {
           var h = hist[i] || {};
-          var name = h.model || h.name || '';
+          var name = h.to || h.model || h.name || '';
           var st = String(h.status || '').toLowerCase();
           if (!name || seen[name]) continue;
-          if (st && st !== 'ok' && st !== 'success' && st !== 'switched') continue;
+          if (!st || (st !== 'ok' && st !== 'success' && st !== 'switched')) continue;
+          var inCatalog = false;
+          for (var k = 0; k < models.length; k++) {
+            if (models[k] && models[k].name === name) { inCatalog = true; break; }
+          }
+          if (!inCatalog) continue;
           seen[name] = 1;
           picks.push(name);
         }
@@ -544,7 +591,7 @@
       }
     }
 
-    // 最近五条（只统计所显示条数）
+    // 最近五条（只统计所显示条数；F9: status 原文转义后进徽章）
     var r5 = $('ovRecent5');
     if (r5) {
       var logs = store.get('request_log') || [];
@@ -552,13 +599,15 @@
       var lis = '';
       for (var j = 0; j < five.length; j++) {
         var r = five[j] || {};
-        var st = r.status;
-        var cls = (st == null) ? '' : (st >= 500 ? 'crit' : (st >= 400 ? 'warn' : 'ok'));
+        var stNum = (r.status == null) ? null : Number(r.status);
+        var cls = (stNum == null || !isFinite(stNum)) ? ''
+          : (stNum >= 500 ? 'crit' : (stNum >= 400 ? 'warn' : 'ok'));
         lis += '<li class="ov-req-row"><span class="mono">' + escHtml(fmtTimeOfDay(r.timestamp)) + '</span>' +
           ' <span>' + escHtml(r.model || '—') + '</span>' +
-          ' <span class="badge' + (cls ? ' ' + cls : '') + '">' + (st == null ? '—' : st) + '</span></li>';
+          ' <span class="badge' + (cls ? ' ' + cls : '') + '">' + (r.status == null || r.status === '' ? '—' : escHtml(String(r.status))) + '</span></li>';
       }
-      r5.innerHTML = lis || '<li class="muted">暂无请求记录</li>';
+      // F13: 快照请求日志只含最近 1 小时 —— 空态如实注明口径
+      r5.innerHTML = lis || '<li class="muted">暂无最近 1 小时请求</li>';
     }
   }
 
@@ -583,13 +632,24 @@
       ? store.isGroupActive('tab-overview') : (tab === 'tab-overview');
     if (on) { renderRail(); renderOverview(); }
   });
+  // F4: 徽章本地走表 —— 只在状态页可见时重算，且只碰文本节点
+  setInterval(function () {
+    if (isOverviewActive()) updateFreshBadge();
+  }, 1000);
 
   /* ── 5. 系统操作：release / reconcile / reload / reset ── */
+  // F11: 上游诊断原文截断后进 toast（去换行、限长），不整段透出
+  function trimMsg(m) {
+    var s = String(m == null ? '' : m).replace(/\s+/g, ' ').trim();
+    return s.length > 120 ? s.slice(0, 117) + '…' : s;
+  }
+
   window.doSystemOps = async function (action) {
     var OPS = {
       release: {
         url: '/switch', body: { model: 'idle' },
-        confirm: { title: '释放 GPU', body: '释放 GPU，停止当前独占模型。确定？', danger: true },
+        // F8: 共享模式下会停多个在役模型 —— 文案如实覆盖
+        confirm: { title: '释放 GPU', body: '释放 GPU，停止当前全部在役模型（共享模式下可能是多个）。确定？', danger: true },
         ok: 'GPU 已释放',
       },
       reconcile: {
@@ -624,28 +684,33 @@
           } catch (_) {}
           throw new Error(msg);
         }
-        // C 期契约 §C3 严格结果判定：200 业务失败不报成功
+        // C 期契约 §C3 严格结果判定：200 业务失败不报成功。
+        // F8: 200 但响应体不可解析 = 结果无法确认 → 不报成功；
+        // release 白名单无 `j && j.status` 逃逸（缺 status 即不通过）。
         var j = null;
         try { j = await res.json(); } catch (_) {}
-        if (j && j.status === 'error') {
+        if (j == null) {
+          throw new Error('操作结果无法确认，请刷新状态核对');
+        }
+        if (j.status === 'error') {
           throw new Error(j.message || j.error || '操作未成功，请刷新状态确认');
         }
-        if (action === 'release' && j && j.status &&
+        if (action === 'release' &&
             j.status !== 'switched' && j.status !== 'already_active') {
           // 释放 GPU = switch→idle：未到 idle 不报成功
-          throw new Error(j.message || ('释放未完成（' + j.status + '）'));
+          throw new Error(j.message || ('释放未完成（' + (j.status || '无状态') + '）'));
         }
-        if (action === 'reload' && j && j.failed && j.failed.length) {
+        if (action === 'reload' && j.failed && j.failed.length) {
           UI.toast('配置部分重载失败（' + j.failed.length + ' 项）', 'error');
           store.forceRefresh();
           return;
         }
         var okMsg = op.ok;
-        if (action === 'reconcile' && j && j.status) okMsg = op.ok + '（' + j.status + '）';
+        if (action === 'reconcile' && j.status) okMsg = op.ok + '（' + j.status + '）';
         UI.toast(okMsg, 'ok');
         store.forceRefresh();
       } catch (e) {
-        UI.toast('操作失败: ' + (e && e.message ? e.message : e), 'error');
+        UI.toast('操作失败: ' + trimMsg(e && e.message ? e.message : e), 'error');
       }
     };
 
@@ -700,6 +765,17 @@
       if (!link || !anomCard.contains(link)) return;
       ev.preventDefault();
       store.switchTab('tab-anomaly');
+    });
+  }
+
+  // F1: 态势卡空闲快捷项 → 推理页（委托挂在卡片上，快捷项重渲后仍有效）
+  var sitCard = $('ovSituation');
+  if (sitCard) {
+    sitCard.addEventListener('click', function (ev) {
+      var btn = ev.target.closest('[data-action="goto-inference"]');
+      if (!btn || !sitCard.contains(btn)) return;
+      ev.preventDefault();
+      store.switchTab('tab-inference');
     });
   }
 })();

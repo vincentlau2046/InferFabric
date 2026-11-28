@@ -79,7 +79,10 @@ function makeEl(id, attrs) {
     querySelectorAll: () => [],
     closest: () => null,
     focus: () => {}, appendChild: () => {},
-    _fire(type, ev) { (listeners[type] || []).forEach((fn) => fn(ev || { target: el })); },
+    _fire(type, ev) {
+      const base = { target: el, preventDefault: () => {}, stopPropagation: () => {} };
+      (listeners[type] || []).forEach((fn) => fn(ev ? Object.assign(base, ev) : base));
+    },
     _listeners: listeners,
     style: {}, options: [],
   };
@@ -118,6 +121,7 @@ window.window = window;
 // ── 可编程 fetch：snapshot 队列（带响应头）、anomalies 按 severity 分流、
 // POST ops 按路径前缀脚本 ──
 let snapshotFetches = 0, warnFetches = 0, anomFetches = 0;
+const warnUrls = [];
 const postCalls = [];
 function mkRes(spec) {
   const hmap = {};
@@ -126,7 +130,10 @@ function mkRes(spec) {
   return {
     ok: status < 400, status,
     headers: { get: (n) => (hmap[String(n).toLowerCase()] !== undefined ? hmap[String(n).toLowerCase()] : null) },
-    json: async () => spec.json,
+    json: async () => {
+      if (spec.text != null) throw new SyntaxError('Unexpected token in JSON');   // 不可解析响应体
+      return spec.json;
+    },
   };
 }
 const snapQueue = (input.snapshotResponses || []).slice();
@@ -143,7 +150,7 @@ const fetch = (url) => {
     return Promise.resolve(mkRes(spec));
   }
   if (u.indexOf('/api/anomalies') === 0) {
-    if (u.indexOf('severity=warning') >= 0) { warnFetches += 1; return Promise.resolve(mkRes({ json: input.anomaliesWarnJson || { events: [] } })); }
+    if (u.indexOf('severity=warning') >= 0) { warnFetches += 1; warnUrls.push(u); return Promise.resolve(mkRes({ json: input.anomaliesWarnJson || { events: [] } })); }
     anomFetches += 1;
     return Promise.resolve(mkRes({ json: input.anomaliesJson || { events: [] } }));
   }
@@ -186,9 +193,26 @@ async function run() {
     if (step.renderOverview) window.tabRenderers['tab-overview']();
     if (step.ops) await window.doSystemOps(step.ops);
     if (step.modelAction) await window.doModelAction(step.modelAction[0], step.modelAction[1]);
+    if (step.tick) {
+      for (let i = 0; i < intervals.length; i++) {
+        const iv = intervals[i];
+        if (!iv.dead && iv.ms <= step.tick) iv.fn();
+      }
+    }
+    if (step.click) {
+      // 事件委托模拟：在指定卡片上触发 click，target = 带 data-action 的按钮桩
+      const card = el(step.click.card);
+      const btn = makeEl(step.click.card + '::btn', step.click.attrs || {});
+      btn.closest = (sel) => (sel.indexOf('data-action') >= 0 ? btn : null);
+      card.contains = () => true;
+      card._fire('click', { target: btn });
+    }
     await drain();
   }
   await drain();
+  const segDisp = (id) => { const s = el(id); return s.style.display === undefined ? 'MISSING' : s.style.display; };
+  const sparkBody = el('ovSpark24h').querySelector('.if-card-body');
+  const memSeg = el('trSegMem');
   const out = {
     teleHTML: el('ovTeleBody').innerHTML,
     teleFresh: el('ovTeleFresh').textContent,
@@ -202,7 +226,19 @@ async function run() {
     toastClass: els['toast'].className,
     deviceSample: window.store.get('device_sample') || null,
     sampleAge: (typeof window.store.deviceSampleAge === 'function') ? window.store.deviceSampleAge() : 'NO_METHOD',
-    postCalls, snapshotFetches, warnFetches, anomFetches,
+    etag: window.store._etag === undefined ? 'NO_FIELD' : window.store._etag,
+    tabActive: window.store.get('tab_active') || null,
+    rail: {
+      vram: el('trVram').textContent,
+      memLabel: memSeg.querySelector('.tr-label').textContent,
+      memUnit: memSeg.querySelector('.tr-unit').textContent,
+      fillWidth: el('trVramFill').style.width,
+      segUtil: segDisp('trSegUtil'), segPwr: segDisp('trSegPwr'),
+      segTemp: segDisp('trSegTemp'), segClock: segDisp('trSegClock'),
+    },
+    spark: sparkBody.innerHTML,
+    postCalls, snapshotFetches, warnFetches, anomFetches, warnUrls,
+    intervalCount: intervals.length,
   };
   console.log(JSON.stringify(out));
 }
@@ -472,19 +508,21 @@ def test_recent_five_not_total(tmp_path):
         "steps": [{"seedStore": {"request_log": rows}, "renderOverview": True}],
     })
     html = out["recent5"] or ""
-    assert html.count("m") >= 5 or "<tr" in html or "m5" in html or "m0" in html
-    assert "m6" not in html.split("查看全部")[0] or html.count("<li") == 5 or html.count("ov-req-row") == 5
+    assert html.count("ov-req-row") == 5, f"最近五条 = 恰 5 行（got {html.count('ov-req-row')}）"
+    assert "m6" not in html
     assert "5" in (out["sitHTML"] or ""), "最近五条计数应注明只统计所显示条数"
 
 
 def test_idle_shortcuts_from_history(tmp_path):
+    # db.py:296 真实行形状 = {timestamp, from, to, duration, status}
     history = [
-        {"model": "alpha", "status": "ok", "ts": 3},
-        {"model": "beta", "status": "ok", "ts": 2},
-        {"model": "alpha", "status": "ok", "ts": 1},
+        {"timestamp": 3, "from": "idle", "to": "alpha", "duration": 1.0, "status": "ok"},
+        {"timestamp": 2, "from": "idle", "to": "beta", "duration": 1.0, "status": "ok"},
+        {"timestamp": 1, "from": "idle", "to": "alpha", "duration": 1.0, "status": "ok"},
     ]
     out = _run_harness(tmp_path, {
-        "steps": [{"seedStore": {"active_services": [], "history": history},
+        "steps": [{"seedStore": {"active_services": [], "history": history,
+                                 "models": [{"name": "alpha"}, {"name": "beta"}]},
                    "renderOverview": True}],
     })
     html = out["shortcuts"] or ""
@@ -567,3 +605,258 @@ def test_gateway_uptime_not_displayed(tmp_path):
     })
     html = out["teleHTML"] + out["sitHTML"]
     assert "网关运行" not in html and "网关时长" not in html
+
+
+# ── 终审修复轮（No-with-fixes：F1–F13）────────────────────────
+
+def test_stale_response_keeps_prior_etag_and_age(tmp_path):
+    """F2：乱序迟到 200 被丢弃时，不得改写正在显示样本的 etag/采样年龄
+    （否则下一次 If-None-Match 指向被丢弃响应，且新鲜度读数倒退）。"""
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [
+            {"json": {"ts": 2000, "etag": "\"B\""}, "headers": {"X-IFF-Device-Sample-Age": "5"}},
+            {"json": {"ts": 1000, "etag": "\"A\""}, "headers": {"X-IFF-Device-Sample-Age": "0"}},
+        ],
+        "steps": [{"fetchSnapshot": True}, {"fetchSnapshot": True}],
+    })
+    assert out["etag"] == "\"B\"", out["etag"]
+    assert out["deviceSample"]["age"] == 5, out["deviceSample"]
+    assert out["sampleAge"] >= 5, out["sampleAge"]
+
+
+def test_sample_age_never_runs_backward_before_new_anchor(tmp_path):
+    """F3 客户端：本地累加须单调 —— 墙钟回拨不回退读数；新锚（新响应）才允许重置。"""
+    import time as _time
+    now = _time.time()
+    out = _run_harness(tmp_path, {
+        "steps": [
+            {"seedStore": {"device_sample": {"age": 25, "at": now - 3600}},
+             "renderOverview": True},
+            {"seedStore": {"device_sample": {"age": 25, "at": now + 100}},
+             "renderOverview": True},
+        ],
+    })
+    assert out["sampleAge"] is not None and out["sampleAge"] > 3600, out["sampleAge"]
+
+
+def test_sample_age_resets_on_fresh_anchor(tmp_path):
+    """F3 客户端（反向）：新采样到达允许合法下降 —— 单调下限须随锚重置。"""
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [{"json": {}, "headers": {"X-IFF-Device-Sample-Age": "5"}}],
+        "steps": [
+            {"seedStore": {"device_sample": {"age": 25, "at": 0}}, "renderOverview": True},
+            {"fetchSnapshot": True},
+        ],
+    })
+    assert out["sampleAge"] < 30, out["sampleAge"]
+
+
+def test_freshness_badge_updates_while_poll_hangs(tmp_path):
+    """F4：轮询在途/挂起时新鲜度徽章仍按本地时钟走表（1s 自走），不冻结。"""
+    import time as _time
+    out = _run_harness(tmp_path, {
+        "snapshotResponses": [{"json": {}, "headers": {"X-IFF-Device-Sample-Age": "10"}}],
+        "steps": [
+            {"fetchSnapshot": True},
+            {"seedStore": {"tab_active": "tab-overview",
+                           "device_sample": {"age": 10, "at": _time.time() - 40}}},
+            {"tick": 1000},
+        ],
+    })
+    assert out["intervalCount"] >= 1, "须有本地走表 interval"
+    assert "已过期" in out["teleFresh"], out["teleFresh"]
+
+
+def test_rail_unified_total_is_physical_not_budget(tmp_path):
+    """F5：统一内存遥测带总量 = 物理内存（device 快照），非推理预算。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": _apple_dev(), "sync_meta": {"changed": True}}}],
+    })
+    r = out["rail"]
+    assert "32.0" in r["memUnit"], r
+    assert "24.0" not in r["memUnit"], "推理预算不得冒充遥测带总量"
+    assert r["memLabel"] == "统一内存", r
+
+
+def test_rail_hides_unsupported_segments_with_device(tmp_path):
+    """F5：device 信封在场时，未声明能力的遥测带段不占位。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": _apple_dev(), "sync_meta": {"changed": True}}}],
+    })
+    r = out["rail"]
+    for k in ("segUtil", "segPwr", "segTemp", "segClock"):
+        assert r[k] == "none", (k, r)
+
+
+def test_rail_shows_supported_segments_with_device(tmp_path):
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": _nvidia_dev(), "sync_meta": {"changed": True}}}],
+    })
+    r = out["rail"]
+    for k in ("segUtil", "segPwr", "segTemp", "segClock"):
+        assert r[k] == "", (k, r)
+
+
+def test_rail_legacy_response_keeps_segments(tmp_path):
+    """F5（兼容）：无 device 信封的旧响应不做能力隐藏（保持既有行为）。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"gpu": {"used": 100, "total": 200, "pct": 50},
+                                 "sync_meta": {"changed": True}}}],
+    })
+    r = out["rail"]
+    for k in ("segUtil", "segPwr", "segTemp", "segClock"):
+        assert r[k] != "none", (k, r)
+
+
+def test_rail_total_visible_without_used(tmp_path):
+    """F5：used 采集失败但总量可信 → 「— / 32.0」而非只画 —。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"device": _apple_dev(memory_used_mb=None),
+                                 "sync_meta": {"changed": True}}}],
+    })
+    r = out["rail"]
+    assert "32.0" in r["memUnit"] and r["vram"].strip() == "—", r
+
+
+def test_idle_shortcuts_use_to_key_and_gate(tmp_path):
+    """F1：真实 history 行是 {from,to,...}（db.py:296）而非 {model,...}；
+    状态缺失/失败行不得混入；目录中已不存在的模型不出现。"""
+    history = [
+        {"timestamp": 4, "from": "idle", "to": "alpha", "duration": 1.0, "status": "ok"},
+        {"timestamp": 3, "from": "idle", "to": "beta", "duration": 1.0, "status": ""},
+        {"timestamp": 2, "from": "idle", "to": "gone-model", "duration": 1.0, "status": "ok"},
+        {"timestamp": 1, "from": "idle", "to": "gamma", "duration": 1.0, "status": "error"},
+    ]
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"active_services": [], "history": history,
+                                 "models": [{"name": "alpha"}, {"name": "beta"}, {"name": "gamma"}]},
+                   "renderOverview": True}],
+    })
+    html = out["shortcuts"] or ""
+    assert "alpha" in html, html
+    assert "gone-model" not in html, "目录中不存在的模型不得出现"
+    assert "gamma" not in html, "error 状态行不得混入"
+    assert "beta" not in html, "状态缺失行不得当作成功"
+
+
+def test_idle_shortcut_click_navigates_to_inference(tmp_path):
+    """F1：快捷项按钮必须可点（委托 → 推理页），不是死按钮。"""
+    history = [{"timestamp": 1, "from": "idle", "to": "alpha", "duration": 1.0, "status": "ok"}]
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"active_services": [], "history": history,
+                                 "models": [{"name": "alpha"}]},
+                   "renderOverview": True},
+                  {"click": {"card": "ovSituation",
+                             "attrs": {"data-action": "goto-inference", "data-model": "alpha"}}}],
+    })
+    assert out["tabActive"] == "tab-inference", out["tabActive"]
+
+
+def test_warning_count_uses_full_ring_limit(tmp_path):
+    """F6：已保留警告请求 limit=500（环形缓冲全量），非 100 截断值。"""
+    out = _run_harness(tmp_path, {
+        "anomaliesWarnJson": {"events": [], "count": 137},
+        "steps": [{"renderOverview": True}],
+    })
+    assert out["warnUrls"] and "limit=500" in out["warnUrls"][0], out["warnUrls"]
+    assert "137" in (out["warnCount"] or ""), out["warnCount"]
+
+
+def test_recent_five_exact_rows_and_escape(tmp_path):
+    """F9：status 原文进徽章前必须转义（XSS 面）；行数恰为 5。"""
+    rows = [{"timestamp": 1764300000.0 + i, "model": f"m{i}", "status": 200,
+             "tokens_in": 1, "tokens_out": 1, "route": "local"} for i in range(6)]
+    rows[0]["status"] = "<b>x</b>"
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"request_log": rows}, "renderOverview": True}],
+    })
+    html = out["recent5"] or ""
+    assert html.count("ov-req-row") == 5, f"恰 5 行（got {html.count('ov-req-row')}）"
+    assert "&lt;b&gt;" in html and "<b>x</b>" not in html, html[:200]
+
+
+def test_recent_empty_notes_one_hour_cutoff(tmp_path):
+    """F13：空列表须注明快照请求日志只看最近 1 小时。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"request_log": []}, "renderOverview": True}],
+    })
+    assert "1 小时" in (out["recent5"] or ""), out["recent5"]
+
+
+def test_unparseable_200_not_success(tmp_path):
+    """F8：200 但响应体不可解析 → 不得报成功（结果不可确认 ≠ 成功）。"""
+    out = _run_harness(tmp_path, {
+        "postResponses": {"reconcile": {"text": "<html>gateway oops</html>"}},
+        "steps": [{"ops": "reconcile"}],
+    })
+    assert out["toastClass"].find("error") >= 0, out["toastText"]
+    assert "无法确认" in out["toastText"], out["toastText"]
+    assert "已重新校准" not in out["toastText"]
+
+
+def test_release_without_status_not_success(tmp_path):
+    """F8：release 200 缺 status → 白名单不通过（无 `j && j.status` 逃逸）。"""
+    out = _run_harness(tmp_path, {
+        "postResponses": {"switch": {"json": {"message": "done"}}},
+        "steps": [{"ops": "release"}],
+    })
+    assert out["toastClass"].find("error") >= 0, out["toastText"]
+    assert "GPU 已释放" not in out["toastText"]
+
+
+def test_release_unparseable_not_success(tmp_path):
+    out = _run_harness(tmp_path, {
+        "postResponses": {"switch": {"text": "oops"}},
+        "steps": [{"ops": "release"}],
+    })
+    assert out["toastClass"].find("error") >= 0, out["toastText"]
+    assert "GPU 已释放" not in out["toastText"]
+
+
+def test_sleep_unparseable_not_success(tmp_path):
+    out = _run_harness(tmp_path, {
+        "postResponses": {"sleep": {"text": "oops"}},
+        "steps": [{"modelAction": ["m1", "sleep"]}],
+    })
+    assert out["toastClass"].find("error") >= 0, out["toastText"]
+    assert "休眠中" not in out["toastText"]
+
+
+def test_release_confirm_mentions_shared_mode(tmp_path):
+    """F8：释放确认文案须如实覆盖共享模式（会停多个在役模型）。"""
+    src = OVERVIEW_JS.read_text(encoding="utf-8")
+    assert "共享模式" in src, "释放确认文案须覆盖共享模式（_stop_all_active 语义）"
+
+
+def test_error_toast_message_bounded(tmp_path):
+    """F11：错误 toast 截断上游诊断原文（长度上限、去换行）。"""
+    out = _run_harness(tmp_path, {
+        "postResponses": {"reconcile": {"json": {"status": "error",
+                                                  "message": "x" * 300 + "\nline2"}}},
+        "steps": [{"ops": "reconcile"}],
+    })
+    t = out["toastText"]
+    assert "\n" not in t, t
+    assert len(t) <= 140, len(t)
+
+
+def test_today_sum_coerces_numeric_strings(tmp_path):
+    """F12：requests 字符串数字不得字符串拼接（"3"+4 ≠ "34"）。"""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    stats = {"local": {today: {"m1": {"requests": "3"}, "m2": {"requests": 4}}}, "cloud": {}}
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"token_stats": stats}, "renderOverview": True}],
+    })
+    assert "7" in (out["reqToday"] or ""), out["reqToday"]
+    assert "34" not in (out["reqToday"] or "")
+
+
+def test_spark_caption_not_today_when_last_bucket_stale(tmp_path):
+    """F12：spark 尾点非 UTC 今日 → caption 不得写「今日」（写尾点日期）。"""
+    out = _run_harness(tmp_path, {
+        "steps": [{"seedStore": {"token_stats": _token_stats(None, "2020-01-01")},
+                   "renderOverview": True}],
+    })
+    assert "今日" not in (out["spark"] or ""), out["spark"]
+    assert "2020-01-01" in (out["spark"] or ""), "尾点日期应可见"

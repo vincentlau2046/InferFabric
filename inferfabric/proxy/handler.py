@@ -1864,6 +1864,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         exp = exp_cache.get_or_refresh(lambda: _compute_expensive(pm))
         # copy: the cached dict must not be mutated by the refill below
         status = dict(exp.get("status") or {})
+        # F7: 在途切换指示的实时性 —— status 出自 15s 昂贵缓存，switch_target
+        # 须每轮以 state 即时值覆盖（切换开始/结束最迟下一轮轮询可见）。
+        try:
+            status["switch_target"] = pm.mgr.state.get("switching_target") or None
+        except Exception:
+            pass
         metrics_24h = exp.get("metrics_24h") or {}
 
         # DeviceTelemetry T5: ONE cached reading (15s TTL, one probe per
@@ -1935,7 +1941,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # C 期契约 §C2：200/304 均带采样年龄头（同一份 15s 缓存采样）；
         # 无可信时间戳 → 头省略，前端标「新鲜度未确认」。
-        sample_age = _device_sample_age(dev_snap, now)
+        # F3: 年龄按发送时刻计算（handler 起点的 now 早于组装完成，
+        # 组装耗时不得低估年龄）。
+        sample_age = _device_sample_age(dev_snap, time.time())
 
         inm = self.headers.get("If-None-Match", "")
         if inm:

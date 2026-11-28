@@ -868,6 +868,60 @@ DeviceSnapshotEnvelope:
       $ref: '#/DeviceSnapshot'
     capabilities:
       $ref: '#/DeviceCapabilities'
+  examples:
+    - summary: Apple Silicon — unified memory + pressure, no NVIDIA metrics
+      value:
+        snapshot:
+          platform: darwin
+          accelerator: apple_silicon
+          memory_kind: unified
+          memory_used_mb: 12345
+          memory_total_mb: 32768
+          memory_budget_mb: 24576
+          utilization_pct: null
+          power_w: null
+          temperature_c: null
+          clock_mhz: null
+          pressure_level: 1
+          timestamp: 1764300000.0
+          sources:
+            memory_used_mb: vm_stat
+            memory_total_mb: sysctl
+            pressure_level: sysctl
+        capabilities:
+          memory: true
+          utilization: false
+          power: false
+          temperature: false
+          clock: false
+          pressure: true
+          reset: false
+    - summary: Linux + NVIDIA — five GPU metrics, aggregated
+      value:
+        snapshot:
+          platform: linux
+          accelerator: nvidia
+          memory_kind: vram
+          memory_used_mb: 8192
+          memory_total_mb: 32768
+          memory_budget_mb: 28672
+          utilization_pct: 12.0
+          power_w: 96.0
+          temperature_c: 48.5
+          clock_mhz: 2595
+          pressure_level: null
+          timestamp: 1764300000.0
+          sources:
+            memory_used_mb: nvidia-smi
+            utilization_pct: nvidia-smi
+        capabilities:
+          memory: true
+          utilization: true
+          power: true
+          temperature: true
+          clock: true
+          pressure: false
+          reset: true
 
 DeviceCapabilities:
   type: object

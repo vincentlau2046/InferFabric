@@ -387,6 +387,12 @@
   });
 
   /* ── 模型操作：switch / stop / sleep / wake ── */
+  // F11: 上游诊断原文截断后进 toast（去换行、限长），不整段透出
+  function trimMsg(m) {
+    var s = String(m == null ? '' : m).replace(/\s+/g, ' ').trim();
+    return s.length > 120 ? s.slice(0, 117) + '…' : s;
+  }
+
   window.doModelAction = async function (name, action) {
     if (!name) { UI.toast('缺少模型名', 'error'); return; }
 
@@ -467,16 +473,20 @@
           if (status === 'already_active') message = name + ' 已在运行';
         } else {
           // C 期契约 §C3：stop/sleep/wake 200 中的 status:error 不能报成功
+          // F8: 200 但响应体不可解析 = 结果无法确认 → 不报成功
           var body = null;
           try { body = await res.json(); } catch (_) {}
-          if (body && body.status === 'error') {
+          if (body == null) {
+            throw new Error('操作结果无法确认，请刷新状态核对');
+          }
+          if (body.status === 'error') {
             throw new Error(body.message || body.error || '操作未成功，请刷新状态确认');
           }
         }
         UI.toast(message, 'ok');
         store.forceRefresh();
       } catch (e) {
-        UI.toast('操作失败: ' + (e && e.message ? e.message : e), 'error');
+        UI.toast('操作失败: ' + trimMsg(e && e.message ? e.message : e), 'error');
       }
     };
 

@@ -450,3 +450,113 @@ class TestHandleSnapshot304:
         assert _last_status(h2) == 200
         assert len(pm._status_calls) == 2, "expired exp cache must re-run mgr.status()"
         assert len(pm._metrics_calls) == 2, "expired exp cache must re-run metrics.get_metrics()"
+
+
+# ═══════════════════════════════════════════════════════════════
+# 终审修复轮（No-with-fixes：F3 服务端 / F7 / F10）
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestSampleAgeSendTime:
+    """F3：采样年龄头须按发送时刻计算 —— 快照组装（DB 读/哈希）耗时
+    不得低估年龄（handler 起点的 now 比真实发送早）。"""
+
+    def test_age_computed_at_send_time_not_handler_start(self, monkeypatch):
+        t0 = 1_000_000.0
+        calls = {"n": 0}
+
+        def fake_time():
+            calls["n"] += 1
+            return t0 if calls["n"] == 1 else t0 + 30.0
+
+        monkeypatch.setattr(handler_module.time, "time", fake_time)
+        tel = _FakeDeviceTel(ts=t0 - 10.0)
+        pm = _make_pm_with_device(tel)
+        h = _make_handler()
+        h._handle_snapshot(pm)
+        age = _hdr(h, "X-IFF-Device-Sample-Age")
+        assert age is not None
+        # 采集期间时钟走了 30s：发送时刻计算 → (t0+30)-(t0-10)=40；
+        # 旧实现用 handler 起点的 now → 只报 10（低估）。
+        assert int(age) >= 20, f"须按发送时刻计算年龄, got {age}"
+
+
+class TestSwitchTargetFreshness:
+    """F7：在途切换指示不得吃 15s 昂贵缓存的旧值 —— 每轮轮询以
+    state.switching_target 即时值覆盖（开始/结束最迟下一轮可见）。"""
+
+    def _pm_with_state(self):
+        state = {"switching_target": ""}
+        pm = _make_pm()
+        pm.mgr.state = SimpleNamespace(
+            get_history=lambda n: [],
+            get=lambda k, d=None: state.get(k, d),
+        )
+        return pm, state
+
+    def test_switch_start_visible_within_ttl(self):
+        pm, state = self._pm_with_state()
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+
+        state["switching_target"] = "gamma"   # 切换开始（exp TTL 窗口内）
+        h2 = _make_handler()
+        h2._handle_snapshot(pm)
+        assert _last_status(h2) == 200
+        snap2 = json.loads(h2._bodies[-1].decode("utf-8"))
+        assert snap2["status"].get("switch_target") == "gamma", \
+            "切换开始须下一轮即见（15s 缓存不得吞掉）"
+
+    def test_switch_end_clears_and_busts_etag(self):
+        pm, state = self._pm_with_state()
+        h1 = _make_handler()
+        h1._handle_snapshot(pm)
+        state["switching_target"] = "gamma"
+        h2 = _make_handler()
+        h2._handle_snapshot(pm)
+        snap2 = json.loads(h2._bodies[-1].decode("utf-8"))
+
+        state["switching_target"] = ""        # 切换结束（TTL 窗口内）
+        h3 = _make_handler(headers={"If-None-Match": snap2["etag"]})
+        h3._handle_snapshot(pm)
+        assert _last_status(h3) == 200, "指示清除改变了内容 → 不得 304"
+        snap3 = json.loads(h3._bodies[-1].decode("utf-8"))
+        assert not snap3["status"].get("switch_target")
+
+
+class TestOpenapiDeviceExamples:
+    """F10：device 示例必须是合法片段 —— 挂在 DeviceSnapshotEnvelope
+    （required=[snapshot, capabilities]）下，不以缺必填字段的形态挂在
+    SnapshotResponse（required 含 ts/rev/etag/status/system/models）下。"""
+
+    def _load(self):
+        import yaml
+        spec_dir = _ROOT / "api-spec"
+        openapi = yaml.safe_load((spec_dir / "openapi.yaml").read_text(encoding="utf-8"))
+        schemas = yaml.safe_load(
+            (spec_dir / "components" / "schemas.yaml").read_text(encoding="utf-8"))
+        return openapi, schemas
+
+    def test_examples_live_on_envelope_not_response(self):
+        openapi, schemas = self._load()
+        resp200 = openapi["paths"]["/api/snapshot"]["get"]["responses"]["200"]
+        ex = resp200["content"]["application/json"].get("examples")
+        assert not ex, "SnapshotResponse 下的 device-only 示例违反其必填集"
+
+        env = schemas["DeviceSnapshotEnvelope"]
+        examples = env.get("examples") or []
+        assert len(examples) == 2, "apple/nvidia 两个信封级示例"
+        req_env = set(env["required"])
+        snap_req = set(schemas["DeviceSnapshot"]["required"])
+        for e in examples:
+            val = e["value"]
+            assert req_env <= set(val.keys()), f"信封示例缺必填: {req_env - set(val.keys())}"
+            assert snap_req <= set(val["snapshot"].keys()), "快照示例缺必填"
+
+    def test_apple_pressure_source_is_sysctl(self):
+        openapi, schemas = self._load()
+        env = schemas["DeviceSnapshotEnvelope"]
+        apple = [e for e in env["examples"] if e["value"]["snapshot"]["accelerator"] == "apple_silicon"]
+        assert apple, "Apple 示例在场"
+        src = apple[0]["value"]["snapshot"]["sources"].get("pressure_level")
+        assert src == "sysctl", f"Apple 压力源是 sysctl（kern.memorystatus_vm_pressure_level），got {src}"
