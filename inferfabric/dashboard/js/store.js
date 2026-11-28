@@ -18,8 +18,8 @@
  * 组合关系唯一在此；router 只负责地址与视图/子页切换。 */
 var VIEW_GROUPS = {
   'status':            ['tab-overview'],
-  'requests':          ['tab-monitor.log'],        // 子页默认 = 请求日志
-  'requests/switches': ['tab-monitor.log'],
+  'requests':          ['tab-monitor.log'],        // 主子页 = 请求工作台（B2：requests.js）
+  'requests/switches': ['tab-monitor.hist'],       // 切换历史（monitor.js renderHistTable）
   'requests/anomalies':['tab-anomaly'],
   'usage':             ['tab-monitor.usage'],      // Token/Agent/延迟/功耗图（monitor.js 渲染）
   'routing':           ['tab-model-pools'],

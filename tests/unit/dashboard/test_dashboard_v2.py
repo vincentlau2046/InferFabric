@@ -61,11 +61,11 @@ def test_icon_symbols_present():
 
 
 def test_js_modules_list():
-    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store）。"""
+    """__init__.py 必须用显式 JS_MODULES 列表（A1：router 紧随 store；B2：requests 紧随 monitor）。"""
     import inferfabric.dashboard as dash
     assert getattr(dash, "JS_MODULES", None) == [
         "ui", "store", "router", "charts", "overview", "inference",
-        "monitor", "deploy", "cloud", "model-pools", "anomaly",
+        "monitor", "requests", "deploy", "cloud", "model-pools", "anomaly",
         "packs", "security", "settings", "connect", "wizard",
     ]
 
@@ -422,7 +422,7 @@ def test_monitor_structure():
         'id="monTtftChart"',    # 延迟小倍数 · TTFT P50/P95（v6.0 双卡）
         'id="monTpotChart"',    # 延迟小倍数 · TPOT P50/P95（v6.0 双卡）
         'id="monKpis"',         # 五联 KPI
-        'id="monLogTable"',     # 请求日志表
+        'id="reqTable"',        # 请求工作台表（B2：requests.js 接管，原 monLogTable 移除）
         'id="monHistTable"',    # 切换历史表
     ):
         assert panel_id in html, "missing monitor panel id: %s" % panel_id

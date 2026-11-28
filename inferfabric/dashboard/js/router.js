@@ -82,10 +82,28 @@
     return { view: view, sub: sub, params: params };
   }
 
+  /* B2：params 规范形 —— 丢弃 null/undefined 值（空串保留为 k=，合法空值书签）。
+   * toHash 与 route_params 发布共用，保证 URL ⇄ store 单源一致。 */
+  function canonicalParams(params) {
+    var out = {};
+    if (!params) return out;
+    Object.keys(params).forEach(function (k) {
+      if (!k) return;
+      var v = params[k];
+      if (v === null || v === undefined) return;
+      out[k] = String(v);
+    });
+    return out;
+  }
+
+  function paramsKey(cp) {
+    return Object.keys(cp).sort().map(function (k) { return k + '=' + cp[k]; }).join('&');
+  }
+
   function toHash(view, sub, params) {
     var h = '#/' + view + (sub ? '/' + sub : '');
     if (params) {
-      var pairs = Object.keys(params).filter(Boolean).map(function (k) {
+      var pairs = Object.keys(canonicalParams(params)).map(function (k) {
         return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
       });
       if (pairs.length) h += '?' + pairs.join('&');
@@ -157,11 +175,27 @@
 
   var _lastAppliedKey = null;
 
-  function applyRoute(route) {
+  /* B2：route_params 发布 —— 同值不重复发布（store.set 对象恒等不判内容）；
+   * 空⇄空安静。boot 不发布：深链初始参数由消费方装载时自 location.hash 解析，
+   * 避免订阅回放把 boot 参数伪装成一次「变更」（见 ledger Ruling）。 */
+  function publishParams(cp) {
+    if (!window.store || typeof window.store.set !== 'function') return;
+    var prev = (typeof window.store.get === 'function') ? window.store.get('route_params') : undefined;
+    if (prev !== undefined && prev !== null && typeof prev === 'object' &&
+        paramsKey(prev) === paramsKey(cp)) return;
+    var prevEmpty = (prev == null || typeof prev !== 'object') ||
+                    Object.keys(prev).length === 0;
+    if (Object.keys(cp).length === 0 && prevEmpty) return;
+    window.store.set('route_params', cp);
+  }
+
+  function applyRoute(route, opts) {
     if (!route) return false;
     // 幂等去重：navigate 显式应用后，浏览器随后派发的 hashchange（同 key）
     // 不再重复触发 renderer；真实多次应用只发生在 route 真正变化时。
-    var key = route.view + '/' + (route.sub || '');
+    // B2：key 纳入规范参数 —— 同页改过滤参数必须重渲染（A 期 pinned RED）。
+    var cp = canonicalParams(route.params);
+    var key = route.view + '/' + (route.sub || '') + '?' + paramsKey(cp);
     if (key === _lastAppliedKey) return true;
     var tab = tabForRoute(route.view, route.sub);
     persistRoute(route);
@@ -170,6 +204,8 @@
       if (window.store && typeof window.store.setActiveView === 'function') {
         window.store.setActiveView(route.view, route.sub);      // 视图组合先于 DOM 应用
       }
+      // B2：参数先于 applyTab 落 store —— applyTab 触发的 renderer 读到本次参数
+      if (!(opts && opts.boot)) publishParams(cp);
       if (tab && window.store && typeof window.store.applyTab === 'function') {
         window.store.applyTab(tab);
         applied = true;
@@ -218,6 +254,12 @@
       // 非法子页不得进入地址与持久化（cross-review Important 2）
       if (sub !== null && sub !== undefined &&
           (SUBS[view] || []).indexOf(sub) < 0) sub = null;
+      // B2：params 缺省 = 沿用当前过滤参数（子页入口与筛选联动，参数不因
+      // 切子页丢失）；跨视图入口不携带（视图各自持有过滤语义）。
+      if (params === undefined) {
+        var cur = parseHash(location.hash);
+        params = (cur && cur.view === view && cur.params) ? cur.params : {};
+      }
       var target = toHash(view, sub, params);
       if (location.hash !== target) location.hash = target;
       applyRoute({ view: view, sub: sub || null, params: params || {} });
@@ -237,7 +279,8 @@
     reconcile: function () {
       if (isLocked()) return false;
       var r = resolve(location.hash);
-      var key = r.view + '/' + (r.sub || '');
+      var cp = canonicalParams(r.params);
+      var key = r.view + '/' + (r.sub || '') + '?' + paramsKey(cp);
       if (key === _lastAppliedKey) return true;
       canonicalize(r);
       return applyRoute(r);
@@ -251,12 +294,12 @@
       if (location.hash) {
         var r = resolve(location.hash);
         canonicalize(r);
-        return applyRoute(r);
+        return applyRoute(r, { boot: true });
       }
       var stored = readStoredRoute();
       var route = stored || { view: 'status', sub: null, params: {} };
       try { location.replace(toHash(route.view, route.sub, {})); } catch (e) { /* 忽略 */ }
-      return applyRoute(route);
+      return applyRoute(route, { boot: true });
     },
   };
 
