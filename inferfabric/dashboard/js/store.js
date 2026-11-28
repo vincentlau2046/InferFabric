@@ -49,6 +49,32 @@ class StateStore {
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
   }
 
+  /* ── C 期：设备采样年龄（契约 §C2：三时钟分开）──
+   * X-IFF-Device-Sample-Age 由服务端在发送时对「同一份 15s 缓存采样」计算
+   * （200/304 均带）；前端按接收时刻累加本地流逝，不由轮询频率反推。
+   * 无头 = 新鲜度未确认（可显示最近收到的旧数据，但不假定 304 即新采样）。 */
+  _readSampleAge(res) {
+    try {
+      const h = res && res.headers && typeof res.headers.get === 'function'
+        ? res.headers.get('X-IFF-Device-Sample-Age') : null;
+      if (h == null) return null;
+      const n = Number(h);
+      return (isFinite(n) && n >= 0) ? Math.floor(n) : null;
+    } catch (_) { return null; }
+  }
+
+  _setSampleAge(age) {
+    this.set('device_sample', age == null
+      ? { age: null, at: null }
+      : { age: age, at: Date.now() / 1000 });
+  }
+
+  deviceSampleAge() {
+    const s = this.get('device_sample');
+    if (!s || s.age == null || s.at == null) return null;
+    return Math.max(0, s.age + Math.max(0, Date.now() / 1000 - s.at));
+  }
+
   /* ── Core pub/sub ── */
   get(key) { return key ? this._state[key] : this._state; }
 
@@ -105,6 +131,9 @@ class StateStore {
         // lastOk = 最近一次成功响应（304 也算"在线"）；ts 仍是最近一次 200 数据时间。
         // 两者分离：稳态下连续 304 不再触发"已断线"（C1 附带：store.js:353 误报）。
         this.set('api_error', null);
+        // C: 304 带年龄头 → 服务端真值重锚（同一份采样在变老）；无头 → 保持现状
+        const age304 = this._readSampleAge(res);
+        if (age304 != null) this._setSampleAge(age304);
         this.set('sync_meta', {
           etag: this._etag,
           rev: (this._etag || '').slice(1, 9) || '',
@@ -117,6 +146,8 @@ class StateStore {
       }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const snap = await res.json();
+      // C: 200 重新锚定采样年龄；无头 → 未确认（覆盖旧值）
+      this._setSampleAge(this._readSampleAge(res));
 
       // Out-of-order guard: drop stale responses (ts regressed).
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;

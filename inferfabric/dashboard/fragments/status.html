@@ -32,6 +32,37 @@
 
     </div>
 
+    <!-- C2：设备遥测（能力门控）+ 态势（UTC 当天/已保留警告/最近五条） -->
+    <div class="if-grid">
+
+      <!-- 设备遥测：按 device.snapshot/capabilities 消费，不按 OS 名写死版式 -->
+      <div class="col-4">
+        <div class="if-card" id="ovTelemetry">
+          <div class="if-card-hdr">
+            <span class="if-card-title">设备遥测</span>
+            <span class="if-card-sub" id="ovTeleFresh"></span>
+          </div>
+          <div class="if-card-body" id="ovTeleBody">
+            <div class="spark-empty muted">加载中…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 态势：今日请求（UTC 当天）、已保留警告、最近五条（只统计所显示条数） -->
+      <div class="col-8">
+        <div class="if-card" id="ovSituation">
+          <div class="if-card-hdr">
+            <span class="if-card-title">态势</span>
+            <a class="if-card-link" href="#/requests">查看全部请求</a>
+          </div>
+          <div class="if-card-body" id="ovSitBody">
+            <div class="spark-empty muted">加载中…</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
     <!-- 最近异常 top3 + 系统操作（维护区，C2 收进 ▾ 菜单） -->
     <div class="if-grid">
 

@@ -465,6 +465,13 @@
             throw new Error('切换未完成：当前模型为 ' + result.model);
           }
           if (status === 'already_active') message = name + ' 已在运行';
+        } else {
+          // C 期契约 §C3：stop/sleep/wake 200 中的 status:error 不能报成功
+          var body = null;
+          try { body = await res.json(); } catch (_) {}
+          if (body && body.status === 'error') {
+            throw new Error(body.message || body.error || '操作未成功，请刷新状态确认');
+          }
         }
         UI.toast(message, 'ok');
         store.forceRefresh();
