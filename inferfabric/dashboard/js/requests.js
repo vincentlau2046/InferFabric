@@ -39,6 +39,7 @@
   var _error = null;
   var _seq = 0;               // 取数序号：迟响应丢弃
   var _inflightKey = null;
+  var _inflightToken = null;   // 在途请求所有权标记（丢弃路径只清自己的账）
   var _loadedKey = null;
   var _live = true;
   var _timer = null;
@@ -123,23 +124,40 @@
     if (!isActive()) return;
     var isLive = !!(opts && opts.live);
     var key = currentKey();
-    // 修复轮：任何取数入口都使在途响应失效 —— 即使同键去重命中（如浏览器
+    // 同键在途请求即当前数据的请求 —— 去重时保留其有效性。若此处失效它，
+    // 「离页→回页」的 dedup 入口将既不重发也不保留在途响应，工作台永久
+    // 卡 skeleton 且 Live 因 _inflightKey 未清而死（7.12.17 修订回归）。
+    if (!force && key === _inflightKey) return;       // 同键在途：去重（保留）
+    // 其余取数入口使非本请求的迟到响应失效 —— 即使同键已有数据命中（如浏览器
     // 后退到已加载数据），迟到的旧筛选响应也不得覆盖当前数据。
     _seq++;
     if (!force) {
-      if (key === _inflightKey) return;             // 同键在途：去重
-      if (key === _loadedKey && _state) return;     // 同键已有数据
+      if (key === _loadedKey && _state) {
+        // 命中已加载数据且此处不重发：刚失效的在途请求已无后续所有者，
+        // 清标记 —— 否则 tick() 因 _inflightKey 恒真而永久停轮询。
+        _inflightToken = null;
+        _inflightKey = null;
+        return;
+      }
     }
     // Live 轮询不带 until（滚动窗）；翻页沿用已锚定的 until
     var url = buildQuery(_params, _page, isLive ? null : _until);
     var seq = _seq;
+    var token = {};                   // 所有权标记：只清自己那次请求的账
     _inflightKey = key;
+    _inflightToken = token;
     fetch(url).then(function (res) {
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return res.json();
     }).then(function (data) {
       // 修复轮：簿记移到守卫之后 —— 迟到响应不得改写 in/loaded 键
-      if (seq !== _seq || !isActive()) return;
+      if (seq !== _seq || !isActive()) {
+        // 本响应被丢弃（离页落地/被更新请求取代）：若自己仍是登记的所有者
+        // （无更晚请求接手），清标记 —— 回页/恢复时才能重新取数。
+        if (_inflightToken === token) { _inflightToken = null; _inflightKey = null; }
+        return;
+      }
+      _inflightToken = null;
       _inflightKey = null;
       _loadedKey = key;
       _state = {
@@ -154,7 +172,11 @@
       if (_page === 1 && data && data.until != null) _until = data.until;
       renderData();
     }).catch(function (e) {
-      if (seq !== _seq || !isActive()) return;
+      if (seq !== _seq || !isActive()) {
+        if (_inflightToken === token) { _inflightToken = null; _inflightKey = null; }
+        return;
+      }
+      _inflightToken = null;
       _inflightKey = null;
       _error = e;
       renderData();

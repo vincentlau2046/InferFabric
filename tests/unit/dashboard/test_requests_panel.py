@@ -613,3 +613,75 @@ def test_late_response_discarded_after_leaving(tmp_path):
     })
     assert out["pendingCount"] == 0                  # 在途请求已消费但…
     assert "iff-1" not in out["tableHTML"]           # …迟到响应不得写入已离开页
+
+
+def test_leave_and_return_while_inflight_response_still_renders(tmp_path):
+    """离页→回页与在途首载重叠：同键在途请求保留其有效性，响应落地后正常渲染。
+
+    7.12.17 回归：回页 dedup 入口把 ``_seq`` 前移使在途首载失效但既不重发也
+    不清理 ``_inflightKey``，工作台永久卡 skeleton（交叉复核已用 harness 复现）。
+    """
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [{"wait": True, "json": {"logs": [_log_row("k1", 2.0)],
+                                              "count": 1, "total": 1,
+                                              "failed_total": 0, "until": 2.0}}],
+        "steps": [
+            {"hashChange": "#/status"},            # 离页（首载仍在途）
+            {"hashChange": "#/requests"},          # 回页：同键 dedup 入口
+            {"flush": 0},                          # 在途首载响应落地
+        ],
+    })
+    assert out["pendingCount"] == 0
+    assert "k1" in out["tableHTML"]                # 保留的在途响应正常渲染
+    assert len(out["requests"]) == 1               # 保留而非重发（无重复取数）
+
+
+def test_leave_and_return_while_inflight_live_resumes(tmp_path):
+    """同场景下 Live 轮询恢复：``_inflightKey`` 必须被清，tick 不得被永久堵死。"""
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [
+            {"wait": True, "json": {"logs": [_log_row("k1", 2.0)], "count": 1,
+                                    "total": 1, "failed_total": 0, "until": 2.0}},
+            {"json": {"logs": [_log_row("tick-1", 5.0)], "count": 1,
+                      "total": 1, "failed_total": 0, "until": 5.0}},
+        ],
+        "steps": [
+            {"hashChange": "#/status"},
+            {"hashChange": "#/requests"},
+            {"flush": 0},
+            {"advanceTimers": 1},                  # Live tick → 必须恢复轮询
+        ],
+    })
+    assert out["pendingCount"] == 0
+    assert len(out["requests"]) == 2               # 首载 + 1 次 Live tick
+    assert "tick-1" in out["tableHTML"]            # tick 数据已渲染
+
+
+def test_leave_settle_away_return_reissues_and_renders(tmp_path):
+    """离页期间首载落地（被 ``!isActive`` 丢弃）→ 回页必须重发并渲染。
+
+    丢弃路径此前不清自己登记的 ``_inflightKey``：回页 dedup 命中残留标记 →
+    既不重发也不渲染、tick 永堵（7.12.16 起既有的楔死兄弟时序，交叉复核复现）。
+    """
+    out = _run_harness(tmp_path, {
+        "hash": "#/requests",
+        "responses": [
+            {"wait": True, "json": {"logs": [_log_row("k1", 2.0)], "count": 1,
+                                    "total": 1, "failed_total": 0, "until": 2.0}},
+            {"json": {"logs": [_log_row("k1", 2.0)], "count": 1,
+                      "total": 1, "failed_total": 0, "until": 2.0}},   # 回页重发
+            {"json": {"logs": [_log_row("tick-1", 5.0)], "count": 1,
+                      "total": 1, "failed_total": 0, "until": 5.0}},   # Live tick
+        ],
+        "steps": [
+            {"hashChange": "#/status"},            # 离页
+            {"flush": 0},                          # 首载在离页期间落地 → 丢弃
+            {"hashChange": "#/requests"},          # 回页：必须重发
+            {"advanceTimers": 1},                  # Live tick 也须恢复
+        ],
+    })
+    assert out["pendingCount"] == 0
+    assert len(out["requests"]) == 3               # 首载 + 回页重发 + 1 tick
+    assert "tick-1" in out["tableHTML"]
