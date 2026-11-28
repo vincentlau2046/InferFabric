@@ -95,7 +95,8 @@
   }
 
   /* A2 修复轮：monitor 内容按六区分三个内容节（store VIEW_GROUPS 伪组）——
-   log = 请求日志+切换历史（请求页）；usage = 功耗/Token/Agent/延迟（用量页）；
+   log = 请求工作台（B2 起 requests.js 渲染，monitor 不再注册）；
+   hist = 切换历史（请求页 switches 子页）；usage = 功耗/Token/Agent/延迟（用量页）；
    kpis = 引擎指标（模型页）。隐藏节不渲染、不拉数（cross-review Important 4）。 */
   function groupActive(g) {
     if (store && typeof store.isGroupActive === 'function') {
@@ -103,7 +104,7 @@
     }
     return true;   // 无视图组合能力（旧桩/降级）：保持旧「全渲染」兜底
   }
-  function logActive() { return groupActive('tab-monitor.log'); }
+  function histActive() { return groupActive('tab-monitor.hist'); }
   function usageActive() { return groupActive('tab-monitor.usage'); }
   function kpisActive() { return groupActive('tab-monitor.kpis'); }
 
@@ -896,58 +897,8 @@
       .finally(function () { _engineInflight.delete(model); });
   }
 
-  /* ── 5. 请求日志表 ── */
-  function renderLogTable() {
-    var el = $('monLogTable');
-    if (!el) return;
-    var logs = store.get('request_log') || [];
-    if (!logs.length) {
-      el.innerHTML = '<div class="if-empty">暂无请求日志 — 经代理发起请求后在此记录</div>';
-      return;
-    }
-    var rows = '';
-    for (var i = 0; i < logs.length; i++) {
-      var l = logs[i] || {};
-      var ts = l.timestamp
-        ? new Date(l.timestamp * 1000).toLocaleTimeString('zh-CN',
-            { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-        : '—';
-      var stCls = (l.status || 0) < 400 ? 'ok' : 'crit';
-      var tokIn = UI.fmtNum(l.tokens_in) || '0';
-      var tokOut = UI.fmtNum(l.tokens_out) || '0';
-      // 缓存命中率（Cache Hit Rate）= tokens_in_cached / tokens_in；
-      // 双协议统一口径（OpenAI/Anthropic 均由 normalize_usage 归一化）
-      var cacheRate = '—';
-      if (l.tokens_in > 0) {
-        var _c = Math.min(l.tokens_in_cached || 0, l.tokens_in);
-        cacheRate = (_c / l.tokens_in * 100).toFixed(1) + '%';
-      }
-      var ttft = l.ttft_ms != null ? l.ttft_ms.toFixed(0) + 'ms' : '—';
-      var dur = l.duration_ms != null ? l.duration_ms.toFixed(0) + 'ms' : '—';
-      rows += '<tr>' +
-        '<td class="mono">' + escHtml(ts) + '</td>' +
-        '<td>' + escHtml(shortName(l.model)) + '</td>' +
-        '<td><span class="badge ' + stCls + '">' + escHtml(l.status) + '</span></td>' +
-        '<td class="mono num">' + escHtml(tokIn + ' / ' + tokOut) + '</td>' +
-        '<td class="mono num">' + escHtml(cacheRate) + '</td>' +
-        '<td class="mono num">' + escHtml(ttft) + '</td>' +
-        '<td class="mono num">' + escHtml(dur) + '</td>' +
-      '</tr>';
-    }
-    el.innerHTML =
-      '<div class="cp-table-wrap">' +
-      '<table class="if-table mon-tbl">' +
-        '<thead><tr><th>时间</th><th>模型</th><th>状态</th>' +
-        '<th class="num">Tokens in/out</th>' +
-        '<th class="num" title="Cache Hit Rate（缓存命中率）= tokens_in_cached / tokens_in；OpenAI 系取 prompt_tokens_details.cached_tokens，Anthropic 系取 cache_read_input_tokens，口径统一">缓存命中率</th>' +
-        '<th class="num">TTFT</th><th class="num">耗时</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-      '</table>' +
-      '</div>';
-    var tsEl = $('monLogTs');
-    if (tsEl) tsEl.textContent = new Date().toLocaleTimeString('zh-CN',
-      { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
+  /* ── 5. 请求日志表（B2 移除：请求工作台接管 → requests.js + /api/request_log
+   *       window 模式。快照内 request_log 字段保留但不再有消费方。） ── */
 
   /* ── 6. 切换历史表 ── */
   function renderHistTable() {
@@ -1289,12 +1240,12 @@
     // TTL 过期才 fetch → 落地 renderLatencyCards()；命中缓存则不 fetch 不重绘。
     // 交互回调（窗口/chip/分位切换）+ 切回 tab（renderLatencyCards 强制一次）仍即时渲染。
     renderKpis();
-    renderLogTable();
     renderHistTable();
   }
   window.tabRenderers['tab-monitor'] = renderMonitor;
-  /* A2 修复轮：按内容节注册（store.forceRefresh 迭代 activeGroups 的伪组键） */
-  window.tabRenderers['tab-monitor.log'] = function () { renderLogTable(); renderHistTable(); };
+  /* A2 修复轮：按内容节注册（store.forceRefresh 迭代 activeGroups 的伪组键）。
+   * B2：tab-monitor.log 归请求工作台（requests.js 注册）；monitor 只留 hist。 */
+  window.tabRenderers['tab-monitor.hist'] = renderHistTable;
   window.tabRenderers['tab-monitor.usage'] = function () { renderPowerCard(); renderTokenChart(); getAgentStats(); };
   window.tabRenderers['tab-monitor.kpis'] = renderKpis;
 
@@ -1302,14 +1253,14 @@
    * 功耗采样在服务端（PowerSampler 60s，页面关着历史也连续），前端零积累——
    * 不再有 GPU ring buffer 采样 push。 */
   store.on('sync_meta', function () {
-    if (logActive()) { renderLogTable(); renderHistTable(); }
+    if (histActive()) renderHistTable();
     if (usageActive()) { renderPowerCard(); renderTokenChart(); getAgentStats(); }
     if (kpisActive()) renderKpis();
   });
 
   store.on('tab_active', function () {
     // 进入视图/换子页：按可见内容节立即渲染（charts 可能需要 init）
-    if (logActive()) { renderLogTable(); renderHistTable(); }
+    if (histActive()) renderHistTable();
     if (usageActive()) {
       renderPowerCard();
       renderTokenChart();

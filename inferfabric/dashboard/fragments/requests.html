@@ -10,18 +10,58 @@
             onclick="window.ifRouter.navigate('requests','anomalies')">异常</button>
   </div>
 
-  <!-- 子页：请求日志（monitor.js renderLogTable 渲染；B2 重做为日志工作台） -->
+  <!-- 子页：请求工作台（B2：requests.js 渲染；数据源 /api/request_log window 模式） -->
   <section class="view-sub" data-sub="main">
     <div class="if-card">
       <div class="if-card-hdr">
         <span class="if-card-title">请求日志</span>
-        <span class="if-card-sub" id="monLogTs"></span>
+        <span class="req-filter-row">
+          <span class="req-seg" id="reqWindowSeg" role="group" aria-label="时间窗">
+            <button type="button" class="req-seg-btn" id="reqWin-1h" data-window="1h">1h</button>
+            <button type="button" class="req-seg-btn" id="reqWin-24h" data-window="24h">24h</button>
+            <button type="button" class="req-seg-btn" id="reqWin-7d" data-window="7d">7d</button>
+          </span>
+          <select id="reqStatus" aria-label="状态过滤">
+            <option value="">全部状态</option>
+            <option value="2xx">2xx</option>
+            <option value="4xx">4xx</option>
+            <option value="5xx">5xx</option>
+          </select>
+          <select id="reqModel" aria-label="模型过滤">
+            <option value="">全部模型</option>
+          </select>
+          <select id="reqAgent" aria-label="客户端过滤">
+            <option value="">全部客户端</option>
+          </select>
+          <input type="search" id="reqSearch" placeholder="搜索 req_id / 模型 / 客户端" maxlength="64" aria-label="搜索">
+          <span id="reqCountLine" class="if-card-sub"></span>
+          <span class="req-cols-wrap">
+            <button type="button" class="if-btn-ghost" id="reqColsBtn" aria-haspopup="true">列 ▾</button>
+            <span id="reqColsMenu" class="req-cols-menu" role="menu" hidden>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-time" data-col="time" checked> 时间</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-status" data-col="status" checked> 状态</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-model" data-col="model" checked> 模型</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-agent" data-col="agent" checked> 客户端</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-tokens" data-col="tokens" checked> Tokens</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-dur" data-col="dur" checked> 耗时</label>
+              <label class="req-col-item"><input type="checkbox" id="reqCol-cache" data-col="cache" checked> 缓存</label>
+            </span>
+          </span>
+          <button type="button" class="if-btn-ghost" id="reqLiveBtn" aria-pressed="true" title="Live：仅第一页自动刷新">Live</button>
+        </span>
       </div>
-      <div class="if-card-body" id="monLogTable">
-        <div class="skeleton">
-          <div class="skeleton-row"></div>
-          <div class="skeleton-row"></div>
-          <div class="skeleton-row"></div>
+      <div class="if-card-body">
+        <div id="reqTable">
+          <div class="skeleton">
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+          </div>
+        </div>
+        <div class="req-pager" id="reqPager">
+          <button type="button" class="if-btn-ghost" id="reqPrev">‹ 上一页</button>
+          <span id="reqPageInfo" class="if-card-sub"></span>
+          <button type="button" class="if-btn-ghost" id="reqNext">下一页 ›</button>
         </div>
       </div>
     </div>

@@ -421,6 +421,77 @@ class IFFDB:
                 out.append(d)
             return out
 
+    # 状态类 → 整数区间（B1 window 模式）；未知类 ValueError，handler 先行 400。
+    _STATUS_CLASS_RANGES = {"2xx": (200, 299), "4xx": (400, 499),
+                            "5xx": (500, 599)}
+
+    def query_request_log_window(self, since: float, until: float, *,
+                                 model: str | None = None,
+                                 agent: str | None = None,
+                                 status_class: str | None = None,
+                                 q: str | None = None,
+                                 limit: int = 50,
+                                 offset: int = 0) -> dict:
+        """window 模式只读查询（dashboard-ux-v3 B1 独立读方法）。
+
+        [since, until) 半开窗；过滤先于 LIMIT；页与 total/failed_total 在
+        **同一读事务**内取（单快照，WAL 下不阻塞写入）。同秒排序
+        (timestamp DESC, id DESC)，offset 翻页。q 对 req_id/model/agent
+        做字面子串匹配（instr，大小写敏感；LIKE 通配字符不具通配语义）。
+        既有 query_request_log 不变，继续服务 snapshot/monitor-report。
+        返回 {"logs": [行 dict], "total": int, "failed_total": int}。
+        """
+        if status_class is not None \
+                and status_class not in self._STATUS_CLASS_RANGES:
+            raise ValueError(f"unknown status_class: {status_class!r}")
+        conds = ["timestamp >= ?", "timestamp < ?"]
+        params: list[Any] = [since, until]
+        if model is not None:
+            conds.append("model = ?")
+            params.append(model)
+        if agent is not None:
+            conds.append("agent = ?")
+            params.append(agent)
+        if status_class is not None:
+            lo, hi = self._STATUS_CLASS_RANGES[status_class]
+            conds.append("status BETWEEN ? AND ?")
+            params.extend([lo, hi])
+        if q:
+            conds.append("(instr(req_id, ?) > 0 OR instr(model, ?) > 0 "
+                         "OR instr(agent, ?) > 0)")
+            params.extend([q, q, q])
+        where = " AND ".join(conds)
+        count_sql = (
+            "SELECT COUNT(*), SUM(CASE WHEN status BETWEEN 400 AND 599 "
+            f"THEN 1 ELSE 0 END) FROM request_log WHERE {where}")
+        page_sql = (f"SELECT * FROM request_log WHERE {where} "
+                    "ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?")
+        with self.connect(REQUEST_LOG_DB) as conn:
+            in_txn = conn.in_transaction
+            if not in_txn:
+                conn.execute("BEGIN")   # 单读事务：页与计数同一快照
+            try:
+                total, failed_total = conn.execute(count_sql, params).fetchone()
+                cur = conn.execute(page_sql, params + [limit, offset])
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            finally:
+                if not in_txn:
+                    conn.execute("COMMIT")
+        import json as _json
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            m = d.get("metadata")
+            if isinstance(m, str):
+                try:
+                    d["metadata"] = _json.loads(m) if m else {}
+                except Exception:
+                    pass
+            out.append(d)
+        return {"logs": out, "total": int(total or 0),
+                "failed_total": int(failed_total or 0)}
+
     def reclassify_request_log(self, classify_fn, known_ids: set | None = None) -> int:
         """对无真实 def 的行（unknown + observed 残留如 smoke-tmp）用 classify_fn
         重新分类。known_ids = registry 里所有真实 def 的 id 集合；不在集合内且

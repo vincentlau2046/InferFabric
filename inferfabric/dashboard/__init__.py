@@ -27,8 +27,10 @@ FRAGMENTS = ["status", "requests", "usage", "routing", "models", "config",
 # 后续任务逐步填充 charts/overview/inference/deploy/cloud；monitor/anomaly 已存在。
 # A1（2026-11-27）：router 紧随 store —— 路由/恢复/旧键迁移唯一实现在 router.js，
 # store.switchTab 仅为兼容入口；router 载入即 boot（hash 优先）。
+# B2（2026-11-28）：requests（请求工作台）紧随 monitor —— 消费 /api/request_log
+# window 模式，接管请求页主子页；须在 router 之后（依赖 parseHash/navigate）。
 JS_MODULES = ["ui", "store", "router", "charts", "overview", "inference",
-              "monitor", "deploy", "cloud", "model-pools", "anomaly",
+              "monitor", "requests", "deploy", "cloud", "model-pools", "anomaly",
               "packs", "security", "settings", "connect", "wizard"]
 # 注意：deploy.js 仍在 JS_MODULES（部署表单已并入能力包页 deploySection，
 # 但其事件委托/进度逻辑仍由 deploy.js 承载；deploy 不再是独立 fragment/tab）。

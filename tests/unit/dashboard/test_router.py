@@ -405,15 +405,18 @@ assert.ok(window.store && window.ifRouter, 'store and router must both load');
 async function run() {
 let notifyCount = 0;
 const observedModels = [];
+const paramSteps = [];
 window.store.on('tab_active', function (tab) {
   notifyCount += 1;
   if (tab === 'tab-models') observedModels.push(window.store.get('active_services') || []);
 });
+window.store.on('route_params', function (p) { paramSteps.push(p); });
 const notifySteps = [notifyCount];   // 注册即回放当前值一次
 for (const step of (input.calls || [])) {
   if (step.fetchSnapshot) await window.store.fetchSnapshot();
   if (step.setLocked !== undefined) window.store.setSwitchLocked(step.setLocked);
   if (step.hashChange) { hashValue = step.hashChange; if (hashListener) hashListener(); }
+  if (step.navigate) window.ifRouter.navigate(step.navigate.view, step.navigate.sub, step.navigate.params);
   notifySteps.push(notifyCount);
 }
 if (input.call && input.call.groupChecks) {
@@ -425,10 +428,18 @@ if (input.tab) {
   var callResult = window.switchTab(input.tab);
   var outCall = (callResult === undefined ? null : callResult);
 }
+if (input.call && input.call.toHash) {
+  var outToHash = window.ifRouter.toHash(input.call.toHash.view,
+                                         input.call.toHash.sub || null,
+                                         input.call.toHash.params || {});
+}
 var outGroups = (typeof outGroups !== 'undefined') ? outGroups : null;
 const out = {
   callResult: (typeof outCall !== 'undefined') ? outCall : null,
+  toHashResult: (typeof outToHash !== 'undefined') ? outToHash : null,
   notifySteps,
+  paramSteps,
+  routeParams: window.store.get('route_params') === undefined ? null : window.store.get('route_params'),
   observedModels,
   configSub: configSections.filter(el => el.classList.contains('on')).map(el => el.getAttribute('data-sub')),
   groups: outGroups,
@@ -606,9 +617,127 @@ def test_view_groups_dispatch_matrix(run_store_router):
                    "tab-monitor.log": False, "tab-monitor.usage": False}
     got = check("#/usage", ["tab-monitor.usage", "tab-monitor.log", "tab-monitor.kpis"])
     assert got == {"tab-monitor.usage": True, "tab-monitor.log": False, "tab-monitor.kpis": False}
-    got = check("#/requests", ["tab-monitor.log", "tab-monitor.usage"])
-    assert got == {"tab-monitor.log": True, "tab-monitor.usage": False}
-    got = check("#/requests/switches", ["tab-monitor.log", "tab-monitor.usage"])
-    assert got == {"tab-monitor.log": True, "tab-monitor.usage": False}
-    got = check("#/requests/anomalies", ["tab-anomaly", "tab-monitor.log"])
-    assert got == {"tab-anomaly": True, "tab-monitor.log": False}
+    got = check("#/requests", ["tab-monitor.log", "tab-monitor.hist"])
+    assert got == {"tab-monitor.log": True, "tab-monitor.hist": False}
+    # B2 拆组：switches 子页 = 切换历史（tab-monitor.hist），工作台（log）不可见
+    got = check("#/requests/switches", ["tab-monitor.log", "tab-monitor.hist", "tab-monitor.usage"])
+    assert got == {"tab-monitor.log": False, "tab-monitor.hist": True, "tab-monitor.usage": False}
+    got = check("#/requests/anomalies", ["tab-anomaly", "tab-monitor.log", "tab-monitor.hist"])
+    assert got == {"tab-anomaly": True, "tab-monitor.log": False, "tab-monitor.hist": False}
+
+
+# ── B2：同页过滤参数契约（A 期钉下的 RED：_lastAppliedKey 须纳入 params） ──
+
+
+def test_navigate_params_land_in_hash_and_store(run_store_router):
+    out = run_store_router({
+        "hash": "#/status",
+        "calls": [{"navigate": {"view": "requests", "sub": None,
+                                "params": {"window": "24h", "status": "4xx"}}}],
+    })
+    assert out["hash"] == "#/requests?window=24h&status=4xx"
+    assert out["routeParams"] == {"window": "24h", "status": "4xx"}
+    assert out["paramSteps"] == [{"window": "24h", "status": "4xx"}]
+    assert out["iff_view"] == "requests"       # iff_view 永不携带参数
+
+
+def test_same_page_param_change_reapplies_and_notifies_params(run_store_router):
+    """同页改参数必须重渲染（A 期 pinned RED）：view/sub 不变，仅 params 变。"""
+    out = run_store_router({
+        "hash": "#/requests",
+        "calls": [
+            {"navigate": {"view": "requests", "sub": None, "params": {"status": "4xx"}}},
+            {"navigate": {"view": "requests", "sub": None, "params": {"status": "2xx"}}},
+        ],
+    })
+    assert out["paramSteps"] == [{"status": "4xx"}, {"status": "2xx"}]
+    assert out["routeParams"] == {"status": "2xx"}
+    assert out["notifySteps"] == [1, 1, 1]     # tab_active 保持安静（防双渲染）
+
+
+def test_hashchange_param_change_reapplies(run_store_router):
+    out = run_store_router({
+        "hash": "#/requests",
+        "calls": [{"hashChange": "#/requests?status=4xx"},
+                  {"hashChange": "#/requests?status=2xx"}],
+    })
+    assert out["paramSteps"] == [{"status": "4xx"}, {"status": "2xx"}]
+    assert out["routeParams"] == {"status": "2xx"}
+    assert out["hash"] == "#/requests?status=2xx"
+
+
+def test_param_only_change_keeps_tab_active_quiet(run_store_router):
+    """仅参数变化：不触发 tab_active（避免 tab_active 钩子双渲染）。"""
+    out = run_store_router({
+        "hash": "#/requests?window=24h",
+        "calls": [{"hashChange": "#/requests?window=1h"}],
+    })
+    assert out["notifySteps"] == [1, 1]
+    assert out["paramSteps"] == [{"window": "1h"}]
+
+
+def test_tohash_drops_null_and_undefined_values(run_store_router):
+    """B2 params 契约统一（A 期遗留不对称）：null/undefined 值丢弃参数，
+    空串保留为 k=（合法空值书签，A 期 test_canonical_boot_preserves_explicit_empty_filter）。"""
+    out = run_store_router({
+        "hash": "#/status",
+        "call": {"toHash": {"view": "requests", "sub": None,
+                            "params": {"a": None, "c": "", "d": "x"}}},
+    })
+    assert out["toHashResult"] == "#/requests?c=&d=x"
+    out2 = run_store_router({
+        "hash": "#/status",
+        "call": {"toHash": {"view": "requests", "sub": None, "params": {}}},
+    })
+    assert out2["toHashResult"] == "#/requests"
+
+
+def test_navigate_sub_roundtrip_preserves_params(run_store_router):
+    """B2：同视图子页往返保留过滤参数（nav 入口 params 缺省 = 沿用当前地址参数）；
+    跨视图入口不携带（避免把过滤参数带去不认识的视图）。"""
+    out = run_store_router({
+        "hash": "#/requests?status=4xx",
+        "calls": [
+            {"navigate": {"view": "requests", "sub": "switches"}},
+            {"navigate": {"view": "requests", "sub": None}},
+        ],
+    })
+    assert out["hash"] == "#/requests?status=4xx"
+    # 修复轮细化：boot 参数消费方装载时已自 hash 应用 —— 参数未变时不发布
+    # route_params（订阅不回放伪装变更）；保留语义在 URL 与消费方状态。
+    assert out["paramSteps"] == []
+
+
+def test_deep_link_boot_then_clear_publishes_empty(run_store_router):
+    """修复轮（review Important 3a）：boot 不发布 route_params（裁决不变——
+    深链初始参数由消费方装载时自 hash 解析），但 boot 深链参数计入「已应用」
+    状态 —— 随后清空参数的导航必须发布 {}，不得被「空⇄空」抑制而让消费方
+    残留深链过滤。"""
+    out = run_store_router({
+        "hash": "#/requests?status=4xx",       # boot（不发布）
+        "calls": [
+            {"navigate": {"view": "status", "sub": None}},    # 跨视图，不携带
+            {"navigate": {"view": "requests", "sub": None}},  # 回请求区（空参数）
+        ],
+    })
+    assert out["hash"] == "#/requests"
+    assert out["paramSteps"] == [{}]           # 清空发布过一次，消费方得以复位
+
+
+def test_params_key_distinguishes_delimiter_values(run_store_router):
+    """修复轮（review Important 3b）：q 含字面 '&status=4xx' 与真实 status
+    参数是不同参数集 —— 应用键/发布键经 URI 编码，不得碰撞。"""
+    out = run_store_router({
+        "hash": "#/requests?q=x%26status%3D4xx",   # q = 'x&status=4xx'（深链）
+        "calls": [
+            {"navigate": {"view": "requests", "sub": None,
+                          "params": {"q": "x", "status": "4xx"}}},
+        ],
+    })
+    assert out["hash"] == "#/requests?q=x&status=4xx"
+    assert out["paramSteps"] == [{"q": "x", "status": "4xx"}]
+    out2 = run_store_router({
+        "hash": "#/requests?status=4xx",
+        "calls": [{"navigate": {"view": "status"}}],
+    })
+    assert out2["hash"] == "#/status"          # 跨视图不带参数

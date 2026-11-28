@@ -59,6 +59,19 @@ class _IFFDBRequestLogAdapter:
                                           before_ts=before_ts,
                                           before_id=before_id)
 
+    def query_request_log_window(self, since: float, until: float, *,
+                                 model: str | None = None,
+                                 agent: str | None = None,
+                                 status_class: str | None = None,
+                                 q: str | None = None,
+                                 limit: int = 50, offset: int = 0) -> dict:
+        # B1 window 模式只读直通：独立方法，不与既有 query_request_log 混用。
+        return self._db.query_request_log_window(since=since, until=until,
+                                                 model=model, agent=agent,
+                                                 status_class=status_class,
+                                                 q=q, limit=limit,
+                                                 offset=offset)
+
     def prune_request_log(self, before: float) -> int:
         return self._db.prune_request_log(before)
 
@@ -212,6 +225,17 @@ class TelemetryHub:
                                                   model=model, limit=limit,
                                                   before_ts=before_ts,
                                                   before_id=before_id)
+
+    def query_request_log_window(self, since: float, until: float, *,
+                                 model: str | None = None,
+                                 agent: str | None = None,
+                                 status_class: str | None = None,
+                                 q: str | None = None,
+                                 limit: int = 50, offset: int = 0) -> dict:
+        """B1 window 模式只读直通（过滤、分页、同快照计数）。"""
+        return self._legacy_db.query_request_log_window(
+            since=since, until=until, model=model, agent=agent,
+            status_class=status_class, q=q, limit=limit, offset=offset)
 
     def reclassify_request_log(self, classify_fn, known_ids=None) -> int:
         """重新分类无 def 的历史行（认领后触发）。代理到 IFFDB。"""

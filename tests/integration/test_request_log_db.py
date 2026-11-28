@@ -951,3 +951,109 @@ def test_insert_and_query_agent_fields(tmp_path):
     }])
     rows = db.query_request_log(since=0)
     assert rows[0]["agent"] == "claude-code" and rows[0]["ua"] == "claude-cli/2.0"
+
+
+# ── B1: query_request_log_window（window 模式读侧契约） ─────────────
+
+
+def _win_row(i, ts, model="m1", status=200, req_id=None, agent="claude-code"):
+    return {
+        "req_id": req_id or f"r{i}", "key_name": "k", "model": model,
+        "status": status, "ttft_ms": 10.0, "tokens_in": 1,
+        "tokens_in_cached": 0, "tokens_out": 2, "duration_ms": 5.0,
+        "route": "local", "cloud_provider": None, "error": None,
+        "timestamp": ts, "ts": str(ts), "agent": agent, "ua": "ua/1",
+        "metadata": {},
+    }
+
+
+def test_query_request_log_window_counts_and_boundaries(tmp_path):
+    """"[since, until) 半开窗 + 过滤先于 LIMIT 的同快照计数。"""
+    from inferfabric.db import IFFDB
+    import inferfabric.migrations  # noqa: F401
+    db = IFFDB(tmp_path)
+    db.insert_request_log([
+        _win_row(1, 100.0, status=200),                    # == since → 含入
+        _win_row(2, 150.0, status=404),
+        _win_row(3, 150.0, status=503, model="m2", agent="codex"),
+        _win_row(4, 200.0, status=404, model="m2"),        # == until → 排除
+        _win_row(5, 50.0, status=404, model="m2"),         # < since → 排除
+    ])
+    res = db.query_request_log_window(since=100.0, until=200.0)
+    assert res["total"] == 3
+    assert res["failed_total"] == 2                        # 404 + 503
+    assert [r["req_id"] for r in res["logs"]] == ["r3", "r2", "r1"]
+    # 状态类过滤（整数区间）
+    res4 = db.query_request_log_window(since=100.0, until=200.0,
+                                       status_class="4xx")
+    assert res4["total"] == 1 and res4["failed_total"] == 1
+    # agent 精确匹配
+    assert db.query_request_log_window(since=100.0, until=200.0,
+                                       agent="codex")["total"] == 1
+    assert db.query_request_log_window(since=100.0, until=200.0,
+                                       agent="claude-code")["total"] == 2
+    # model 精确匹配
+    assert db.query_request_log_window(since=100.0, until=200.0,
+                                       model="m2")["total"] == 1
+
+
+def test_query_request_log_window_q_literal_substring(tmp_path):
+    """q 对 req_id/model/agent 做字面子串匹配：LIKE 通配字符按字面处理。"""
+    from inferfabric.db import IFFDB
+    import inferfabric.migrations  # noqa: F401
+    db = IFFDB(tmp_path)
+    db.insert_request_log([
+        _win_row(1, 100.0, req_id="a_c"),
+        _win_row(2, 100.0, req_id="abc"),
+        _win_row(3, 100.0, req_id="a%c"),
+        _win_row(4, 100.0, req_id="axc"),
+        _win_row(5, 100.0, req_id="plain"),
+    ])
+    # 下划线不当单字通配符：只命中字面 "a_c"
+    assert db.query_request_log_window(since=0, until=200.0,
+                                       q="a_c")["total"] == 1
+    # 百分号不当作多字通配符：只命中字面 "a%c"
+    assert db.query_request_log_window(since=0, until=200.0,
+                                       q="a%c")["total"] == 1
+    # req_id 之外还匹配 model / agent 子串
+    assert db.query_request_log_window(since=0, until=200.0,
+                                       q="lain")["total"] == 1
+
+
+def test_query_request_log_window_offset_pagination(tmp_path):
+    """offset 分页按 (timestamp,id) DESC：同秒跨页无重叠不漏不计重。"""
+    from inferfabric.db import IFFDB
+    import inferfabric.migrations  # noqa: F401
+    db = IFFDB(tmp_path)
+    db.insert_request_log(
+        [_win_row(i, 500.0, model="m2", req_id=f"s{i:03d}")
+         for i in range(60)]
+        + [_win_row(1000 + i, 400.0 + i) for i in range(40)])
+
+    def page(offset, limit=25):
+        return db.query_request_log_window(since=0, until=1000.0,
+                                           model="m2", limit=limit,
+                                           offset=offset)
+
+    full = db.query_request_log_window(since=0, until=1000.0, model="m2",
+                                       limit=100)
+    assert full["total"] == 60
+    ids = [r["id"] for r in full["logs"]]
+    assert ids == sorted(ids, reverse=True)                # 全序 DESC
+    p1, p2, p3 = page(0), page(25), page(50)
+    assert [p1["logs"], p2["logs"], p3["logs"]][0][0]["id"] == ids[0]
+    got = [r["id"] for pg in (p1, p2, p3) for r in pg["logs"]]
+    assert got == ids                                      # 页拼接 == 全序
+    tail = page(60)
+    assert tail["logs"] == [] and tail["total"] == 60      # 越界页安全
+
+
+def test_query_request_log_window_rejects_bad_status_class(tmp_path):
+    """db 层防御：未知状态类直接 ValueError（handler 先行 400）。"""
+    from inferfabric.db import IFFDB
+    import inferfabric.migrations  # noqa: F401
+    import pytest
+    db = IFFDB(tmp_path)
+    db.insert_request_log([_win_row(1, 100.0)])
+    with pytest.raises(ValueError):
+        db.query_request_log_window(since=0, until=200.0, status_class="3xx")

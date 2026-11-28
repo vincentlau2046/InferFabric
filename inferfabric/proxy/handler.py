@@ -1404,36 +1404,150 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except tune.TuneError as e:
             self._send_json({"error": str(e)}, 400)
 
+    # ── B1: /api/request_log window 模式（只读查询扩展） ──────────
+
+    _REQ_LOG_WINDOWS = {"1h": 3600, "24h": 86400, "7d": 604800}
+    _REQ_LOG_STATUS = ("all", "2xx", "4xx", "5xx")
+
     def _handle_request_log(self, pm):
-        """返回最近请求日志 (D-1)"""
+        """返回最近请求日志 (D-1)；显式 window 参数进入过滤分页模式 (B1)。"""
         try:
             from urllib.parse import urlparse, parse_qs
             import time
-            qs = parse_qs(urlparse(self.path).query)
+            raw_q = urlparse(self.path).query
+            qs = parse_qs(raw_q)
+            # 显式 window 模式检测用原文（parse_qs 默认丢空白值，window=
+            # 会静默落 legacy —— 修复轮裁决：空白模式选择器属显式调用，400）
+            explicit_window = any(p.split("=", 1)[0] == "window"
+                                  for p in raw_q.split("&") if p)
+            if explicit_window or qs.get("window", [None])[0] is not None:
+                self._handle_request_log_window(
+                    pm, parse_qs(raw_q, keep_blank_values=True))
+                return
             limit = min(int(qs.get("limit", ["50"])[0]), 500)
             since = float(qs.get("since", ["0"])[0])
             rows = pm.telemetry.query_request_log(since=since, limit=limit)
-            logs = []
-            for r in rows:
-                logs.append({
-                    "timestamp": r["timestamp"],
-                    "model": r["model"],
-                    "status": r["status"],
-                    "tokens_in": r["tokens_in"],
-                    "tokens_in_cached": int(r.get("tokens_in_cached") or 0),
-                    "tokens_out": r["tokens_out"],
-                    "ttft_ms": round(r["ttft_ms"], 1) if r["ttft_ms"] else None,
-                    "duration_ms": round(r["duration_ms"], 1) if r["duration_ms"] else None,
-                    "route": r["route"],
-                    "key_name": r.get("key_name", ""),
-                    "error": r.get("error", ""),
-                    "agent": r.get("agent", ""),
-                    "ua": r.get("ua", ""),
-                })
+            logs = [self._base_log_row(r) for r in rows]
             self._send_json({"logs": logs, "count": len(logs)}, 200)
         except Exception as e:
             log.error("/api/request_log failed: %s", e)
             self._send_json({"error": "request log unavailable"}, 500)
+
+    def _base_log_row(self, r):
+        """日志行的既有白名单字段（旧模式与 window 模式共用，形状不变）。"""
+        return {
+            "timestamp": r["timestamp"],
+            "model": r["model"],
+            "status": r["status"],
+            "tokens_in": r["tokens_in"],
+            "tokens_in_cached": int(r.get("tokens_in_cached") or 0),
+            "tokens_out": r["tokens_out"],
+            "ttft_ms": round(r["ttft_ms"], 1) if r["ttft_ms"] else None,
+            "duration_ms": round(r["duration_ms"], 1) if r["duration_ms"] else None,
+            "route": r["route"],
+            "key_name": r.get("key_name", ""),
+            "error": r.get("error", ""),
+            "agent": r.get("agent", ""),
+            "ua": r.get("ua", ""),
+        }
+
+    def _handle_request_log_window(self, pm, qs):
+        """GET /api/request_log?window=1h|24h|7d（B1）。
+
+        过滤、分页、同快照计数；非法参数一律 400 且不回显原值；until
+        缺省取服务端当前时刻，只接受有限且非未来值；空过滤参数视为
+        未提供（空白 window 值本身属非法模式 → 400）。行仅新增安全
+        req_id 与白名单池摘要（_safe_pool_projection），不透出全量
+        metadata、错误原文（error 恒 None）、上游原文或凭证。
+        """
+        import math
+        import time
+        win = self._REQ_LOG_WINDOWS.get(qs.get("window", [""])[0])
+        if win is None:
+            return self._send_json({"error": "invalid window"}, 400)
+        until_s = qs.get("until", [None])[0] or None
+        if until_s is None:
+            until = time.time()
+        else:
+            try:
+                until = float(until_s)
+            except ValueError:
+                return self._send_json({"error": "invalid filter"}, 400)
+            if not math.isfinite(until) or until > time.time():
+                return self._send_json({"error": "invalid filter"}, 400)
+        status = qs.get("status", [None])[0] or "all"
+        if status not in self._REQ_LOG_STATUS:
+            return self._send_json({"error": "invalid filter"}, 400)
+        q = qs.get("q", [None])[0]
+        if q is not None and len(q) > 64:
+            return self._send_json({"error": "invalid filter"}, 400)
+        try:
+            limit = int(qs.get("limit", ["50"])[0])
+            offset = int(qs.get("offset", ["0"])[0])
+        except ValueError:
+            return self._send_json({"error": "invalid filter"}, 400)
+        # offset 上界 = SQLite int64（超界绑定 OverflowError → 500，修复轮收口）
+        if not 1 <= limit <= 500 or not 0 <= offset <= 2 ** 63 - 1:
+            return self._send_json({"error": "invalid filter"}, 400)
+        res = pm.telemetry.query_request_log_window(
+            since=until - win, until=until,
+            model=qs.get("model", [None])[0] or None,
+            agent=qs.get("agent", [None])[0] or None,
+            status_class=None if status == "all" else status,
+            q=q or None, limit=limit, offset=offset)
+        logs = [{**self._base_log_row(r),
+                 "error": None,   # 修复轮：错误原文（上游体/内部文案）不进响应
+                 "req_id": r.get("req_id", ""),
+                 "pool": self._safe_pool_projection(r.get("metadata"))}
+                for r in res["logs"]]
+        self._send_json({"logs": logs, "count": len(logs),
+                         "total": res["total"],
+                         "failed_total": res["failed_total"],
+                         "until": until}, 200)
+
+    @staticmethod
+    def _parse_pool_route_kind(route):
+        """pool:<name>/local:<model> → local；pool:<name>/cloud:<p>/<m> → cloud。"""
+        if not isinstance(route, str) or not route.startswith("pool:"):
+            return None
+        if "/local:" in route:
+            return "local"
+        if "/cloud:" in route:
+            return "cloud"
+        return None
+
+    def _safe_pool_projection(self, metadata):
+        """metadata.pool_summary → 安全池摘要（接口契约 §B）。
+
+        严格五键 {name, route_kind, target_port, retry_count, fallback_count}
+        或 None。仅投影 v==1 且池名为非空、不含 '/' 的字符串（config 侧
+        禁 '/'；读侧防御）。route_kind 取最后一次 admitted attempt 的
+        route；无 admitted → None（不冒认）。retry/fallback 是独立计数
+        （attempts 是数组不是次数）。当前 pool_summary 不记录端口：
+        target_port 恒 None（展示「—」），不用当前配置反推历史。
+        """
+        s = metadata.get("pool_summary") if isinstance(metadata, dict) else None
+        if not isinstance(s, dict) or s.get("v") != 1:
+            return None
+        name = s.get("pool")
+        if not isinstance(name, str) or not name or "/" in name:
+            return None
+        # 修复轮硬化：attempts 必须是数组；admitted 必须是真布尔（truthy
+        # 字符串/数字不冒认）；单行损坏（任意异常）→ 投影 None，整页可读
+        route_kind = None
+        attempts = s.get("attempts")
+        if isinstance(attempts, list):
+            for attempt in reversed(attempts):
+                if isinstance(attempt, dict) and attempt.get("admitted") is True:
+                    route_kind = self._parse_pool_route_kind(attempt.get("route"))
+                    break
+
+        def _count(v):
+            return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+        return {"name": name, "route_kind": route_kind, "target_port": None,
+                "retry_count": _count(s.get("retry_count")),
+                "fallback_count": _count(s.get("fallback_count"))}
 
     def _handle_anomalies(self, pm):
         """GET /api/anomalies — 返回异常事件 (R9)。"""

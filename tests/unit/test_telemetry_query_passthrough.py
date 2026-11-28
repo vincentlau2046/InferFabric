@@ -79,3 +79,16 @@ def test_hub_monitor_report_builds_through_telemetry(hub):
     hub_t, _ = hub
     report = build_monitor_report(hub_t, window="1h", until=time.time())
     assert report["totals"]["requests"] == 5
+
+
+def test_hub_window_mode_passthrough(hub):
+    """B1 window 模式读侧：hub 直通与裸 db 返回完全一致（含计数）。"""
+    hub_t, db = hub
+    hub_res = hub_t.query_request_log_window(since=0, until=time.time() + 60,
+                                             limit=3)
+    db_res = db.query_request_log_window(since=0, until=time.time() + 60,
+                                         limit=3)
+    assert hub_res == db_res
+    assert hub_res["total"] == 5
+    assert len(hub_res["logs"]) == 3
+    assert hub_res["failed_total"] == 0
