@@ -29,9 +29,11 @@ FRAGMENTS = ["status", "requests", "usage", "routing", "models", "config",
 # store.switchTab 仅为兼容入口；router 载入即 boot（hash 优先）。
 # B2（2026-11-28）：requests（请求工作台）紧随 monitor —— 消费 /api/request_log
 # window 模式，接管请求页主子页；须在 router 之后（依赖 parseHash/navigate）。
+# D2（2026-11-28）：usage（用量页）紧随 requests —— 消费 /api/monitor-report
+# 增量输出，接管用量页（撤除 monitor.js 旧卡，认领弹窗仍由 monitor.js 承载）。
 JS_MODULES = ["ui", "store", "router", "charts", "overview", "inference",
-              "monitor", "requests", "deploy", "cloud", "model-pools", "anomaly",
-              "packs", "security", "settings", "connect", "wizard"]
+              "monitor", "requests", "usage", "deploy", "cloud", "model-pools",
+              "anomaly", "packs", "security", "settings", "connect", "wizard"]
 # 注意：deploy.js 仍在 JS_MODULES（部署表单已并入能力包页 deploySection，
 # 但其事件委托/进度逻辑仍由 deploy.js 承载；deploy 不再是独立 fragment/tab）。
 
