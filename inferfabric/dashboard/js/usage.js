@@ -19,9 +19,12 @@
  *   - 电费：device_power 仅是设备功耗估算（非整机电费）；桶缺测/覆盖不足
  *     如实标注；云费（报告窗口）与电费（device_power 聚合区间）单列来源，
  *     不求和不伪造完整合计。
- *   - 客户端「未识别」分组保留认领路径：data-claim 按钮复用 monitor.js 的
- *     全局认领弹窗委托；认领/删除成功后 monitor.js 派发 iff-agents-changed，
- *     本模块重取报告（裁决：monitor.js 2 行增量事件，见 ledger）。
+ *   - 客户端「未识别」分组保留认领路径（终审 I1 分流）：生产键 "unknown"
+ *     （分类器未命中，agent_stats 保留语义）出 data-claim="unknown" 按钮
+ *     （monitor.js 对该键有专用分支：预填 unassigned 真 UA）；"unidentified"
+ *     （agent 空串历史/漏点行，无可靠信号）只标注「历史」不出按钮。
+ *     认领/删除成功后 monitor.js 派发 iff-agents-changed，本模块重取报告
+ *     （裁决：monitor.js 2 行增量事件，见 ledger）。
  *
  * 暴露：window.ifUsage = { setWindow, refresh }。
  */
@@ -32,6 +35,10 @@
   var WIN_GRAN = { '1h': 'hour', '24h': 'day', '7d': 'week', '30d': 'month' };
   var WIN_LABEL = { '1h': '近 1 小时', '24h': '近 24 小时', '7d': '近 7 天', '30d': '近 30 天' };
   var GRAN_LABEL = { hour: '小时', day: '天', week: '周', month: '月' };
+  /* device_power 各 gran 的实际聚合覆盖区间（power_stats/bucketing 契约），
+   * 与所选报告窗口系统性错位——终审 I5：金额旁必须披露，否则不可核对 */
+  var GRAN_COVER = { hour: '近 24 小时', day: '近 30 天',
+                     week: '近 91 天（13 周）', month: '自最早采样起' };
   /* IFCharts 调色板固定序 [0]=蓝 [1]=琥珀（dark/light 同 hex，charts.js v7.0）。
    * 显式取值钉住「本地/云用指定蓝/琥珀」，颜色跟随实体不跟随排序。 */
   var PAL = (window.IFCharts && window.IFCharts.palettes &&
@@ -80,9 +87,12 @@
     var d = new Date(Number(ts) * 1000);
     if (isNaN(d.getTime())) return '—';
     function p2(n) { return (n < 10 ? '0' : '') + n; }
-    return win === '1h'
-      ? p2(d.getHours()) + ':' + p2(d.getMinutes())
-      : p2(d.getHours()) + ':00';
+    // 终审 I3：30d 桶 = 24h 粒度，时刻全部相同 → 必须用日期标签
+    return win === '30d'
+      ? p2(d.getMonth() + 1) + '-' + p2(d.getDate())
+      : win === '1h'
+        ? p2(d.getHours()) + ':' + p2(d.getMinutes())
+        : p2(d.getHours()) + ':00';
   }
 
   /* 内容组守卫：用量页（旧组键沿用 VIEW_GROUPS['usage']） */
@@ -107,6 +117,11 @@
       if (seq !== _seq || !isActive()) return;   // 迟到/离页：整组丢弃
       if (gotReport == null) {
         _error = '读取失败 — 用量报告暂不可取';
+        // 终审 I2：旧窗口数据整体失效——不把上一窗口的趋势/金额挂到新窗口
+        // 名下（金额错挂最伤信任）；成功抵达的功耗响应同样不展示（整页
+        // 窗口驱动，半新半旧比空更糟）
+        _report = null;
+        _power = null;
       } else {
         _error = null;
         _report = gotReport;
@@ -163,7 +178,7 @@
     var el = $('useTruncBanner');
     if (!el) return;
     var truncated = !!(_report && _report.coverage && _report.coverage.truncated);
-    el.innerHTML = truncated ? '⚠️ 报告不完整：达到扫描安全上限，统计可能少于实际（如实标注，不冒认完整）' : '';
+    el.innerHTML = truncated ? '报告不完整：达到扫描安全上限，统计可能少于实际（如实标注，不冒认完整）' : '';
     el.style.display = truncated ? '' : 'none';
   }
 
@@ -173,6 +188,15 @@
     if (cacheLbl) cacheLbl.textContent = 'KV 前缀缓存命中 token 份额 · 非响应缓存命中率';
     var t = (_report && _report.totals) || {};
     if (_error) {
+      if (req) req.innerHTML = '—';
+      if (tok) tok.innerHTML = '—';
+      if (cost) cost.innerHTML = '—';
+      if (cache) cache.innerHTML = '—';
+      return;
+    }
+    if (!_report) {
+      // 终审 M3：报告未落定 → 占位 —，不画假 0 / 假「未计价」
+      //（无数据 ≠ 未计价，裁决不被首屏空窗打破）
       if (req) req.innerHTML = '—';
       if (tok) tok.innerHTML = '—';
       if (cost) cost.innerHTML = '—';
@@ -238,13 +262,19 @@
         local.push(v2[0]); cloud.push(v2[1]);
       }
     }
-    if (emptyEl) emptyEl.style.display = ((_report && _report.totals && _report.totals.requests) || 0) ? 'none' : '';
-    if (note) {
-      // unknown 另作覆盖说明（不作图系列，不并入本地）
-      note.innerHTML = unkReq > 0
-        ? '另有 <b>' + fmtNum(unkReq) + '</b> 请求（' + fmtNum(unkTok) +
-          ' tokens）路由未知，未计入图——可在请求页按「状态/模型」排查 route 缺失行'
-        : '';
+    if (_error) {
+      // 终审 I2：取数失败 → 清空旧图数据，错误入 note（不误标「暂无请求」）
+      if (emptyEl) emptyEl.style.display = 'none';
+      if (note) note.innerHTML = '<span class="bad">' + escHtml(_error) + '</span>';
+    } else {
+      if (emptyEl) emptyEl.style.display = ((_report && _report.totals && _report.totals.requests) || 0) ? 'none' : '';
+      if (note) {
+        // unknown 另作覆盖说明（不作图系列，不并入本地）
+        note.innerHTML = unkReq > 0
+          ? '另有 <b>' + fmtNum(unkReq) + '</b> 请求（' + fmtNum(unkTok) +
+            ' tokens）路由未知，未计入图——可在请求页按「状态/模型」排查 route 缺失行'
+          : '';
+      }
     }
     if (_charts.trend) {
       window.IFCharts.update(_charts.trend, {
@@ -317,19 +347,21 @@
     var rows = '';
     for (var i = 0; i < agents.length; i++) {
       var a = agents[i] || {};
-      // 未识别分组（D1 契约键 "unidentified"）→ 待认领 + 认领按钮。
-      // 认领弹窗复用 monitor.js 全局委托（data-claim），不重建弹窗。
-      var isUnk = a.agent === 'unidentified';
+      // 终审 I1：未识别两键分流——"unknown"（分类器未命中，生产键）可认领
+      // （monitor.js 专用分支预填 unassigned 真 UA）；"unidentified"（agent
+      // 空串历史/漏点行，无可靠信号）只标注不出按钮，宁缺毋错。
+      var isUnk = a.agent === 'unidentified' || a.agent === 'unknown';
+      var isClaimable = a.agent === 'unknown';
       var cost = (a.cost_estimate != null) ? fmtYuan(a.cost_estimate) : '未计价';
       var cache = (a.cache_share != null) ? fmtPct(a.cache_share) : '—';
       rows += '<tr' + (isUnk ? ' class="agent-unk-row"' : '') + '><td>' +
-        (isUnk ? '未识别 <span class="agent-unk-tag">待认领</span>' : escHtml(a.agent)) +
+        (isUnk ? '未识别 <span class="agent-unk-tag">' + (isClaimable ? '待认领' : '历史') + '</span>' : escHtml(a.agent)) +
         '</td>' +
         '<td class="mono num">' + fmtNum(a.requests) + '</td>' +
         '<td class="mono num">' + fmtNum(a.tokens_in) + ' / ' + fmtNum(a.tokens_out) + '</td>' +
         '<td class="mono num">' + escHtml(cache) + '</td>' +
         '<td class="mono num">' + escHtml(cost) + '</td>' +
-        '<td>' + (isUnk ? '<button type="button" class="mon-mini-btn" data-claim="unidentified" title="识别/认领">识别</button>' : '') +
+        '<td>' + (isClaimable ? '<button type="button" class="mon-mini-btn" data-claim="unknown" title="识别/认领">识别</button>' : '') +
         '</td></tr>';
     }
     el.innerHTML = '<div class="cp-table-wrap"><table class="if-table mon-tbl">' +
@@ -343,6 +375,15 @@
     var tot = $('usePowerTotals'), note = $('usePowerNote'),
         empty = $('usePowerEmpty'), sub = $('usePowerSub'), cc = $('useCloudCost');
     var p = _power;
+    if (_error) {
+      // 终审 I2：取数失败 → 电费/云费整体失效，不保留上一窗口金额错挂窗口
+      if (tot) tot.innerHTML = '—';
+      if (sub) sub.textContent = '';
+      if (empty) empty.style.display = 'none';
+      if (note) note.innerHTML = '<span class="bad">取数失败 — 电费未更新（窗口数据已失效）</span>';
+      if (cc) cc.innerHTML = '<span class="bad">取数失败 — 云费未更新</span>';
+      return;
+    }
     if (tot) {
       // 无数据/覆盖不足 → 「—」，不冒认 ¥0
       tot.innerHTML = (p && p.available && p.totals && p.totals.yuan != null)
@@ -360,7 +401,9 @@
           if (buckets[i] && buckets[i].avg_w == null) missing++;
         }
         html = '来源：/api/device_power · GPU 板卡功耗估算（非整机电费）· 按' +
-          escHtml(GRAN_LABEL[p.gran] || p.gran || '—') + '聚合' +
+          escHtml(GRAN_LABEL[p.gran] || p.gran || '—') + '聚合 · 覆盖' +
+          escHtml(GRAN_COVER[p.gran] || '未知区间') +
+          '（≠ 所选' + escHtml(WIN_LABEL[_win]) + '窗口）' +
           (missing ? ' · <span class="bad">缺测 ' + missing + ' 桶</span>' : '');
       } else {
         html = '<span class="bad">功耗数据暂不可用（覆盖不足）</span>——采样每 60s 进行，' +
@@ -376,8 +419,10 @@
     if (cc) {
       // 云费（报告窗口）与电费（device_power 聚合区间）单列来源，不求和
       var cost = _report && _report.totals && _report.totals.cost_estimate;
-      cc.innerHTML = '云费（' + escHtml(WIN_LABEL[_win]) + '报告）：' +
-        (cost != null ? escHtml(fmtYuan(cost)) : '<span class="use-badge-warn">未计价</span>') +
+      var costHtml = !_report
+        ? '—'   // 终审 M3：报告未落定不显示「未计价」徽章
+        : (cost != null ? escHtml(fmtYuan(cost)) : '<span class="use-badge-warn">未计价</span>');
+      cc.innerHTML = '云费（' + escHtml(WIN_LABEL[_win]) + '报告）：' + costHtml +
         ' · 电费见上（聚合区间与报告窗口可不同，不与云费求和）';
     }
   }

@@ -443,8 +443,10 @@ def test_trend_7d_synthesizes_daily_buckets(tmp_path):
             series.append(_bucket(1700000000.0 + (d * 4 + k) * 21600.0,
                                   req=k + 1, tin=100, loc="local"))
     out = _run_harness(tmp_path, {
-        "reports": [{"json": _report(win="7d", series=series)}],
-        "powers": [{"json": _power(gran="week")}],
+        # 两次响应：装载 24h 消费第一条，click 7d 取数消费第二条
+        #（I2 契约后取数失败会清空旧图，不再有「无脚本响应靠旧图续命」）
+        "reports": [{"json": _report()}, {"json": _report(win="7d", series=series)}],
+        "powers": [{"json": _power(gran="day")}, {"json": _power(gran="week")}],
         "steps": _DEFAULT_SEED + [{"click": "useWin-7d"}],
     })
     updates = [u for u in out["chartUpdates"] if u["target"] == "useTrendChart"]
@@ -458,8 +460,10 @@ def test_trend_short_window_keeps_report_buckets(tmp_path):
     series = [_bucket(1700000000.0 + i * 300.0, req=1, loc="local")
               for i in range(12)]
     out = _run_harness(tmp_path, {
-        "reports": [{"json": _report(win="1h", series=series)}],
-        "powers": [{"json": _power(gran="hour")}],
+        # 两次响应：装载 24h 消费第一条，click 1h 取数消费第二条（I2 契约）
+        "reports": [{"json": _report()},
+                    {"json": _report(win="1h", series=series)}],
+        "powers": [{"json": _power(gran="day")}, {"json": _power(gran="hour")}],
         "steps": _DEFAULT_SEED + [{"click": "useWin-1h"}],
     })
     updates = [u for u in out["chartUpdates"] if u["target"] == "useTrendChart"]
@@ -506,9 +510,31 @@ def test_model_table_share_tokens_cost_latency(tmp_path):
     assert "0.0002" in t or "0.0002" in json.dumps(out["modelTable"])
 
 
-def test_client_table_unidentified_claim_path(tmp_path):
-    """客户端分解：未识别分组保留 + 认领按钮（data-claim 委托旧认领弹窗）；
-    已识别客户端无按钮。"""
+def test_client_table_unknown_row_claimable(tmp_path):
+    """终审 I1：生产「未识别」键是 unknown（agent_registry 分类器未命中，
+    agent_stats.py:56 保留语义）→ 标「未识别·待认领」+ data-claim="unknown"
+    （monitor.js 对该键有专用分支：预填 unassigned 真 UA；传 unidentified
+    会预填 ^unidentified 假规则）。已识别客户端（alice）无按钮。"""
+    agents = [_agent("alice", requests=3),
+              _agent("unknown", requests=1)]
+    out = _run_harness(tmp_path, {
+        "reports": [{"json": _report(agents=agents)}],
+        "powers": [{"json": _power()}],
+        "steps": _DEFAULT_SEED,
+    })
+    t = out["agentTable"]
+    assert "alice" in t
+    assert "未识别" in t and "待认领" in t
+    assert 'data-claim="unknown"' in t
+    rows = t.split("<tr")
+    alice_rows = [r for r in rows if "alice" in r]
+    assert alice_rows and "data-claim" not in alice_rows[0]
+
+
+def test_client_table_unidentified_historical_not_claimable(tmp_path):
+    """终审 I1：unidentified（agent 空串 = 采集上线前历史/漏点，无可靠信号，
+    agent_stats.py:56 不进聚合）→ 标「未识别·历史」，不出认领按钮——
+    认领弹窗对该键会预填假匹配规则，宁缺毋错。"""
     agents = [_agent("alice", requests=3),
               _agent("unidentified", requests=1)]
     out = _run_harness(tmp_path, {
@@ -518,12 +544,82 @@ def test_client_table_unidentified_claim_path(tmp_path):
     })
     t = out["agentTable"]
     assert "alice" in t
-    assert "未识别" in t or "待认领" in t
-    assert "data-claim" in t          # 认领入口保留
-    # 已识别行不出现第二个 data-claim（按行最小断言：alice 行无按钮）
-    rows = t.split("<tr")
-    alice_rows = [r for r in rows if "alice" in r]
-    assert alice_rows and "data-claim" not in alice_rows[0]
+    assert "未识别" in t and "历史" in t
+    assert "data-claim" not in t      # 历史空值行无认领入口
+
+
+def test_report_error_clears_stale_window_data(tmp_path):
+    """终审 I2：报告取数失败 → 旧窗口数据整体失效，不把上一窗口的趋势/
+    金额挂到新窗口名下；成功抵达的功耗响应同样不展示（整页窗口驱动，
+    半新半旧错标比空更伤信任）。"""
+    out = _run_harness(tmp_path, {
+        "reports": [{"json": _report()}, {"error": True}],
+        "powers": [{"json": _power(gran="day", yuan=0.5)},
+                   {"json": _power(gran="week", yuan=9.9)}],
+        "steps": _DEFAULT_SEED + [{"click": "useWin-7d"}],
+    })
+    assert "读取失败" in out["metaLine"]
+    assert out["kpiCost"].strip() == "—"
+    # 趋势：最后一次图更新必须清空旧数据（不拿 24h 桶按 7d 规则重组）
+    trend = [u for u in out["chartUpdates"] if u["target"] == "useTrendChart"]
+    assert trend, "trend must be updated at least once"
+    assert trend[-1]["patch"]["xAxis"]["data"] == []
+    # 电费：不保留旧窗 ¥0.50，也不展示新窗 ¥9.90（report 失败整页失效）
+    assert out["powerTotals"].strip() == "—"
+    assert "0.50" not in out["powerTotals"] and "9.90" not in out["powerTotals"]
+    assert "取数失败" in out["powerNote"]
+    # 云费：不把旧报告值标到新窗口名下
+    assert "¥" not in out["cloudCost"]
+    assert "取数失败" in out["cloudCost"]
+
+
+def test_trend_30d_labels_are_dates(tmp_path):
+    """终审 I3：30d 桶 = 24h 粒度，x 轴必须是互不相同的日期（MM-DD）；
+    全部同一 HH:00 时 30 天趋势不可读。"""
+    base = 1700000000.0
+    day = 86400.0
+    series = [_bucket(base - i * day, req=10 + i, loc="local")
+              for i in range(30)]
+    out = _run_harness(tmp_path, {
+        # 装载 24h 消费第一条占位响应；click 30d 后 _win='30d' 消费 30d 报告
+        "reports": [{"json": _report()},
+                    {"json": _report(win="30d", series=series)}],
+        "powers": [{"json": _power(gran="day")}, {"json": _power(gran="month")}],
+        "steps": _DEFAULT_SEED + [{"click": "useWin-30d"}],
+    })
+    trend = [u for u in out["chartUpdates"] if u["target"] == "useTrendChart"]
+    assert trend
+    cats = trend[-1]["patch"]["xAxis"]["data"]
+    assert len(cats) == 30
+    assert len(set(cats)) == 30          # 30 个互不相同的标签
+    assert all("-" in c for c in cats)   # MM-DD 日期形态
+
+
+def test_power_note_discloses_coverage_window(tmp_path):
+    """终审 I5：电费聚合区间与所选窗口系统性错位（hour=近 24h、day=近 30 天…），
+    必须披露实际覆盖区间并明示 ≠ 所选窗口，金额才可核对。"""
+    out = _run_harness(tmp_path, {
+        "reports": [{"json": _report()}],
+        "powers": [{"json": _power(gran="day")}],
+        "steps": _DEFAULT_SEED,
+    })
+    note = out["powerNote"]
+    assert "近 30 天" in note            # day gran 实际覆盖近 30 天
+    assert "≠" in note                   # 且明示不等于所选「近 24 小时」窗口
+
+
+def test_kpis_placeholder_before_first_report(tmp_path):
+    """终审 M3：首屏报告未落定 → KPI 显示 —，不画假 0 / 假「未计价」
+    （无数据 ≠ 未计价裁决不被首屏空窗打破）。"""
+    out = _run_harness(tmp_path, {
+        "reports": [{"wait": True}, {"json": _report()}],
+        "powers": [{"wait": True}, {"json": _power()}],
+        "steps": _DEFAULT_SEED,
+    })
+    assert out["kpiReq"].strip() == "—"
+    assert out["kpiCost"].strip() == "—"
+    assert "未计价" not in out["kpiCost"]
+    assert "0 " not in out["kpiReq"]
 
 
 # ── 电费卡 ───────────────────────────────────────────────────────

@@ -178,6 +178,7 @@ def _drow(now, req_id, model, *, agent="", cached=0, tin=10, tout=20, **kw):
     kw.setdefault("route", f"local:{model}")
     r = _row(now, req_id, model, **kw)
     r["tokens_in"] = tin
+    r["tokens_out"] = tout   # 终审修复轮：tout 此前是死参（收下不写回）
     r["tokens_in_cached"] = cached
     r["agent"] = agent
     return r
@@ -337,3 +338,55 @@ def test_d1_scan_budget_not_regressed(d1_db):
     report = build_monitor_report(db, window="1h", until=now)
     assert report["coverage"]["truncated"] is False
     assert report["coverage"]["rows_scanned"] == 5
+
+
+def test_d1_priced_zero_cost_cloud_row_not_unpriced(tmp_path):
+    """终审 I4：计价证据 = cloud_provider 非空 且 model ∈ prices（与
+    cost_of_row 同判据，配价即证据）；已配价但本窗口 token 全 0 → 成本
+    真 0（priced / cost_estimate=0.0），不误标 unpriced。"""
+    from inferfabric.metrics_aggregator import CloudModelPrice
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([
+        _drow(now - 60, "z1", "glm-5", route="cloud:zhipu",
+              cloud_provider="zhipu", tin=0, tout=0),
+    ])
+    prices = {"glm-5": CloudModelPrice(price_input=2.0, price_output=8.0)}
+    report = build_monitor_report(db, window="1h", until=now, prices=prices)
+    assert report["totals"]["cost_coverage"] == "priced"
+    assert report["totals"]["cost_estimate"] == 0.0
+    assert report["models"][0]["cost_estimate"] == 0.0
+    # 桶位同步：cloud 子桶 priced → cost_estimate 0.0（不是 null）
+    assert report["series"][-1]["cloud"]["cost_estimate"] == 0.0
+
+
+def test_d1_series_sub_contract_keys_no_internal(tmp_path):
+    """终审 M1：series 三路子桶对外键集恰为契约五键（内部 cost/priced
+    剥离；unpriced 桶不得残留内部 cost: 0.0——形状必须与 priced 桶一致）。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([_drow(now - 60, "k1", "glm-5")])
+    report = build_monitor_report(db, window="1h", until=now)
+    contract_keys = {"requests", "tokens_in", "tokens_out",
+                     "tokens_in_cached", "cost_estimate"}
+    for b in report["series"]:
+        for loc in ("local", "cloud", "unknown"):
+            assert set(b[loc]) == contract_keys, (loc, sorted(b[loc]))
+
+
+def test_d1_agent_unknown_key_passthrough(tmp_path):
+    """终审 I1（服务端钉住）：生产「分类器未命中」键 unknown 原样成组
+    （不并入 unidentified——认领路径按该键走 monitor.js 专用分支）；
+    仅空串归 unidentified（历史/漏点）。"""
+    db = IFFDB(data_dir=tmp_path)
+    now = time.time()
+    db.insert_request_log([
+        _drow(now - 60, "u1", "glm-5", agent="unknown"),
+        _drow(now - 120, "u2", "glm-5", agent="unknown"),
+        _drow(now - 180, "u3", "glm-5", agent=""),
+    ])
+    report = build_monitor_report(db, window="1h", until=now)
+    agents = {a["agent"]: a for a in report["agents"]}
+    assert set(agents) == {"unknown", "unidentified"}
+    assert agents["unknown"]["requests"] == 2
+    assert agents["unidentified"]["requests"] == 1

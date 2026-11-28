@@ -31,7 +31,9 @@ DEFAULT_WINDOW = "24h"
 VALID_WINDOWS = frozenset(_WINDOWS)
 VALID_SCOPES = frozenset({"all", "local", "cloud"})
 
-# 报告契约版本（Task 7）：结构变更必须推进
+# 报告契约版本（Task 7）：结构变更必须推进。D1 增量为 additive（向后
+# 兼容：totals/models 增键、agents 新增顶层、series 增 local/cloud/unknown
+# 子桶——见 build_monitor_report docstring），消费方按缺键降级即可，版本不 bump
 REPORT_CONTRACT = "monitor-report/1"
 
 # 分页扫描页大小：query_request_log 默认 limit 会截断 10 万行窗口，
@@ -158,7 +160,15 @@ def _pool_name(row: dict) -> str | None:
 
 def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
                          scope: str = "all", prices: dict | None = None) -> dict:
-    """同快照监控报告：totals/models/series/pools/errors 共享区间与读快照。
+    """同快照监控报告：totals/models/agents/series/pools/errors 共享区间与读快照。
+
+    D1 增量（additive，向后兼容，contract 不 bump）：totals/models/agents 增
+    tokens_in_cached/cache_share；models/agents 增 cost_estimate（计价证据 =
+    cloud_provider 非空且 model ∈ prices，配价但成本真 0 仍为 priced/0.0；
+    未配价 → null）；顶层新增 agents[]（按行 agent 字段汇总，空串 →
+    "unidentified" 历史组，生产「分类器未命中」键 "unknown" 原样透传）；
+    series[] 每桶增 local/cloud/unknown 子字典（契约五键 requests/tokens_in/
+    tokens_out/tokens_in_cached/cost_estimate）。
 
     db 需提供 query_request_log(since, until=None, model=None, limit=N)
     （TelemetryHub 直通 db.py 即可）。扫描按键分页全量进行，不截断；
@@ -366,20 +376,24 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
 
             # 成本估算（终审 I5）：复用 cost_of_row 唯一计价入口
             # （¥/1M tokens，仅云端行）；无价格配置 = unpriced（null 而非 0）。
-            # D1：模型/agent/桶位逐级归集，priced 标记区分「未配价」与「真 0」
-            if prices:
+            # D1：模型/agent/桶位逐级归集。priced 证据 = cloud_provider 非空
+            # 且 model ∈ prices（终审 I4：与 cost_of_row 同判据，配价即证据——
+            # 用 c > 0 推断会把「配价但本窗口 token 全 0」误标 unpriced）。
+            # 注意按 row 原始 model 判断（cost_of_row 内部即读该键，池别名
+            # 解析不参与计价）。
+            if prices and row.get("cloud_provider") \
+                    and (row.get("model") or "") in prices:
                 c = cost_of_row(prices, row)
-                if c > 0:
-                    cost += c
-                    priced_tokens = True
-                    m["cost"] += c
-                    m["priced"] = True
-                    ag["cost"] += c
-                    ag["priced"] = True
-                    if isinstance(ts, (int, float)) and since <= ts < until:
-                        bsub = series[bisect.bisect_right(edges, ts) - 1][loc]
-                        bsub["cost"] += c
-                        bsub["priced"] = True
+                cost += c
+                priced_tokens = True
+                m["cost"] += c
+                m["priced"] = True
+                ag["cost"] += c
+                ag["priced"] = True
+                if isinstance(ts, (int, float)) and since <= ts < until:
+                    bsub = series[bisect.bisect_right(edges, ts) - 1][loc]
+                    bsub["cost"] += c
+                    bsub["priced"] = True
 
         if len(rows) < _PAGE_SIZE:
             break
@@ -444,11 +458,15 @@ def build_monitor_report(db, *, window: str = DEFAULT_WINDOW, until: float,
         pool_rows.append(p)
     pool_rows.sort(key=lambda p: -p["requests"])
 
-    # D1：series 桶位成本终值（priced 才有值）并剥离内部累加键
+    # D1：series 桶位成本终值（priced 才有值）并剥离内部累加键。
+    # 终审 M1：先 pop 两键再赋值——条件表达式写法会让 unpriced 桶残留
+    # 内部 cost: 0.0，对外形状必须与 priced 桶一致（契约五键）。
     for b in series:
         for loc in ("local", "cloud", "unknown"):
             sub = b[loc]
-            sub["cost_estimate"] = round(sub.pop("cost"), 6) if sub.pop("priced") else None
+            sub_cost = sub.pop("cost")
+            sub_priced = sub.pop("priced")
+            sub["cost_estimate"] = round(sub_cost, 6) if sub_priced else None
 
     errors = [{"class": c, "count": n}
               for c, n in sorted(error_counts.items(), key=lambda kv: -kv[1])[:_ERROR_TOP_N]]
