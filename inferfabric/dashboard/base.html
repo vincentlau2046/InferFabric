@@ -203,29 +203,30 @@
     <main class="if-main">
       <div class="if-main-inner">
 
-        <!-- GPU 遥测带（主角元素：5 段） -->
+        <!-- GPU 遥测带（主角元素：5 段；段 id 供能力门控显隐，默认标签中性，
+             首个快照后由 renderRail 按 memory_kind/能力重写） -->
         <div class="if-telemetry" id="telemetryRail">
-          <div class="tr-seg">
-            <span class="tr-label">VRAM</span>
+          <div class="tr-seg" id="trSegMem">
+            <span class="tr-label">内存</span>
             <span class="tr-value"><b id="trVram">—</b><span class="tr-unit"></span></span>
             <div class="tr-bar"><div class="tr-fill" id="trVramFill" style="width:0%"></div></div>
           </div>
-          <div class="tr-seg">
+          <div class="tr-seg" id="trSegUtil">
             <span class="tr-label">利用率</span>
             <span class="tr-value"><b id="trUtil">—</b><span class="tr-unit">%</span></span>
             <div class="tr-bar"><div class="tr-fill" id="trUtilFill" style="width:0%"></div></div>
           </div>
-          <div class="tr-seg">
+          <div class="tr-seg" id="trSegPwr">
             <span class="tr-label">功耗</span>
             <span class="tr-value"><b id="trPwr">—</b><span class="tr-unit">W</span></span>
             <div class="tr-bar"><div class="tr-fill" id="trPwrFill" style="width:0%"></div></div>
           </div>
-          <div class="tr-seg">
+          <div class="tr-seg" id="trSegTemp">
             <span class="tr-label">温度</span>
             <span class="tr-value"><b id="trTemp">—</b><span class="tr-unit">°C</span></span>
             <div class="tr-bar"><div class="tr-fill" id="trTempFill" style="width:0%"></div></div>
           </div>
-          <div class="tr-seg">
+          <div class="tr-seg" id="trSegClock">
             <span class="tr-label">时钟</span>
             <span class="tr-value"><b id="trClock">—</b><span class="tr-unit">GHz</span></span>
             <div class="tr-bar"><div class="tr-fill" id="trClockFill" style="width:0%"></div></div>

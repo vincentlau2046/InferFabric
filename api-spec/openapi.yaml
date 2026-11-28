@@ -881,9 +881,14 @@ paths:
           description: Full snapshot
           headers:
             ETag:
-              description: Content hash of the control plane (status + models)
+              description: Content hash of the control plane (all field groups; device values/capabilities invalidate, device sampling timestamp alone does not)
               schema:
                 type: string
+            X-IFF-Device-Sample-Age:
+              description: Age in whole seconds (non-negative) of the served device sample at send time — present on 200 and 304 alike; omitted when no trustworthy sample timestamp exists (treat freshness as unconfirmed, never assume 304 means a fresh sample)
+              schema:
+                type: integer
+                minimum: 0
             Cache-Control:
               schema:
                 type: string
@@ -891,12 +896,20 @@ paths:
             application/json:
               schema:
                 $ref: ./components/schemas.yaml#/SnapshotResponse
+              # device 信封示例见 components/schemas.yaml#/DeviceSnapshotEnvelope
+              # （F10: 示例须满足所挂 schema 的必填集，SnapshotResponse 还
+              #   要求 ts/rev/etag/status/system/models，device-only 片段无效）
         "304":
           description: Not modified — control plane unchanged, client keeps last state
           headers:
             ETag:
               schema:
                 type: string
+            X-IFF-Device-Sample-Age:
+              description: Same contract as the 200 header — do NOT interpret 304 as a fresh sample
+              schema:
+                type: integer
+                minimum: 0
         "500":
           $ref: '#/components/responses/ServerError'
 

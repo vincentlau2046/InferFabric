@@ -151,6 +151,22 @@ def _snapshot_etag(payload: dict) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _device_sample_age(dev_snap, now: float):
+    """C 期契约 §C2：发送时对该份采样计算的非负整数秒。
+
+    dev_snap 是 TelemetryHub 15s 缓存的同一份读数（200/304 同源）；
+    timestamp 不可信（缺失/非数值）→ None，头省略（前端标「新鲜度未确认」，
+    不假定 304 即新采样）。未来时间戳（时钟偏斜）截断为 0。
+    """
+    try:
+        ts = getattr(dev_snap, "timestamp", None)
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+            return None
+        return max(0, int(now - float(ts)))
+    except Exception:
+        return None
+
+
 class _ExpensiveCache:
     """C2: 昂贵采集（mgr.status 健康探测 + metrics 24h 扫描）的 TTL 单飞缓存。
 
@@ -1848,6 +1864,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         exp = exp_cache.get_or_refresh(lambda: _compute_expensive(pm))
         # copy: the cached dict must not be mutated by the refill below
         status = dict(exp.get("status") or {})
+        # F7: 在途切换指示的实时性 —— status 出自 15s 昂贵缓存，switch_target
+        # 须每轮以 state 即时值覆盖（切换开始/结束最迟下一轮轮询可见）。
+        try:
+            status["switch_target"] = pm.mgr.state.get("switching_target") or None
+        except Exception:
+            pass
         metrics_24h = exp.get("metrics_24h") or {}
 
         # DeviceTelemetry T5: ONE cached reading (15s TTL, one probe per
@@ -1917,12 +1939,20 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         payload = {"ts": now, "rev": etag_raw[:8], "etag": etag, **content}
 
+        # C 期契约 §C2：200/304 均带采样年龄头（同一份 15s 缓存采样）；
+        # 无可信时间戳 → 头省略，前端标「新鲜度未确认」。
+        # F3: 年龄按发送时刻计算（handler 起点的 now 早于组装完成，
+        # 组装耗时不得低估年龄）。
+        sample_age = _device_sample_age(dev_snap, time.time())
+
         inm = self.headers.get("If-None-Match", "")
         if inm:
             parts = [p.strip() for p in inm.split(",")]
             if etag in parts or etag_raw in parts:
                 self.send_response(304)
                 self.send_header("ETag", etag)
+                if sample_age is not None:
+                    self.send_header("X-IFF-Device-Sample-Age", str(sample_age))
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 return
@@ -1932,6 +1962,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("ETag", etag)
+        if sample_age is not None:
+            self.send_header("X-IFF-Device-Sample-Age", str(sample_age))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()

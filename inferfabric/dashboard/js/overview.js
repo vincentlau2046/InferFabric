@@ -29,11 +29,6 @@
 
   var $ = function (id) { return document.getElementById(id); };
 
-  /* 客户端会话级 uptime 观察：模型首次被观察到 running 时记录开始时间。
-   * 后端未暴露进程真实启动时间，此值为"本次页面会话观察到的运行时长"，
-   * 页面刷新后从 0 重新计数（真实 uptime ≥ 此值）。Task 6 接 doModelAction 时可复核。 */
-  var _startedAt = {};
-
   /* 异常拉取节流：避免每 3s 轮询都打 /api/anomalies */
   var _lastAnomFetch = 0;
   var _anomCache = null;
@@ -97,26 +92,52 @@
 
   /* ── 1. GPU 遥测带（全局 shell 元素，每个快照都刷新，不限定 tab） ── */
   function renderRail() {
-    var gpu = store.get('gpu') || {};
     var util = store.get('gpu_util') || {};
-    // DeviceTelemetry T5: memory_kind 驱动标签与语义；null = 不可用 → '—'
-    // 或不填充，绝不画 0。量级条无固定设备额定上限（已改为 no-scale 空态）。
-    var kind = store.get('memory_kind') || 'unknown';
+    var dev = store.get('device');
+    var devSnap = dev && dev.snapshot;
+    var caps = (dev && dev.capabilities) || store.get('capabilities') || {};
+    var kind = (devSnap && devSnap.memory_kind) || store.get('memory_kind') || 'unknown';
+    // device 信封在场 = 快照供数可用（F5）
+    var snapFed = !!(devSnap && typeof devSnap === 'object');
 
-    var used = gpu.used, total = gpu.total;
-    var vramPct = (gpu.pct != null) ? gpu.pct : 0;
+    // F5: 内存段真值 —— device 快照优先（统一内存 = 物理总量，非推理
+    // 预算；used 缺失但总量可信 → 「— / 总量」）；旧响应无 device →
+    // 回退 legacy gpu 映射（行为不变）。
+    var used, total;
+    if (snapFed) {
+      used = devSnap.memory_used_mb;
+      total = devSnap.memory_total_mb;
+    } else {
+      var gpu = store.get('gpu') || {};
+      used = gpu.used;
+      total = gpu.total;
+    }
+
     var vram = $('trVram');
     if (vram) {
       vram.textContent = (used == null) ? '—' : UI.fmtGB(used);
-      var seg = vram.closest ? vram.closest('.tr-seg') : null;
-      if (seg) {
-        var lbl = seg.querySelector('.tr-label');
-        if (lbl) lbl.textContent = (kind === 'unified') ? '统一内存' : 'VRAM';
-        var unit = seg.querySelector('.tr-unit');
-        if (unit) unit.textContent = (total != null) ? ('/ ' + UI.fmtGB(total)) : '';
+      var segMem = $('trSegMem');
+      if (segMem) {
+        var lbl = segMem.querySelector('.tr-label');
+        if (lbl) lbl.textContent = (kind === 'unified') ? '统一内存' : (kind === 'vram' ? 'VRAM' : '内存');
+        var unit = segMem.querySelector('.tr-unit');
+        if (unit) unit.textContent = (total != null && total > 0) ? ('/ ' + UI.fmtGB(total)) : '';
       }
     }
-    setFill('trVramFill', vramPct);
+    setFill('trVramFill', (used != null && total > 0) ? (used / total * 100) : 0);
+
+    // F5: device 信封在场 → 未声明能力的段不占位；旧响应不做能力
+    // 隐藏（无能力信息可依，保持既有行为）。
+    if (snapFed) {
+      function segVisible(id, capOk) {
+        var seg = $(id);
+        if (seg) seg.style.display = capOk ? '' : 'none';
+      }
+      segVisible('trSegUtil', !!caps.utilization);
+      segVisible('trSegPwr', !!caps.power);
+      segVisible('trSegTemp', !!caps.temperature);
+      segVisible('trSegClock', !!caps.clock);
+    }
 
     var utilPct = (util.pct == null) ? null : util.pct;
     var utilEl = $('trUtil');
@@ -160,14 +181,8 @@
     var quant = detail && detail.quantization ? detail.quantization : '';
     var ctx = detail && detail.context_window != null ? detail.context_window : null;
 
-    // 客户端 uptime
-    var now = Date.now();
-    if (!sleeping) {
-      if (!_startedAt[name]) _startedAt[name] = now;
-    } else {
-      delete _startedAt[name];
-    }
-    var upSecs = _startedAt[name] ? Math.max(0, Math.floor((now - _startedAt[name]) / 1000)) : 0;
+    // C 期契约 §C3：后端未暴露可信启动时刻，不把浏览器打开时间算作模型
+    // 运行时长 —— 不显示 uptime，而非显示会话时长冒充。
 
     var dotCls = sleeping ? 'warn' : 'ok';
     var stateTxt = sleeping ? ('sleeping ' + String(sleepState).toUpperCase()) : 'running';
@@ -185,7 +200,6 @@
           (port != null ? '<span class="if-card-sub">端口 <span class="mono">:' + escHtml(port) + '</span></span>' : '') +
         '</div>' +
         '<dl class="ov-stats">' +
-          '<div class="ov-stat"><dt>uptime</dt><dd class="mono">' + UI.fmtDur(upSecs) + '</dd></div>' +
           '<div class="ov-stat"><dt>context</dt><dd class="mono">' + fmtCtx(ctx) + ' <span class="muted">tokens</span></dd></div>' +
           '<div class="ov-stat"><dt>precision</dt><dd class="mono">' + (quant ? escHtml(quant) : '—') + '</dd></div>' +
         '</dl>' +
@@ -214,11 +228,6 @@
     var active = store.get('active_services') || [];
     var info = store.get('services_info') || {};
     var sleep = store.get('sleep_states') || {};
-
-    // 清理已不活跃模型的 uptime 记录
-    var live = {};
-    for (var k in _startedAt) live[k] = active.indexOf(k) >= 0;
-    for (var kk in live) if (!live[kk]) delete _startedAt[kk];
 
     if (!active.length) {
       card.innerHTML =
@@ -274,7 +283,8 @@
         var models = scopeData[date] || {};
         var total = 0;
         for (var m in models) {
-          if (models[m] && models[m].requests) total += models[m].requests;
+          var q = models[m] && Number(models[m].requests);
+          if (Number.isFinite(q) && q > 0) total += Math.floor(q);
         }
         byDate[date] = (byDate[date] || 0) + total;
       }
@@ -307,13 +317,16 @@
       ptsArr.push(x.toFixed(1) + ',' + y.toFixed(1));
     }
     var pts = ptsArr.join(' ');
-    var todayTotal = recent[recent.length - 1].total;
+    // F12: 尾点日期 == UTC 今日才写「今日」，否则写尾点日期（不冒充当天）
+    var lastDay = recent[recent.length - 1];
+    var todayTotal = lastDay.total;
+    var capLabel = (lastDay.date === utcToday()) ? '今日' : escHtml(lastDay.date);
 
     body.innerHTML =
       '<svg class="ov-spark" viewBox="0 0 240 60" preserveAspectRatio="none" aria-label="请求趋势 sparkline">' +
         '<polyline class="spark-line" points="' + pts + '"/>' +
       '</svg>' +
-      '<div class="spark-caption"><b>' + UI.fmtNum(todayTotal) + '</b> <span class="muted">req · 今日</span></div>';
+      '<div class="spark-caption"><b>' + UI.fmtNum(todayTotal) + '</b> <span class="muted">req · ' + capLabel + '</span></div>';
   }
 
   /* ── 4. 最近异常 top3 ── */
@@ -386,10 +399,224 @@
       });
   }
 
+  /* ── C2: 设备遥测（能力门控，契约 §C1）──
+   * 平台适配层供数、UI 按能力消费：memory_kind 决定标签，capabilities 门控
+   * 行卡，真 0 照实显示，null「暂不可用」，不按 OS 名写死版式；未声明能力
+   * 不占默认卡片。采样年龄徽章按 X-IFF-Device-Sample-Age（store 跟踪），
+   * >30s 过期，无头「新鲜度未确认」，不由轮询频率反推。 */
+  var NA_HTML = '<span class="muted">暂不可用</span>';
+
+  function pressureLabel(lv) {
+    if (lv === 1) return '正常';
+    if (lv === 2) return '警告';
+    if (lv === 3) return '严重';
+    return null;
+  }
+
+  function teleRow(label, valueHtml) {
+    return '<div class="ov-stat"><dt>' + label + '</dt><dd class="mono">' + valueHtml + '</dd></div>';
+  }
+
+  /* F4: 新鲜度徽章按本地时钟自走（1s）—— 轮询在途/挂起时走表不冻结
+   * （徽章是「同一份采样在变老」的本地累加，不依赖下一次响应）。 */
+  function updateFreshBadge() {
+    var fresh = $('ovTeleFresh');
+    if (!fresh) return;
+    var age = store.deviceSampleAge ? store.deviceSampleAge() : null;
+    if (age == null) fresh.textContent = '新鲜度未确认';
+    else if (age > 30) fresh.textContent = '读数已过期 ' + Math.floor(age) + 's';
+    else fresh.textContent = '采样 ' + Math.floor(age) + 's 前';
+  }
+
+  function renderTelemetry() {
+    var card = $('ovTelemetry');
+    if (!card) return;
+    var body = $('ovTeleBody');
+    updateFreshBadge();
+    if (!body) return;
+
+    var dev = store.get('device');
+    var snap = dev && dev.snapshot;
+    if (!dev || !snap || typeof snap !== 'object') {
+      body.innerHTML = '<p class="muted">设备遥测不可用（旧接口或资料未知）。' +
+        '连接与健康状态不受影响。</p>';
+      return;
+    }
+    var caps = (dev && dev.capabilities) || store.get('capabilities') || {};
+    var rows = '';
+    if (caps.memory) {
+      // memory_kind 决定标签；total 无效时只展示有证据的值，不画比例
+      var kind = snap.memory_kind;
+      var memLabel = (kind === 'unified') ? '统一内存'
+        : (kind === 'vram' ? 'VRAM' : '设备内存');
+      var used = snap.memory_used_mb, total = snap.memory_total_mb;
+      var memVal = (used == null) ? NA_HTML
+        : UI.fmtGB(used) + ((total != null && total > 0)
+          ? ' <span class="muted">/ ' + UI.fmtGB(total) + ' GB</span>' : '');
+      rows += teleRow(memLabel, memVal);
+      // 推理预算单列：不是实时剩余量、物理总量或启动承诺
+      var budget = snap.memory_budget_mb;
+      rows += teleRow('推理预算',
+        (budget == null) ? NA_HTML : UI.fmtGB(budget) + ' <span class="muted">GB</span>');
+    }
+    if (caps.pressure) {
+      var pl = pressureLabel(snap.pressure_level);
+      rows += teleRow('内存压力', (pl == null) ? NA_HTML : pl);
+    }
+    if (caps.utilization) {
+      var u = snap.utilization_pct;
+      rows += teleRow('利用率', (u == null) ? NA_HTML : UI.fmtNum(Math.round(u)) + '%');
+    }
+    if (caps.power) {
+      var p = snap.power_w;
+      rows += teleRow('功耗', (p == null) ? NA_HTML : UI.fmtNum(Math.round(p)) + ' <span class="muted">W</span>');
+    }
+    if (caps.temperature) {
+      var t = snap.temperature_c;
+      rows += teleRow('温度', (t == null) ? NA_HTML : UI.fmtNum(Math.round(t)) + ' <span class="muted">°C</span>');
+    }
+    if (caps.clock) {
+      var c = snap.clock_mhz;
+      rows += teleRow('频率', (c == null) ? NA_HTML : UI.fmtNum(Math.round(c)) + ' <span class="muted">MHz</span>');
+    }
+    if (!rows) {
+      body.innerHTML = '<p class="muted">此设备后端未声明可采集的指标。' +
+        '连接与健康状态不受影响。</p>';
+      return;
+    }
+    body.innerHTML = '<dl class="ov-stats ov-tele">' + rows + '</dl>';
+  }
+
+  /* ── C2: 态势（契约 §C3）──
+   * UTC 当天请求数（token_stats.local/cloud 日桶，桶缺失 = 真 0）、
+   * 已保留警告（内存环形缓冲区，非完整日计数）、最近五条（只统计所显示
+   * 条数，详情跳 #/requests）、空闲快捷项（history 成功到达的最近三个
+   * 去重模型）、切换中指示。system.uptime_seconds 不挂「网关运行时长」。 */
+  function utcToday() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function fmtTimeOfDay(ts) {
+    var d = new Date(Number(ts) * 1000);
+    if (isNaN(d.getTime())) return '—';
+    return d.toISOString().slice(11, 19);
+  }
+
+  function renderSituation() {
+    var card = $('ovSituation');
+    if (!card) return;
+    var body = $('ovSitBody');
+    if (!body) return;
+
+    body.innerHTML =
+      '<dl class="ov-stats ov-sit">' +
+        '<div class="ov-stat"><dt>今日请求 <span class="muted">UTC</span></dt>' +
+          '<dd class="mono" id="ovReqToday">—</dd></div>' +
+        '<div class="ov-stat"><dt>警告 <span class="muted">已保留</span></dt>' +
+          '<dd class="mono" id="ovWarnCount">—</dd></div>' +
+        '<div class="ov-stat"><dt>最近请求</dt>' +
+          '<dd class="mono">最近 5 条</dd></div>' +
+      '</dl>' +
+      '<div id="ovSwitchLine" class="muted"></div>' +
+      '<div id="ovIdleShortcuts" class="ov-shortcuts"></div>' +
+      '<ul class="ov-req5" id="ovRecent5"></ul>';
+
+    // 切换中（switch_target 在途）
+    var target = store.get('switch_target');
+    var swLine = $('ovSwitchLine');
+    if (swLine) swLine.textContent = target ? ('切换中 → ' + target) : '';
+
+    // UTC 当天请求数（F12: 数值强制按数累加，字符串数字不得拼接）
+    var today = utcToday();
+    var stats = store.get('token_stats') || {};
+    var n = 0;
+    for (var scope in stats) {
+      var day = stats[scope] && stats[scope][today];
+      if (day && typeof day === 'object') {
+        for (var m in day) {
+          var q = day[m] && Number(day[m].requests);
+          if (Number.isFinite(q) && q > 0) n += Math.floor(q);
+        }
+      }
+    }
+    var reqEl = $('ovReqToday');
+    if (reqEl) reqEl.textContent = UI.fmtNum(n);
+
+    // 已保留警告（severity=warning 环形缓冲）— F6: limit=500 取环形
+    // 全量；回调时按 id 重取节点（渲染可能在响应前重建过骨架）。
+    fetch('/api/anomalies?severity=warning&limit=500', { cache: 'no-store' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var el2 = $('ovWarnCount');
+        if (el2) el2.textContent = UI.fmtNum(
+          (data && data.count != null) ? data.count
+            : ((data && data.events && data.events.length) || 0));
+      })
+      .catch(function () { var el2 = $('ovWarnCount'); if (el2) el2.textContent = '—'; });
+
+    // 空闲快捷项：history 中成功到达、仍在目录的最近三个去重模型。
+    // F1: 真实行形状 = {from,to,...}（db.py），状态须显式成功，且模型
+    // 仍可切换（在 models 目录中）才可推荐。
+    var sc = $('ovIdleShortcuts');
+    if (sc) {
+      var active = store.get('active_services') || [];
+      if (!active.length) {
+        var hist = store.get('history') || [];
+        var models = store.get('models') || [];
+        var seen = {}, picks = [];
+        for (var i = 0; i < hist.length && picks.length < 3; i++) {
+          var h = hist[i] || {};
+          var name = h.to || h.model || h.name || '';
+          var st = String(h.status || '').toLowerCase();
+          if (!name || seen[name]) continue;
+          if (!st || (st !== 'ok' && st !== 'success' && st !== 'switched')) continue;
+          var inCatalog = false;
+          for (var k = 0; k < models.length; k++) {
+            if (models[k] && models[k].name === name) { inCatalog = true; break; }
+          }
+          if (!inCatalog) continue;
+          seen[name] = 1;
+          picks.push(name);
+        }
+        sc.innerHTML = picks.length
+          ? '<span class="muted">快速切换：</span>' + picks.map(function (p) {
+              return '<button class="btn btn-sec btn-sm" data-action="goto-inference" data-model="' + escHtml(p) + '">' + escHtml(p) + '</button>';
+            }).join('')
+          : '';
+      } else {
+        sc.innerHTML = '';
+      }
+    }
+
+    // 最近五条（只统计所显示条数；F9: status 原文转义后进徽章）
+    var r5 = $('ovRecent5');
+    if (r5) {
+      var logs = store.get('request_log') || [];
+      var five = logs.slice(0, 5);
+      var lis = '';
+      for (var j = 0; j < five.length; j++) {
+        var r = five[j] || {};
+        var stNum = (r.status == null) ? null : Number(r.status);
+        var cls = (stNum == null || !isFinite(stNum)) ? ''
+          : (stNum >= 500 ? 'crit' : (stNum >= 400 ? 'warn' : 'ok'));
+        lis += '<li class="ov-req-row"><span class="mono">' + escHtml(fmtTimeOfDay(r.timestamp)) + '</span>' +
+          ' <span>' + escHtml(r.model || '—') + '</span>' +
+          ' <span class="badge' + (cls ? ' ' + cls : '') + '">' + (r.status == null || r.status === '' ? '—' : escHtml(String(r.status))) + '</span></li>';
+      }
+      // F13: 快照请求日志只含最近 1 小时 —— 空态如实注明口径
+      r5.innerHTML = lis || '<li class="muted">暂无最近 1 小时请求</li>';
+    }
+  }
+
   /* ── 总览页渲染入口 ── */
   function renderOverview() {
     renderActive();
     renderSpark();
+    renderTelemetry();
+    renderSituation();
     renderAnoms();
   }
   window.renderOverview = renderOverview;
@@ -405,13 +632,24 @@
       ? store.isGroupActive('tab-overview') : (tab === 'tab-overview');
     if (on) { renderRail(); renderOverview(); }
   });
+  // F4: 徽章本地走表 —— 只在状态页可见时重算，且只碰文本节点
+  setInterval(function () {
+    if (isOverviewActive()) updateFreshBadge();
+  }, 1000);
 
   /* ── 5. 系统操作：release / reconcile / reload / reset ── */
+  // F11: 上游诊断原文截断后进 toast（去换行、限长），不整段透出
+  function trimMsg(m) {
+    var s = String(m == null ? '' : m).replace(/\s+/g, ' ').trim();
+    return s.length > 120 ? s.slice(0, 117) + '…' : s;
+  }
+
   window.doSystemOps = async function (action) {
     var OPS = {
       release: {
         url: '/switch', body: { model: 'idle' },
-        confirm: { title: '释放 GPU', body: '释放 GPU，停止当前独占模型。确定？', danger: true },
+        // F8: 共享模式下会停多个在役模型 —— 文案如实覆盖
+        confirm: { title: '释放 GPU', body: '释放 GPU，停止当前全部在役模型（共享模式下可能是多个）。确定？', danger: true },
         ok: 'GPU 已释放',
       },
       reconcile: {
@@ -441,15 +679,38 @@
         if (!res.ok) {
           var msg = 'HTTP ' + res.status;
           try {
-            var j = await res.json();
-            if (j) msg = j.error || j.message || msg;
+            var j0 = await res.json();
+            if (j0) msg = j0.error || j0.message || msg;
           } catch (_) {}
           throw new Error(msg);
         }
-        UI.toast(op.ok, 'ok');
+        // C 期契约 §C3 严格结果判定：200 业务失败不报成功。
+        // F8: 200 但响应体不可解析 = 结果无法确认 → 不报成功；
+        // release 白名单无 `j && j.status` 逃逸（缺 status 即不通过）。
+        var j = null;
+        try { j = await res.json(); } catch (_) {}
+        if (j == null) {
+          throw new Error('操作结果无法确认，请刷新状态核对');
+        }
+        if (j.status === 'error') {
+          throw new Error(j.message || j.error || '操作未成功，请刷新状态确认');
+        }
+        if (action === 'release' &&
+            j.status !== 'switched' && j.status !== 'already_active') {
+          // 释放 GPU = switch→idle：未到 idle 不报成功
+          throw new Error(j.message || ('释放未完成（' + (j.status || '无状态') + '）'));
+        }
+        if (action === 'reload' && j.failed && j.failed.length) {
+          UI.toast('配置部分重载失败（' + j.failed.length + ' 项）', 'error');
+          store.forceRefresh();
+          return;
+        }
+        var okMsg = op.ok;
+        if (action === 'reconcile' && j.status) okMsg = op.ok + '（' + j.status + '）';
+        UI.toast(okMsg, 'ok');
         store.forceRefresh();
       } catch (e) {
-        UI.toast('操作失败: ' + (e && e.message ? e.message : e), 'error');
+        UI.toast('操作失败: ' + trimMsg(e && e.message ? e.message : e), 'error');
       }
     };
 
@@ -504,6 +765,17 @@
       if (!link || !anomCard.contains(link)) return;
       ev.preventDefault();
       store.switchTab('tab-anomaly');
+    });
+  }
+
+  // F1: 态势卡空闲快捷项 → 推理页（委托挂在卡片上，快捷项重渲后仍有效）
+  var sitCard = $('ovSituation');
+  if (sitCard) {
+    sitCard.addEventListener('click', function (ev) {
+      var btn = ev.target.closest('[data-action="goto-inference"]');
+      if (!btn || !sitCard.contains(btn)) return;
+      ev.preventDefault();
+      store.switchTab('tab-inference');
     });
   }
 })();

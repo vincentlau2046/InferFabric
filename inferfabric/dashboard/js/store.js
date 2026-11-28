@@ -47,6 +47,40 @@ class StateStore {
     // Snapshot sync metadata
     this._etag = null;   // last etag received from /api/snapshot
     this._lastTs = 0;    // last (monotonic) snapshot timestamp
+    this._sampleFloor = null; // F3: 单调下限 —— 新锚重置，锚间只升不降
+  }
+
+  /* ── C 期：设备采样年龄（契约 §C2：三时钟分开）──
+   * X-IFF-Device-Sample-Age 由服务端在发送时对「同一份 15s 缓存采样」计算
+   * （200/304 均带）；前端按接收时刻累加本地流逝，不由轮询频率反推。
+   * 无头 = 新鲜度未确认（可显示最近收到的旧数据，但不假定 304 即新采样）。 */
+  _readSampleAge(res) {
+    try {
+      const h = res && res.headers && typeof res.headers.get === 'function'
+        ? res.headers.get('X-IFF-Device-Sample-Age') : null;
+      if (h == null) return null;
+      const n = Number(h);
+      return (isFinite(n) && n >= 0) ? Math.floor(n) : null;
+    } catch (_) { return null; }
+  }
+
+  _setSampleAge(age) {
+    // F3: 新锚重置单调下限（新采样到达允许合法下降）
+    this._sampleFloor = (age == null) ? null : age;
+    this.set('device_sample', age == null
+      ? { age: null, at: null }
+      : { age: age, at: Date.now() / 1000 });
+  }
+
+  deviceSampleAge() {
+    const s = this.get('device_sample');
+    if (!s || s.age == null || s.at == null) return null;
+    const computed = s.age + Math.max(0, Date.now() / 1000 - s.at);
+    // F3: 墙钟（Date.now）非单调 —— 锚间读数只升不降；新锚已重置下限
+    if (this._sampleFloor == null || computed > this._sampleFloor) {
+      this._sampleFloor = computed;
+    }
+    return this._sampleFloor;
   }
 
   /* ── Core pub/sub ── */
@@ -105,6 +139,9 @@ class StateStore {
         // lastOk = 最近一次成功响应（304 也算"在线"）；ts 仍是最近一次 200 数据时间。
         // 两者分离：稳态下连续 304 不再触发"已断线"（C1 附带：store.js:353 误报）。
         this.set('api_error', null);
+        // C: 304 带年龄头 → 服务端真值重锚（同一份采样在变老）；无头 → 保持现状
+        const age304 = this._readSampleAge(res);
+        if (age304 != null) this._setSampleAge(age304);
         this.set('sync_meta', {
           etag: this._etag,
           rev: (this._etag || '').slice(1, 9) || '',
@@ -119,13 +156,14 @@ class StateStore {
       const snap = await res.json();
 
       // Out-of-order guard: drop stale responses (ts regressed).
+      // F2: 被丢弃的响应不得改写正在显示样本的 etag/采样年龄 ——
+      // staleness 先判，提交只发生在非 stale 路径（显示中的样本继续按原锚变老）。
+      const incomingEtag = snap.etag || null;
+      const incomingAge = this._readSampleAge(res);
       const stale = !force && snap.ts != null && this._lastTs > 0 && snap.ts <= this._lastTs;
-      this._etag = snap.etag || null;
-      this._lastTs = Math.max(this._lastTs, snap.ts || 0);
-      this.set('api_error', null);
-
       if (stale) {
         console.warn('[state] out-of-order snapshot dropped (ts', snap.ts, '<= last', this._lastTs);
+        this.set('api_error', null);
         this.set('sync_meta', {
           etag: this._etag,
           rev: (this._etag || '').slice(1, 9) || '',
@@ -135,6 +173,11 @@ class StateStore {
         });
         return snap;
       }
+      // C: 200 重新锚定采样年龄；无头 → 未确认（覆盖旧值）
+      this._etag = incomingEtag;
+      this._setSampleAge(incomingAge);
+      this._lastTs = Math.max(this._lastTs, snap.ts || 0);
+      this.set('api_error', null);
 
       const status = snap.status || {};
       const sys = snap.system || {};

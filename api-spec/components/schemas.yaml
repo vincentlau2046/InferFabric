@@ -851,3 +851,154 @@ SnapshotResponse:
           type: array
           items:
             type: string
+    device:
+      $ref: '#/DeviceSnapshotEnvelope'
+
+# ── C 期：设备遥测（契约 §C1）────────────────────────────────
+# 数据合同见 inferfabric/platform/telemetry.py（DeviceSnapshot / DeviceCapabilities）。
+# platform/accelerator 是采集后端身份提示，不等于硬件已探测成功；
+# memory_kind 决定标签；capabilities 是该后端支持的项，本次是否有数据看字段值；
+# None = 不可用（永不伪造 0）。device 对旧响应兼容可缺。
+
+DeviceSnapshotEnvelope:
+  type: object
+  required: [snapshot, capabilities]
+  properties:
+    snapshot:
+      $ref: '#/DeviceSnapshot'
+    capabilities:
+      $ref: '#/DeviceCapabilities'
+  examples:
+    - summary: Apple Silicon — unified memory + pressure, no NVIDIA metrics
+      value:
+        snapshot:
+          platform: darwin
+          accelerator: apple_silicon
+          memory_kind: unified
+          memory_used_mb: 12345
+          memory_total_mb: 32768
+          memory_budget_mb: 24576
+          utilization_pct: null
+          power_w: null
+          temperature_c: null
+          clock_mhz: null
+          pressure_level: 1
+          timestamp: 1764300000.0
+          sources:
+            memory_used_mb: vm_stat
+            memory_total_mb: sysctl
+            pressure_level: sysctl
+        capabilities:
+          memory: true
+          utilization: false
+          power: false
+          temperature: false
+          clock: false
+          pressure: true
+          reset: false
+    - summary: Linux + NVIDIA — five GPU metrics, aggregated
+      value:
+        snapshot:
+          platform: linux
+          accelerator: nvidia
+          memory_kind: vram
+          memory_used_mb: 8192
+          memory_total_mb: 32768
+          memory_budget_mb: 28672
+          utilization_pct: 12.0
+          power_w: 96.0
+          temperature_c: 48.5
+          clock_mhz: 2595
+          pressure_level: null
+          timestamp: 1764300000.0
+          sources:
+            memory_used_mb: nvidia-smi
+            utilization_pct: nvidia-smi
+        capabilities:
+          memory: true
+          utilization: true
+          power: true
+          temperature: true
+          clock: true
+          pressure: false
+          reset: true
+
+DeviceCapabilities:
+  type: object
+  description: |
+    Static per-backend capability flags. A true flag does NOT guarantee a
+    value on this read — per-read availability is expressed by the snapshot
+    fields being null. Declared-unsupported metrics must not occupy a
+    default card in the UI.
+  properties:
+    memory:
+      type: boolean
+    utilization:
+      type: boolean
+    power:
+      type: boolean
+    temperature:
+      type: boolean
+    clock:
+      type: boolean
+    pressure:
+      type: boolean
+    reset:
+      type: boolean
+      description: Destructive device reset capability (NVIDIA-only this phase)
+
+DeviceSnapshot:
+  type: object
+  required: [platform, accelerator, memory_kind, timestamp]
+  description: One timestamped device reading; null = unavailable, never 0.
+  properties:
+    platform:
+      type: string
+      description: Sampling backend OS identity hint (darwin | linux | other)
+    accelerator:
+      type: string
+      description: Backend identity hint (apple_silicon | nvidia | unknown) — NOT proof of successful hardware probing
+    memory_kind:
+      type: string
+      enum: [unified, vram, unknown]
+      description: Decides the UI label — unified (Apple 整机统一内存) | vram (NVIDIA 聚合显存) | unknown
+    memory_used_mb:
+      type: integer
+      nullable: true
+      description: "Used memory MiB (unified: vm_stat 水位；vram: nvidia-smi 已用，多卡聚合)"
+    memory_total_mb:
+      type: integer
+      nullable: true
+      description: "PHYSICAL total MiB (unified: sysctl hw.memsize；vram: nvidia-smi 总显存) — never the budget"
+    memory_budget_mb:
+      type: integer
+      nullable: true
+      description: "Schedulable inference budget MiB (Apple: B=RAM−系统保留；NVIDIA: 策略上限) — not realtime-free, not the physical total"
+    utilization_pct:
+      type: number
+      nullable: true
+      description: GPU utilization % (NVIDIA; Apple 无已验证来源，本期不采)
+    power_w:
+      type: number
+      nullable: true
+      description: GPU power W (NVIDIA 多卡求和)
+    temperature_c:
+      type: number
+      nullable: true
+      description: GPU temperature °C (NVIDIA 多卡平均)
+    clock_mhz:
+      type: integer
+      nullable: true
+      description: GPU clock MHz (NVIDIA 多卡平均)
+    pressure_level:
+      type: integer
+      nullable: true
+      description: Memory pressure level — 1 正常 / 2 警告 / 3 严重 (Apple Silicon only; NVIDIA 后端不支持)
+    timestamp:
+      type: number
+      description: Backend sampling-attempt time (epoch seconds). Volatile-only in the ETag — a changed timestamp alone keeps 304 reachable.
+    sources:
+      type: object
+      additionalProperties:
+        type: string
+      description: Field -> probe name for fields that have a source this read
