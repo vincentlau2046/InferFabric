@@ -123,6 +123,23 @@ def _make_handler(headers=None):
     return h
 
 
+def _make_real_handler(headers=None):
+    """同 _make_handler，但不桩 _system_info —— 用真实 /proc 读取路径
+    （7.12.20 ETag 假绿回归：uptime 每秒 +1 / cpu 小数抖动不得破坏 304）。"""
+    h = ProxyHandler.__new__(ProxyHandler)
+    h.headers = headers or {}
+    h.path = "/api/snapshot"
+    h.command = "GET"
+    h._records = []
+    h._headers = []
+    h._bodies = []
+    h.send_response = lambda code: h._records.append(("status", code))
+    h.send_header = lambda k, v: h._headers.append((k, v))
+    h.end_headers = lambda: None
+    h._safe_write = lambda body: h._bodies.append(body)
+    return h
+
+
 def _last_status(h):
     return [c for kind, c in h._records if kind == "status"][-1]
 
@@ -327,6 +344,77 @@ class TestDeviceEtagPinning:
         h2 = _make_handler(headers={"If-None-Match": etag1})
         h2._handle_snapshot(pm)
         assert _last_status(h2) == 304, "仅采样时间变化必须仍可 304"
+
+    # ── 7.12.20 F-A：system 纯钟/负载字段不得让 304 永不命中 ──
+
+    def test_system_uptime_tick_same_etag(self):
+        """uptime_seconds 每秒 +1（纯钟字段、dashboard 不渲染）→ 同 ETag。"""
+        base = {"gpu_temp_c": 45.0, "uptime_seconds": 214102, "cpu_percent": 70.5}
+        e1 = handler_module._snapshot_etag(_content_payload(system=base))
+        e2 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "uptime_seconds": 214105}))
+        assert e1 == e2, "uptime 走表不得改变 ETag（否则 3s 轮询 304 永不命中）"
+
+    def test_system_cpu_subinteger_jitter_same_etag(self):
+        """cpu_percent 0.1 位抖动 → 同 ETag（哈希按整数量化）；
+        整数位变化 → 失效（真实内容变化仍须重取）。"""
+        base = {"gpu_temp_c": 45.0, "cpu_percent": 70.51}
+        e1 = handler_module._snapshot_etag(_content_payload(system=base))
+        e2 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "cpu_percent": 70.6}))
+        assert e1 == e2
+        e3 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "cpu_percent": 72.1}))
+        assert e3 != e1, "整数位变化属真实内容变化，必须失效 ETag"
+
+    def test_system_ram_subgb_jitter_same_etag(self):
+        """ram_used_gb 0.1GB 分辨率在活跃机常跨格 → 哈希按整数量化；
+        跨整 GB 仍失效。"""
+        base = {"gpu_temp_c": 45.0, "ram_used_gb": 96.1}
+        e1 = handler_module._snapshot_etag(_content_payload(system=base))
+        e2 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "ram_used_gb": 96.4}))
+        assert e1 == e2
+        e3 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "ram_used_gb": 101.2}))
+        assert e3 != e1
+
+    def test_system_gpu_values_still_invalidate(self):
+        """回归护栏：system 的 GPU 真值（rail 真显示）必须继续参与哈希。"""
+        base = {"gpu_temp_c": 45.0, "uptime_seconds": 100, "cpu_percent": 1.0}
+        e1 = handler_module._snapshot_etag(_content_payload(system=base))
+        e2 = handler_module._snapshot_etag(
+            _content_payload(system={**base, "gpu_temp_c": 46.0, "uptime_seconds": 101}))
+        assert e2 != e1
+
+    def test_real_system_info_uptime_tick_still_304(self, monkeypatch):
+        """集成：不桩 _system_info，真实两轮轮询（间隔 >1s，uptime 必然前进）
+        必须命中 304 —— F-A 的端到端回归（Mac 上 /proc 不可读时字段恒定，
+        同样成立）。"""
+        # 只冻结 loadavg/meminfo 两个仪表源（消除并行负载噪声）；uptime
+        # 保持真实读取 —— 本用例要证明的正是「uptime 走表不影响 304」。
+        import builtins, io
+        real_open = builtins.open
+        def _fake_open(path, *a, **k):
+            if path == "/proc/loadavg":
+                return io.StringIO("0.00 0.00 0.00 1/1 1\n")
+            if path == "/proc/meminfo":
+                return io.StringIO("MemTotal: 8000000 kB\nMemAvailable: 4000000 kB\n")
+            return real_open(path, *a, **k)
+        pm = _make_pm()
+        h1 = _make_real_handler()
+        monkeypatch.setattr(builtins, "open", _fake_open)
+        try:
+            h1._handle_snapshot(pm)
+            assert _last_status(h1) == 200
+            etag = _last_etag(h1)
+            time.sleep(1.05)   # uptime 至少 +1
+            h2 = _make_real_handler(headers={"If-None-Match": etag})
+            h2._handle_snapshot(pm)
+        finally:
+            monkeypatch.setattr(builtins, "open", real_open)
+        assert _last_status(h2) == 304, \
+            "真实 _system_info 下 uptime 走表不得破坏 304（F-A 回归）"
 
 
 class TestSampleAgeHeader:
